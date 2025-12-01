@@ -6,8 +6,11 @@
 import json
 import os
 from pathlib import Path
+import re
+import socket
 import subprocess
 import sys
+import tempfile
 import termios
 import threading
 from queue import Queue
@@ -53,6 +56,102 @@ ____/ /__  /_/ / /_/ / /_/ /  /|  / _  /  / / _  ___ |  ____/
 /____/ _  .___/\____/\____//_/ |_/  /_/  /_/  /_/  |_/_/
        /_/
     ''')
+
+def is_hostname(line):
+    """
+    Determine if a line is a hostname (not an IP address or CIDR range)
+
+    Args:
+        line: The line to check
+
+    Returns:
+        True if the line appears to be a hostname, False if it's an IP/CIDR
+    """
+    line = line.strip()
+    if not line or line.startswith('#'):
+        return False
+
+    # Check if it's a CIDR notation
+    if '/' in line:
+        return False
+
+    # Check if it's an IP address (simple regex)
+    ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+    if re.match(ip_pattern, line):
+        return False
+
+    # If it contains letters or is a domain-like string, treat as hostname
+    return True
+
+def resolve_hostname(hostname):
+    """
+    Resolve a hostname to an IP address
+
+    Args:
+        hostname: The hostname to resolve
+
+    Returns:
+        IP address string, or None if resolution fails
+    """
+    try:
+        ip = socket.gethostbyname(hostname.strip())
+        return ip
+    except (socket.gaierror, socket.herror, OSError) as e:
+        print('\x1b[31m' + f'Warning: Could not resolve hostname {hostname}: {e}' + '\x1b[0m')
+        return None
+
+def preprocess_targets(target_file, output_path):
+    """
+    Preprocess the target file to separate hostnames from IPs.
+    Creates a temporary file with IPs for masscan and a mapping file for NMAP.
+
+    Args:
+        target_file: Path to the original target file
+        output_path: Directory for output files
+
+    Returns:
+        Tuple of (masscan_target_file, ip_to_hostname_map)
+    """
+    ip_to_hostname = {}
+    masscan_targets = []
+
+    print('\x1b[33m' + 'Preprocessing target file...' + '\x1b[0m')
+
+    with open(target_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+
+            if is_hostname(line):
+                # Resolve hostname to IP
+                print(f'Resolving hostname: {line}')
+                ip = resolve_hostname(line)
+                if ip:
+                    print(f'  {line} -> {ip}')
+                    ip_to_hostname[ip] = line
+                    masscan_targets.append(ip)
+                else:
+                    print(f'  Skipping {line} (resolution failed)')
+            else:
+                # It's already an IP or CIDR, add as-is
+                masscan_targets.append(line)
+
+    # Create temporary file for masscan with IPs
+    masscan_file = f'{output_path}/masscan_targets.txt'
+    with open(masscan_file, 'w') as f:
+        for target in masscan_targets:
+            f.write(f'{target}\n')
+
+    # Save IP-to-hostname mapping
+    mapping_file = f'{output_path}/ip_hostname_map.json'
+    with open(mapping_file, 'w') as f:
+        json.dump(ip_to_hostname, f, indent=2)
+
+    print('\x1b[33m' + f'Resolved {len(ip_to_hostname)} hostnames to IPs' + '\x1b[0m')
+    print('\x1b[33m' + f'Masscan target file: {masscan_file}' + '\x1b[0m')
+
+    return masscan_file, ip_to_hostname
 
 def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusions_file):
     status_summary = '\nSummary'
@@ -153,7 +252,23 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
 
     return status_summary
 
-def nmap_worker(work_queue, completed_count, total_count, source_port, lock, interrupt_event):
+def create_hostname_target_file(ip_file, hostname_file, ip_to_hostname):
+    """
+    Create a hostname-based target file from an IP-based file
+
+    Args:
+        ip_file: Path to file containing IP addresses
+        hostname_file: Path to output file with hostnames
+        ip_to_hostname: Dictionary mapping IPs to hostnames
+    """
+    with open(ip_file, 'r') as inf, open(hostname_file, 'w') as outf:
+        for line in inf:
+            ip = line.strip()
+            # Use hostname if available, otherwise keep the IP
+            hostname = ip_to_hostname.get(ip, ip)
+            outf.write(f'{hostname}\n')
+
+def nmap_worker(work_queue, completed_count, total_count, source_port, lock, interrupt_event, ip_to_hostname):
     """Worker thread function to process NMAP scans from queue"""
     while not interrupt_event.is_set():
         try:
@@ -171,6 +286,12 @@ def nmap_worker(work_queue, completed_count, total_count, source_port, lock, int
             dest_port = ((host_file.split('.')[0])[4:])
             output_file = f'{output_path}/nmap_results/port{dest_port}.xml'
             input_file = f'{output_path}/live_hosts/port{dest_port}.txt'
+
+            # Create hostname-based target file if we have hostname mappings
+            if ip_to_hostname:
+                hostname_file = f'{output_path}/live_hosts/port{dest_port}_hostnames.txt'
+                create_hostname_target_file(input_file, hostname_file, ip_to_hostname)
+                input_file = hostname_file
 
             # Build command as list to prevent shell injection
             if 'U:' in dest_port:
@@ -235,14 +356,17 @@ def nmap_worker(work_queue, completed_count, total_count, source_port, lock, int
                 print('\x1b[31m' + f'Worker thread error: {e}' + '\x1b[0m')
             work_queue.task_done()
 
-def nmap_scan(source_port, max_threads=5):
+def nmap_scan(source_port, max_threads=5, ip_to_hostname=None):
     """
     Perform NMAP scans using multiple threads for efficiency
 
     Args:
         source_port: Source port to use for scans
         max_threads: Maximum number of concurrent NMAP scans (default: 5)
+        ip_to_hostname: Dictionary mapping IPs to hostnames (default: None)
     """
+    if ip_to_hostname is None:
+        ip_to_hostname = {}
     # Commence NMAP banner grabbing!
     os.makedirs(output_path+"/nmap_results", exist_ok=True)
 
@@ -278,7 +402,7 @@ def nmap_scan(source_port, max_threads=5):
         for _ in range(max_threads):
             thread = threading.Thread(
                 target=nmap_worker,
-                args=(work_queue, completed_count, total_count, source_port, lock, interrupt_event)
+                args=(work_queue, completed_count, total_count, source_port, lock, interrupt_event, ip_to_hostname)
             )
             thread.daemon = True
             thread.start()
@@ -530,11 +654,14 @@ def main():
         print(f'Exclusions File: {exclusions_file}')
         print(f'NMAP Concurrent Threads: {nmap_threads}\n')
 
-        status_summary = mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusions_file)
+        # Preprocess targets to handle hostnames
+        masscan_target_file, ip_to_hostname = preprocess_targets(target_file, output_path)
+
+        status_summary = mass_scan(scan_type, dest_ports, source_port, max_rate, masscan_target_file, exclusions_file)
 
         # If service banners requested, send to nmap
         if banner_scan or banner_scan == 'Yes':
-            nmap_scan(source_port, nmap_threads)
+            nmap_scan(source_port, nmap_threads, ip_to_hostname)
 
         # Combine all live hosts into one file
         all_ips = set()
