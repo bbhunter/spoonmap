@@ -153,7 +153,7 @@ def preprocess_targets(target_file, output_path):
 
     return masscan_file, ip_to_hostname
 
-def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusions_file):
+def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusions_file, batch_size=5):
     status_summary = '\nSummary'
 
     if not os.path.exists(f'{output_path}/masscan_results'):
@@ -162,16 +162,20 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
     # Track unique IPs per port in memory for efficiency
     port_ips = {}
 
-    for dest_port in dest_ports:
-        # Commence masscan!
-        print('\x1b[33m' + f'Scanning port {dest_port}...' + '\x1b[0m')
+    # Group ports into batches for fewer masscan invocations
+    batches = [dest_ports[i:i + batch_size] for i in range(0, len(dest_ports), batch_size)]
+    total_batches = len(batches)
 
-        output_file = f'{output_path}/masscan_results/port{dest_port}.xml'
+    for batch_idx, batch in enumerate(batches):
+        batch_label = ', '.join(batch)
+        print('\x1b[33m' + f'Scanning ports {batch_label}...' + '\x1b[0m')
+
+        output_file = f'{output_path}/masscan_results/batch_{batch_idx}.xml'
 
         # Build command as list to prevent shell injection
         masscan_cmd = [
             'masscan',
-            '-p', dest_port,
+            '-p', ','.join(batch),
             '--open',
             '--max-rate', max_rate,
             '--source-port', source_port,
@@ -209,46 +213,56 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
         if masscan_process.returncode == 1:
             quit(1)
 
-        # Parse results from masscan
+        # Parse results and distribute IPs to per-port sets
         try:
             if os.stat(output_file).st_size == 0:
                 os.remove(output_file)
-                print('\x1b[33m' + f'\nHosts Found on Port {dest_port}: 0')
-                print('Masscan Completion Status: ' + '{:.0%}'.format((dest_ports.index(dest_port) + 1) / len(dest_ports)) + '\x1b[0m')
+                print('\x1b[33m' + f'\nNo hosts found in batch {batch_idx + 1}/{total_batches} ({batch_label})')
+                print('Masscan Completion Status: ' + '{:.0%}'.format((batch_idx + 1) / total_batches) + '\x1b[0m')
             else:
                 root = etree.parse(output_file)
                 hosts = root.findall('host')
 
-                # Initialize set for this port if needed
-                live_port = dest_port
-                if live_port not in port_ips:
-                    port_ips[live_port] = set()
-                    # Load existing IPs from file if it exists
-                    live_host_file = f'{output_path}/live_hosts/port{live_port}.txt'
-                    if os.path.exists(live_host_file):
-                        with open(live_host_file, 'r') as file:
-                            port_ips[live_port].update(line.strip() for line in file if line.strip())
+                # Initialize sets for all ports in this batch, loading existing data for resume
+                for dest_port in batch:
+                    if dest_port not in port_ips:
+                        port_ips[dest_port] = set()
+                        live_host_file = f'{output_path}/live_hosts/port{dest_port}.txt'
+                        if os.path.exists(live_host_file):
+                            with open(live_host_file, 'r') as file:
+                                port_ips[dest_port].update(line.strip() for line in file if line.strip())
 
-                # Add new IPs to the set
+                # masscan outputs one <host> per (IP, port) pair; read the port from the XML
                 for host in hosts:
                     ip_address = host.findall('address')[0].attrib['addr']
-                    port_ips[live_port].add(ip_address)
+                    ports_elem = host.find('ports')
+                    if ports_elem is not None:
+                        port_elem = ports_elem.find('port')
+                        if port_elem is not None:
+                            protocol = port_elem.attrib.get('protocol', 'tcp')
+                            portid = port_elem.attrib.get('portid', '')
+                            port_key = f'U:{portid}' if protocol == 'udp' else portid
+                            if port_key in port_ips:
+                                port_ips[port_key].add(ip_address)
 
-                # Write all IPs for this port to file
-                os.makedirs(output_path+"/live_hosts", exist_ok=True)
-                with open(f'{output_path}/live_hosts/port{live_port}.txt', 'w') as file:
-                    for ip in sorted(port_ips[live_port]):
-                        file.write(f'{ip}\n')
+                # Write per-port live_hosts files (nmap_scan expects this layout)
+                os.makedirs(output_path + '/live_hosts', exist_ok=True)
+                for dest_port in batch:
+                    if port_ips.get(dest_port):
+                        with open(f'{output_path}/live_hosts/port{dest_port}.txt', 'w') as file:
+                            for ip in sorted(port_ips[dest_port]):
+                                file.write(f'{ip}\n')
+                        host_count = len(port_ips[dest_port])
+                        status_update = f'\nHosts Found on Port {dest_port}: {host_count}'
+                        status_summary += status_update
+                        print('\x1b[33m' + status_update + '\x1b[0m')
 
-                host_count = len(port_ips[live_port])
-                status_update = f'\nHosts Found on Port {dest_port}: {host_count}'
-                status_summary += status_update
-                print('\x1b[33m' + status_update)
-                print('Masscan Completion Status: ' + '{:.0%}'.format((dest_ports.index(dest_port) + 1) / len(dest_ports)) + '\x1b[0m')
+                print('\x1b[33m' + 'Masscan Completion Status: ' + '{:.0%}'.format((batch_idx + 1) / total_batches) + '\x1b[0m')
+
         except etree.ParseError as e:
-            print('\x1b[31m' + f'Error parsing XML for port {dest_port}: {e}' + '\x1b[0m')
+            print('\x1b[31m' + f'Error parsing XML for batch {batch_idx}: {e}' + '\x1b[0m')
         except Exception as e:
-            print('\x1b[31m' + f'Error processing results for port {dest_port}: {e}' + '\x1b[0m')
+            print('\x1b[31m' + f'Error processing results for batch {batch_idx}: {e}' + '\x1b[0m')
 
     return status_summary
 
@@ -498,6 +512,7 @@ def main():
         status_summary = ''
         output_path = ''
         nmap_threads = 5  # Default number of concurrent NMAP threads
+        masscan_batch_size = 5  # Default number of ports per masscan invocation
 
 
         # Get options from configuration file if it exists
@@ -533,7 +548,8 @@ def main():
             target_file = config_parser['target_file']
             output_path = config_parser['output_path']
             exclusions_file = config_parser['exclusions_file']
-            nmap_threads = config_parser.get('nmap_threads', 5)  # Get from config or use default
+            nmap_threads = config_parser.get('nmap_threads', 5)
+            masscan_batch_size = config_parser.get('masscan_batch_size', 5)
 
         if scan_type == '':
             category_names = list(SERVICE_CATEGORIES.keys())
@@ -673,12 +689,13 @@ def main():
         print(f'Masscan Max Packet Rate (pps): {max_rate}')
         print(f'Target File: {target_file}')
         print(f'Exclusions File: {exclusions_file}')
-        print(f'NMAP Concurrent Threads: {nmap_threads}\n')
+        print(f'NMAP Concurrent Threads: {nmap_threads}')
+        print(f'Masscan Batch Size: {masscan_batch_size}\n')
 
         # Preprocess targets to handle hostnames
         masscan_target_file, ip_to_hostname = preprocess_targets(target_file, output_path)
 
-        status_summary = mass_scan(scan_type, dest_ports, source_port, max_rate, masscan_target_file, exclusions_file)
+        status_summary = mass_scan(scan_type, dest_ports, source_port, max_rate, masscan_target_file, exclusions_file, masscan_batch_size)
 
         # If service banners requested, send to nmap
         if banner_scan or banner_scan == 'Yes':
