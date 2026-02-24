@@ -448,6 +448,34 @@ def lineCount(file):
         return 0
 
 
+SERVICE_CATEGORIES = {
+    'Web': [
+        '80', '443', '8000', '8080', '8081', '8443', '8888', '9090', '10443'
+    ],
+    'Database': [
+        '1433', 'U:1434', '1521', '3306', '5432', '6379', '9200', '27017'
+    ],
+    'Remote Management': [
+        '22', '23', '3389', '5900', '5901', '6129', '1723'
+    ],
+    'Email': [
+        '25', '110', '143', '465', '587', '993', '995'
+    ],
+    'Authentication': [
+        '389', '636', '445', '135', '139', 'U:137'
+    ],
+    'Network Infrastructure': [
+        '53', '179', '500', 'U:500', '161', 'U:161'
+    ],
+    'File Transfer': [
+        '21', '111'
+    ],
+    'Specialized': [
+        '1090', '3300', '4786', '6970'
+    ],
+}
+
+
 # The Main Guts
 def main():
     global dir_path
@@ -478,8 +506,23 @@ def main():
             with open(f'{dir_path}/config.json') as config:
                 config_parser = json.load(config)
 
-            scan_type = config_parser['scan_type']
-            dest_ports = config_parser['dest_ports']
+            scan_categories = config_parser.get('scan_categories', 'All')
+            if scan_categories == 'All' or scan_categories == ['All']:
+                scan_type = 'All'
+                all_ports = [p for cat in SERVICE_CATEGORIES.values() for p in cat]
+            elif isinstance(scan_categories, list):
+                valid = [c for c in scan_categories if c in SERVICE_CATEGORIES]
+                scan_type = ', '.join(valid)
+                all_ports = [p for name in valid for p in SERVICE_CATEGORIES[name]]
+            else:
+                all_ports = []
+            # UDP ports sorted to end of batch
+            dest_ports = [p for p in all_ports if not p.startswith('U:')] + \
+                         [p for p in all_ports if p.startswith('U:')]
+            # Allow dest_ports override for fully custom use
+            if config_parser.get('dest_ports'):
+                dest_ports = config_parser['dest_ports']
+                scan_type = 'Custom'
             banner_scan = config_parser['banner_scan']
             if banner_scan == 'True':
                 banner_scan = True
@@ -493,60 +536,38 @@ def main():
             nmap_threads = config_parser.get('nmap_threads', 5)  # Get from config or use default
 
         if scan_type == '':
-            scan_choice = '1'
+            category_names = list(SERVICE_CATEGORIES.keys())
             while True:
-                print('\nScan Type')
-                print('\t(1) Small Port Scan')
-                print('\t(2) Medium Port Scan')
-                print('\t(3) Large Port Scan')
-                print('\t(4) Extra Large Port Scan (Small, Medium, and Large)')
-                print('\t(5) Full Port Scan')
-                print('\t(6) Custom Port Scan')
-                scan_choice = input(
-                    f'\nWhat type of scan would you like to perform (default: Small Port Scan)? '
-                    ) or scan_choice
-                if scan_choice == '1':
-                    scan_type = 'Small Port Scan'
-                    break
-                elif scan_choice == '2':
-                    scan_type = 'Medium Port Scan'
-                    break
-                elif scan_choice == '3':
-                    scan_type = 'Large Port Scan'
-                    break
-                elif scan_choice == '4':
-                    scan_type = 'Extra Large Port Scan'
-                    break
-                elif scan_choice == '5':
-                    scan_type = 'Full Port Scan'
-                    break
-                elif scan_choice == '6':
-                    scan_type = 'Custom Port Scan'
+                print('\nService Categories (comma-separated numbers, default: All)')
+                for i, name in enumerate(category_names, 1):
+                    ports = SERVICE_CATEGORIES[name]
+                    print(f'\t({i}) {name}  [{", ".join(ports)}]')
+
+                selection = input(
+                    f'\nWhich categories would you like to scan (e.g. 1,3 — default: All)? '
+                ).strip()
+
+                if not selection:
+                    # Default: all categories
+                    scan_type = 'All'
+                    all_ports = [p for cat in SERVICE_CATEGORIES.values() for p in cat]
+                    dest_ports = [p for p in all_ports if not p.startswith('U:')] + \
+                                 [p for p in all_ports if p.startswith('U:')]
                     break
 
-        small_ports = ['80', '443', '8000', '8080', '8008', '8181', '8443']
-        medium_ports = ['7001', '1433', '445', '139', '21', '22', '23', '25', 
-                    '53', '111', '389', '4243', '3389', '3306', '4786', 
-                    '5900', '5901', '5985', '5986', '6379', '6970', '9100']
-        large_ports = ['1090', '1098', '1099', '10999', '11099', '11111', 
-                    '3300', '4444', '4445', '45000', '45001', '47001', 
-                    '47002', '4848', '50500', '5555', '5556', '6129', 
-                    '7000', '7002', '7003', '7004', '7070', '7071', 
-                    '8001', '8002', '8003', '8686', '9000', 
-                    '9001', '9002', '9003', '9012', '9503']
-        if scan_type == 'Small Port Scan':
-            dest_ports = small_ports
-        elif scan_type == 'Medium Port Scan':
-            dest_ports = medium_ports
-        elif scan_type == 'Large Port Scan':
-            dest_ports = large_ports
-        elif scan_type == 'Extra Large Port Scan':
-            dest_ports = small_ports + medium_ports + large_ports
-        elif scan_type == 'Full Port Scan':
-            dest_ports = ['1-65535']
-        elif scan_type == 'Custom Port Scan' and not dest_ports:
-            dest_ports = input(
-                '\nWhat ports would you like to scan (separated by space: 80 443)? ').split()
+                # Parse comma-separated indices
+                try:
+                    indices = [int(x.strip()) for x in selection.split(',')]
+                    if all(1 <= i <= len(category_names) for i in indices):
+                        selected = [category_names[i - 1] for i in indices]
+                        scan_type = ', '.join(selected)
+                        all_ports = [p for name in selected for p in SERVICE_CATEGORIES[name]]
+                        dest_ports = [p for p in all_ports if not p.startswith('U:')] + \
+                                     [p for p in all_ports if p.startswith('U:')]
+                        break
+                except ValueError:
+                    pass
+                # Invalid input — loop again
 
         if banner_scan == '':
             banner_choice = 1
