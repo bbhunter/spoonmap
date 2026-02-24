@@ -616,16 +616,10 @@ def main():
                     break
 
         if not max_rate:
-            if target_scan == "External" and scan_type == "Small Port Scan":
-                max_rate = '20000'
-            elif target_scan == "External" and scan_type == "Full Port Scan":
+            if target_scan == "External":
                 max_rate = '10000'
-            elif target_scan == "Internal" and scan_type == "Small Port Scan":
-                max_rate = '2000'
-            elif target_scan == "Internal" and scan_type == "Full Port Scan":
-                max_rate = '1000'
             else:
-                max_rate = '2000'
+                max_rate = '1000'
             while True:
                 try:
                     rate_choice = input(f'\nHow fast would you like to scan '
