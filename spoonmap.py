@@ -153,6 +153,77 @@ def preprocess_targets(target_file, output_path):
 
     return masscan_file, ip_to_hostname
 
+def _run_masscan_batch(batch, rate, output_file, target_file, source_port, exclusions_file):
+    """Run masscan for one batch and return {port_key: set_of_ips}."""
+    masscan_cmd = [
+        'masscan',
+        '-p', ','.join(batch),
+        '--open',
+        '--max-rate', rate,
+        '--source-port', source_port,
+        '-iL', target_file,
+        '-oX', output_file
+    ]
+
+    if exclusions_file:
+        masscan_cmd.extend(['--excludefile', exclusions_file])
+
+    term_state = save_terminal_state()
+
+    try:
+        masscan_process = subprocess.Popen(masscan_cmd)
+        masscan_process.wait()
+    except KeyboardInterrupt:
+        print(f'Killing PID {str(masscan_process.pid)}...')
+        masscan_process.kill()
+        masscan_process.wait()
+        restore_terminal_state(term_state)
+        raise
+    except FileNotFoundError:
+        print('\x1b[31m' + 'Error: masscan not found. Please install masscan.' + '\x1b[0m')
+        restore_terminal_state(term_state)
+        quit(1)
+    except Exception as e:
+        print('\x1b[31m' + f'Error running masscan: {e}' + '\x1b[0m')
+        restore_terminal_state(term_state)
+        quit(1)
+    finally:
+        restore_terminal_state(term_state)
+
+    if masscan_process.returncode == 1:
+        quit(1)
+
+    if not os.path.exists(output_file) or os.stat(output_file).st_size == 0:
+        return {}
+
+    results = {}
+    try:
+        root = etree.parse(output_file)
+        for host in root.findall('host'):
+            ip_address = host.findall('address')[0].attrib['addr']
+            ports_elem = host.find('ports')
+            if ports_elem is not None:
+                port_elem = ports_elem.find('port')
+                if port_elem is not None:
+                    protocol = port_elem.attrib.get('protocol', 'tcp')
+                    portid = port_elem.attrib.get('portid', '')
+                    port_key = f'U:{portid}' if protocol == 'udp' else portid
+                    results.setdefault(port_key, set()).add(ip_address)
+    except etree.ParseError as e:
+        print('\x1b[31m' + f'Error parsing masscan XML: {e}' + '\x1b[0m')
+
+    return results
+
+
+def _select_probe_ports(dest_ports, max_ports=5):
+    """Return up to max_ports high-probability ports from dest_ports."""
+    dest_set = set(dest_ports)
+    probe = [p for p in PROBE_PORT_PRIORITY if p in dest_set][:max_ports]
+    if not probe:
+        probe = list(dest_ports[:max_ports])
+    return probe
+
+
 def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusions_file, batch_size=5):
     status_summary = '\nSummary'
 
@@ -162,8 +233,51 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
     # Track unique IPs per port in memory for efficiency
     port_ips = {}
 
-    # Group ports into batches for fewer masscan invocations
-    batches = [dest_ports[i:i + batch_size] for i in range(0, len(dest_ports), batch_size)]
+    effective_rate = max_rate
+
+    probe_ports = _select_probe_ports(dest_ports)
+    probe_set = set(probe_ports)
+    remaining_ports = [p for p in dest_ports if p not in probe_set]
+
+    # Only run probe when there are additional ports beyond the probe set
+    if probe_ports and remaining_ports:
+        half_rate = str(max(1, int(max_rate) // 2))
+        probe_label = ', '.join(probe_ports)
+        print('\x1b[33m' + f'Probe: scanning {probe_label} at {max_rate} pps then {half_rate} pps to check for packet loss...' + '\x1b[0m')
+        fast_results = _run_masscan_batch(probe_ports, max_rate,
+            f'{output_path}/masscan_results/probe_fast.xml', target_file, source_port, exclusions_file)
+        slow_results = _run_masscan_batch(probe_ports, half_rate,
+            f'{output_path}/masscan_results/probe_slow.xml', target_file, source_port, exclusions_file)
+
+        fast_ips = {ip for s in fast_results.values() for ip in s}
+        slow_ips = {ip for s in slow_results.values() for ip in s}
+        new_ips = slow_ips - fast_ips
+
+        if new_ips:
+            print('\x1b[33m' + f'Probe found {len(new_ips)} additional host(s) at {half_rate} pps — switching to reduced rate for all batches.' + '\x1b[0m')
+            effective_rate = half_rate
+        else:
+            print('\x1b[33m' + f'Probe found no additional hosts — continuing at {max_rate} pps.' + '\x1b[0m')
+
+        # Merge probe results into port_ips and write live_hosts files now
+        os.makedirs(output_path + '/live_hosts', exist_ok=True)
+        for port_key in probe_ports:
+            combined = fast_results.get(port_key, set()) | slow_results.get(port_key, set())
+            if combined:
+                port_ips[port_key] = combined
+                with open(f'{output_path}/live_hosts/port{port_key}.txt', 'w') as f:
+                    for ip in sorted(combined):
+                        f.write(f'{ip}\n')
+                host_count = len(combined)
+                status_update = f'\nHosts Found on Port {port_key}: {host_count}'
+                status_summary += status_update
+                print('\x1b[33m' + status_update + '\x1b[0m')
+
+        ports_to_batch = remaining_ports
+    else:
+        ports_to_batch = dest_ports  # no probe: batch all ports normally
+
+    batches = [ports_to_batch[i:i + batch_size] for i in range(0, len(ports_to_batch), batch_size)]
     total_batches = len(batches)
 
     for batch_idx, batch in enumerate(batches):
@@ -172,97 +286,39 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
 
         output_file = f'{output_path}/masscan_results/batch_{batch_idx}.xml'
 
-        # Build command as list to prevent shell injection
-        masscan_cmd = [
-            'masscan',
-            '-p', ','.join(batch),
-            '--open',
-            '--max-rate', max_rate,
-            '--source-port', source_port,
-            '-iL', target_file,
-            '-oX', output_file
-        ]
+        batch_results = _run_masscan_batch(batch, effective_rate, output_file, target_file, source_port, exclusions_file)
 
-        if exclusions_file:
-            masscan_cmd.extend(['--excludefile', exclusions_file])
+        if not batch_results:
+            print('\x1b[33m' + f'\nNo hosts found in batch {batch_idx + 1}/{total_batches} ({batch_label})')
+            print('Masscan Completion Status: ' + '{:.0%}'.format((batch_idx + 1) / total_batches) + '\x1b[0m')
+        else:
+            # Initialize sets for all ports in this batch, loading existing data for resume
+            for dest_port in batch:
+                if dest_port not in port_ips:
+                    port_ips[dest_port] = set()
+                    live_host_file = f'{output_path}/live_hosts/port{dest_port}.txt'
+                    if os.path.exists(live_host_file):
+                        with open(live_host_file, 'r') as file:
+                            port_ips[dest_port].update(line.strip() for line in file if line.strip())
 
-        # Save terminal state before running masscan
-        term_state = save_terminal_state()
+            # Merge batch results into port_ips
+            for port_key, ips in batch_results.items():
+                if port_key in port_ips:
+                    port_ips[port_key].update(ips)
 
-        try:
-            masscan_process = subprocess.Popen(masscan_cmd)
-            masscan_process.wait()
-        except KeyboardInterrupt:
-            print(f'Killing PID {str(masscan_process.pid)}...')
-            masscan_process.kill()
-            masscan_process.wait()
-            restore_terminal_state(term_state)
-            raise
-        except FileNotFoundError:
-            print('\x1b[31m' + 'Error: masscan not found. Please install masscan.' + '\x1b[0m')
-            restore_terminal_state(term_state)
-            quit(1)
-        except Exception as e:
-            print('\x1b[31m' + f'Error running masscan: {e}' + '\x1b[0m')
-            restore_terminal_state(term_state)
-            quit(1)
-        finally:
-            # Always restore terminal state after process completes
-            restore_terminal_state(term_state)
+            # Write per-port live_hosts files (nmap_scan expects this layout)
+            os.makedirs(output_path + '/live_hosts', exist_ok=True)
+            for dest_port in batch:
+                if port_ips.get(dest_port):
+                    with open(f'{output_path}/live_hosts/port{dest_port}.txt', 'w') as file:
+                        for ip in sorted(port_ips[dest_port]):
+                            file.write(f'{ip}\n')
+                    host_count = len(port_ips[dest_port])
+                    status_update = f'\nHosts Found on Port {dest_port}: {host_count}'
+                    status_summary += status_update
+                    print('\x1b[33m' + status_update + '\x1b[0m')
 
-        if masscan_process.returncode == 1:
-            quit(1)
-
-        # Parse results and distribute IPs to per-port sets
-        try:
-            if os.stat(output_file).st_size == 0:
-                os.remove(output_file)
-                print('\x1b[33m' + f'\nNo hosts found in batch {batch_idx + 1}/{total_batches} ({batch_label})')
-                print('Masscan Completion Status: ' + '{:.0%}'.format((batch_idx + 1) / total_batches) + '\x1b[0m')
-            else:
-                root = etree.parse(output_file)
-                hosts = root.findall('host')
-
-                # Initialize sets for all ports in this batch, loading existing data for resume
-                for dest_port in batch:
-                    if dest_port not in port_ips:
-                        port_ips[dest_port] = set()
-                        live_host_file = f'{output_path}/live_hosts/port{dest_port}.txt'
-                        if os.path.exists(live_host_file):
-                            with open(live_host_file, 'r') as file:
-                                port_ips[dest_port].update(line.strip() for line in file if line.strip())
-
-                # masscan outputs one <host> per (IP, port) pair; read the port from the XML
-                for host in hosts:
-                    ip_address = host.findall('address')[0].attrib['addr']
-                    ports_elem = host.find('ports')
-                    if ports_elem is not None:
-                        port_elem = ports_elem.find('port')
-                        if port_elem is not None:
-                            protocol = port_elem.attrib.get('protocol', 'tcp')
-                            portid = port_elem.attrib.get('portid', '')
-                            port_key = f'U:{portid}' if protocol == 'udp' else portid
-                            if port_key in port_ips:
-                                port_ips[port_key].add(ip_address)
-
-                # Write per-port live_hosts files (nmap_scan expects this layout)
-                os.makedirs(output_path + '/live_hosts', exist_ok=True)
-                for dest_port in batch:
-                    if port_ips.get(dest_port):
-                        with open(f'{output_path}/live_hosts/port{dest_port}.txt', 'w') as file:
-                            for ip in sorted(port_ips[dest_port]):
-                                file.write(f'{ip}\n')
-                        host_count = len(port_ips[dest_port])
-                        status_update = f'\nHosts Found on Port {dest_port}: {host_count}'
-                        status_summary += status_update
-                        print('\x1b[33m' + status_update + '\x1b[0m')
-
-                print('\x1b[33m' + 'Masscan Completion Status: ' + '{:.0%}'.format((batch_idx + 1) / total_batches) + '\x1b[0m')
-
-        except etree.ParseError as e:
-            print('\x1b[31m' + f'Error parsing XML for batch {batch_idx}: {e}' + '\x1b[0m')
-        except Exception as e:
-            print('\x1b[31m' + f'Error processing results for batch {batch_idx}: {e}' + '\x1b[0m')
+            print('\x1b[33m' + 'Masscan Completion Status: ' + '{:.0%}'.format((batch_idx + 1) / total_batches) + '\x1b[0m')
 
     return status_summary
 
@@ -461,6 +517,19 @@ def lineCount(file):
         print('\x1b[31m' + f'Warning: Error reading file {file}: {e}' + '\x1b[0m')
         return 0
 
+
+PROBE_PORT_PRIORITY = [
+    '445',   # SMB — near-universal on Windows networks
+    '3389',  # RDP — very common on Windows
+    '80',    # HTTP — universal
+    '443',   # HTTPS — universal
+    '22',    # SSH — universal on Linux/network gear
+    '135',   # RPC — common on Windows
+    '139',   # NetBIOS — common on Windows
+    '53',    # DNS — present on many infrastructure hosts
+    '25',    # SMTP — common on mail servers
+    '8080',  # Alternate HTTP — common
+]
 
 SERVICE_CATEGORIES = {
     'Web': [
