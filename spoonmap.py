@@ -1303,7 +1303,7 @@ def _write_findings_txt(output_path, target_scan, findings):
             lines.append(f'  [{title}]  port {port_str}')
             lines.append(f'  Affected hosts ({len(hosts)}):')
             for h in sorted(hosts):
-                lines.append(f'    {h}')
+                lines.append(h)
             lines.append('')
             if repro:
                 cmd = _build_repro_cmd(title, port_str, hosts[0])
@@ -1346,6 +1346,39 @@ def _write_findings_md(output_path, target_scan, findings):
         fh.write('\n'.join(lines) + '\n')
 
 
+def _cleanup_cmd(dir_path):
+    """Handle --cleanup: remove prior scan output from output_path and exit."""
+    idx = sys.argv.index('--cleanup')
+    cleanup_path = None
+    if idx + 1 < len(sys.argv) and not sys.argv[idx + 1].startswith('-'):
+        cleanup_path = sys.argv[idx + 1]
+    else:
+        cfg_file = os.path.join(dir_path, 'config.json')
+        if os.path.exists(cfg_file):
+            with open(cfg_file) as fh:
+                cfg = json.load(fh)
+            cleanup_path = cfg.get('output_path', '')
+            if cleanup_path and not os.path.isabs(cleanup_path):
+                cleanup_path = os.path.join(dir_path, cleanup_path)
+
+    if not cleanup_path:
+        print('Usage: spoonmap.py --cleanup [output_path]')
+        print('  output_path defaults to output_path in config.json')
+        sys.exit(1)
+
+    if not os.path.isdir(cleanup_path):
+        print(f'Directory not found: {cleanup_path}')
+        sys.exit(1)
+
+    if not _previous_results_exist(cleanup_path):
+        print(f'No scan data found in {cleanup_path}')
+        sys.exit(0)
+
+    _delete_previous_results(cleanup_path)
+    print(f'Scan data removed from {cleanup_path}')
+    sys.exit(0)
+
+
 # The Main Guts
 def main():
     global dir_path
@@ -1374,6 +1407,9 @@ def main():
 
         # Get options from configuration file if it exists
         dir_path = os.path.dirname(os.path.realpath(__file__))
+
+        if '--cleanup' in sys.argv:
+            _cleanup_cmd(dir_path)  # prints result and exits
         if os.path.exists(f'{dir_path}/config.json'):
             with open(f'{dir_path}/config.json') as config:
                 config_parser = json.load(config)

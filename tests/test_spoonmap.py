@@ -8,6 +8,7 @@ import pytest
 import spoonmap
 from spoonmap import (
     SERVICE_CATEGORIES,
+    _cleanup_cmd,
     _delete_previous_results,
     _get_scripts_for_port,
     _previous_results_exist,
@@ -760,3 +761,57 @@ class TestConfigFullScanCategory:
         scan_type, dest_ports = self._resolve('All')
         assert scan_type == 'All'
         assert '1-65535' not in dest_ports
+
+
+# ── _cleanup_cmd ──────────────────────────────────────────────────────────────
+
+class TestCleanupCmd:
+    def _make_scan_data(self, tmp_path):
+        """Populate tmp_path with representative scan output."""
+        (tmp_path / 'nmap_results').mkdir()
+        (tmp_path / 'nmap_results' / 'port445.xml').write_text('<nmaprun/>')
+        (tmp_path / 'findings.txt').write_text('findings')
+        (tmp_path / 'all_live_hosts.txt').write_text('10.0.0.1\n')
+
+    def test_cleanup_with_explicit_path(self, tmp_path, capsys):
+        self._make_scan_data(tmp_path)
+        with patch('sys.argv', ['spoonmap.py', '--cleanup', str(tmp_path)]):
+            with pytest.raises(SystemExit) as exc:
+                _cleanup_cmd(str(tmp_path))
+        assert exc.value.code == 0
+        assert not (tmp_path / 'nmap_results').exists()
+        assert not (tmp_path / 'findings.txt').exists()
+        assert 'removed' in capsys.readouterr().out
+
+    def test_cleanup_uses_config_json_path(self, tmp_path, capsys):
+        out_dir = tmp_path / 'output'
+        out_dir.mkdir()
+        self._make_scan_data(out_dir)
+        cfg = tmp_path / 'config.json'
+        cfg.write_text(f'{{"output_path": "{out_dir}"}}')
+        with patch('sys.argv', ['spoonmap.py', '--cleanup']):
+            with pytest.raises(SystemExit) as exc:
+                _cleanup_cmd(str(tmp_path))
+        assert exc.value.code == 0
+        assert not _previous_results_exist(str(out_dir))
+
+    def test_cleanup_no_data_exits_cleanly(self, tmp_path, capsys):
+        with patch('sys.argv', ['spoonmap.py', '--cleanup', str(tmp_path)]):
+            with pytest.raises(SystemExit) as exc:
+                _cleanup_cmd(str(tmp_path))
+        assert exc.value.code == 0
+        assert 'No scan data' in capsys.readouterr().out
+
+    def test_cleanup_missing_dir_exits_error(self, tmp_path, capsys):
+        missing = str(tmp_path / 'nonexistent')
+        with patch('sys.argv', ['spoonmap.py', '--cleanup', missing]):
+            with pytest.raises(SystemExit) as exc:
+                _cleanup_cmd(str(tmp_path))
+        assert exc.value.code == 1
+
+    def test_cleanup_no_path_no_config_exits_error(self, tmp_path, capsys):
+        with patch('sys.argv', ['spoonmap.py', '--cleanup']):
+            with pytest.raises(SystemExit) as exc:
+                _cleanup_cmd(str(tmp_path))
+        assert exc.value.code == 1
+        assert 'Usage' in capsys.readouterr().out
