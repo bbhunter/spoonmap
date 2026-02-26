@@ -27,8 +27,9 @@ Service Categories (comma-separated numbers, default: All)
 	(5) Authentication     [389, 636, 445, 135, 139, U:137]
 	(6) Network Infrastructure  [53, 179, 500, U:500, 161, U:161]
 	(7) File Transfer      [21, 111]
-	(8) Specialized  [1090, 3300, 4786, 6970, 2375, 4243]
+	(8) Specialized  [1090, 3300, 4786, 6970, 2375, 4243, 9100]
 	(9) Full Port Scan  [1-65535]
+	(c) Custom Port Scan  [enter your own comma-separated ports]
 
 Which categories would you like to scan (e.g. 1,3 — default: All)?
 
@@ -127,11 +128,11 @@ Rates that are too high can create a denial-of-service condition — use caution
 
 When `script_scan` is enabled, nmap runs targeted NSE scripts against relevant ports. Scripts are chosen based on scan type (External vs Internal):
 
-**External scans** run: `ftp-anon`, `ssh-auth-methods`, `ssh2-enum-algos`, `*-ntlm-info`, `ssl-cert`, `ms-sql-ntlm-info`, `rdp-ntlm-info`, `docker-version`, `snmp-brute`, `snmp-sysdescr`
+**External scans** run: `ftp-anon`, `ssh-auth-methods`, `ssh2-enum-algos`, `*-ntlm-info`, `ssl-cert`, `ms-sql-ntlm-info`, `rdp-ntlm-info`, `docker-version`, `snmp-brute`
 
-**Internal scans** run: `ftp-anon`, `rpcinfo`, `nfs-showmount`, `nfs-ls`, `smb-security-mode`, `smb2-security-mode`, `smb-vuln-ms17-010`, `smb-vuln-ms08-067`, `smb-double-pulsar-backdoor`, `smb-vuln-cve-2017-7494`, `rmi-dumpregistry`, `ms-sql-info`, `rdp-enum-encryption`, `rdp-vuln-ms12-020`, `docker-version`, `snmp-brute`, `snmp-sysdescr`
+**Internal scans** run: `ftp-anon`, `rpcinfo`, `nfs-showmount`, `nfs-ls`, `smb-security-mode`, `smb2-security-mode`, `smb-vuln-ms17-010`, `smb-vuln-ms08-067`, `smb-double-pulsar-backdoor`, `smb-vuln-cve-2017-7494`, `rmi-dumpregistry`, `ms-sql-info`, `rdp-enum-encryption`, `rdp-vuln-ms12-020`, `docker-version`, `snmp-brute`
 
-`snmp-sysdescr` reads the device's SNMP sysDescr string and is used to identify printers. SNMP and anonymous FTP findings are suppressed for printer devices to reduce noise.
+Port 9100 (JetDirect raw printing protocol) is included in the Specialized category. Hosts with port 9100 open are identified as printers; SNMP default community string and anonymous FTP findings are suppressed for these hosts to reduce noise.
 
 After scanning, `generate_findings()` parses all nmap XML results and produces severity-sorted `findings.txt` and `findings.md` reports. Findings include:
 

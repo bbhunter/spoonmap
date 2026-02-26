@@ -13,7 +13,6 @@ from spoonmap import (
     _cleanup_cmd,
     _delete_previous_results,
     _get_scripts_for_port,
-    _is_printer,
     _previous_results_exist,
     _select_probe_ports,
     _write_findings_md,
@@ -370,14 +369,6 @@ class TestGenerateFindings:
     def test_anonymous_ftp_not_triggered_when_denied(self, nmap_dir):
         xml = _nmap_xml('10.0.0.1', 'tcp', '21',
                         scripts={'ftp-anon': 'Anonymous FTP login not allowed'})
-        (nmap_dir / 'nmap_results' / 'port21.xml').write_text(xml)
-        generate_findings(str(nmap_dir), 'Internal')
-        assert 'Anonymous FTP' not in (nmap_dir / 'findings.txt').read_text()
-
-    def test_anonymous_ftp_suppressed_for_printer(self, nmap_dir):
-        xml = _nmap_xml('10.0.0.2', 'tcp', '21',
-                        scripts={'ftp-anon': 'Anonymous FTP login allowed'},
-                        service_attrs={'name': 'ftp', 'product': 'HP JetDirect'})
         (nmap_dir / 'nmap_results' / 'port21.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         assert 'Anonymous FTP' not in (nmap_dir / 'findings.txt').read_text()
@@ -792,6 +783,9 @@ class TestPreviousResults:
 # ── SERVICE_CATEGORIES docker ports ───────────────────────────────────────────
 
 class TestServiceCategoriesDockerPorts:
+    def test_specialized_includes_port_9100(self):
+        assert '9100' in SERVICE_CATEGORIES['Specialized']
+
     def test_specialized_includes_docker_port_2375(self):
         assert '2375' in SERVICE_CATEGORIES['Specialized']
 
@@ -935,56 +929,6 @@ class TestCleanupCmd:
         assert 'Usage' in capsys.readouterr().out
 
 
-# ── _is_printer ───────────────────────────────────────────────────────────────
-
-import xml.etree.ElementTree as _etree
-
-
-def _port_elem_with_service(**service_attrs):
-    """Build a minimal <port> element with an optional <service> child."""
-    attrs_str = ' '.join(f'{k}="{v}"' for k, v in service_attrs.items())
-    xml_str = f'<port protocol="udp" portid="161"><service {attrs_str}/></port>'
-    return _etree.fromstring(xml_str)
-
-
-class TestIsPrinter:
-    def test_devicetype_printer_detected(self):
-        elem = _port_elem_with_service(name='snmp', devicetype='printer')
-        assert _is_printer(elem) is True
-
-    def test_printer_keyword_in_product(self):
-        elem = _port_elem_with_service(name='snmp', product='HP JetDirect')
-        assert _is_printer(elem) is True
-
-    def test_laserjet_in_product(self):
-        elem = _port_elem_with_service(name='snmp', product='HP LaserJet 4350')
-        assert _is_printer(elem) is True
-
-    def test_non_printer_not_flagged(self):
-        elem = _port_elem_with_service(name='snmp', product='Net-SNMP', devicetype='')
-        assert _is_printer(elem) is False
-
-    def test_no_service_elem_not_flagged(self):
-        elem = _etree.fromstring('<port protocol="udp" portid="161"/>')
-        assert _is_printer(elem) is False
-
-    def test_sysdescr_jetdirect_detected(self):
-        xml_str = (
-            '<port protocol="udp" portid="161">'
-            '<script id="snmp-sysdescr" output="HP ETHERNET MULTI-ENVIRONMENT,ROM D.22.14,JETDIRECT,JD170"/>'
-            '</port>'
-        )
-        assert _is_printer(_etree.fromstring(xml_str)) is True
-
-    def test_sysdescr_non_printer_not_flagged(self):
-        xml_str = (
-            '<port protocol="udp" portid="161">'
-            '<script id="snmp-sysdescr" output="Linux router 5.4.0"/>'
-            '</port>'
-        )
-        assert _is_printer(_etree.fromstring(xml_str)) is False
-
-
 # ── snmp-brute finding ────────────────────────────────────────────────────────
 
 class TestSnmpBruteFinding:
@@ -1010,30 +954,6 @@ class TestSnmpBruteFinding:
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'public' in content
         assert 'private' in content
-
-    def test_snmp_brute_suppressed_for_printer(self, nmap_dir):
-        xml = _nmap_xml(
-            '10.0.0.10', 'udp', '161',
-            scripts={'snmp-brute': 'public - Valid credentials'},
-            service_attrs={'name': 'snmp', 'devicetype': 'printer'},
-        )
-        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
-        generate_findings(str(nmap_dir), 'Internal')
-        content = (nmap_dir / 'findings.txt').read_text()
-        assert 'SNMP Default Community String' not in content
-
-    def test_snmp_brute_suppressed_via_sysdescr(self, nmap_dir):
-        xml = _nmap_xml(
-            '10.0.0.11', 'udp', '161',
-            scripts={
-                'snmp-brute': 'public - Valid credentials',
-                'snmp-sysdescr': 'HP ETHERNET MULTI-ENVIRONMENT,ROM D.22.14,JETDIRECT,JD170',
-            },
-        )
-        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
-        generate_findings(str(nmap_dir), 'Internal')
-        content = (nmap_dir / 'findings.txt').read_text()
-        assert 'SNMP Default Community String' not in content
 
     def test_snmp_brute_suppressed_via_port_9100(self, nmap_dir):
         (nmap_dir / 'live_hosts').mkdir()

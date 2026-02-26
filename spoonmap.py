@@ -611,8 +611,8 @@ EXTERNAL_PORT_SCRIPTS = {
     '25':    'smtp-ntlm-info',
     '110':   'pop3-ntlm-info',
     '143':   'imap-ntlm-info',
-    '161':   'snmp-brute,snmp-sysdescr',
-    'U:161': 'snmp-brute,snmp-sysdescr',
+    '161':   'snmp-brute',
+    'U:161': 'snmp-brute',
     '443':   'ssl-cert',
     '465':   'smtp-ntlm-info,ssl-cert',
     '587':   'smtp-ntlm-info',
@@ -640,8 +640,8 @@ INTERNAL_PORT_SCRIPTS = {
     '1433':  'ms-sql-info',
     '3389':  'rdp-enum-encryption,rdp-vuln-ms12-020',
     '4786':  f'{_DIR}/nse/cisco-siet.nse',
-    '161':   'snmp-brute,snmp-sysdescr',
-    'U:161': 'snmp-brute,snmp-sysdescr',
+    '161':   'snmp-brute',
+    'U:161': 'snmp-brute',
     'U:1434': 'ms-sql-info',
 }
 
@@ -705,7 +705,7 @@ SERVICE_CATEGORIES = {
         '21', '111'
     ],
     'Specialized': [
-        '1090', '3300', '4786', '6970', '2375', '4243'
+        '1090', '3300', '4786', '6970', '2375', '4243', '9100'
     ],
 }
 
@@ -756,30 +756,6 @@ def _scan_extra_sql_ports(output_path, source_port):
 SEVERITY_ORDER = ['CRITICAL', 'HIGH', 'MEDIUM', 'INFO']
 
 
-_PRINTER_KEYWORDS = frozenset([
-    'hp jetdirect', 'jetdirect', 'laserjet', 'xerox', 'canon', 'epson',
-    'kyocera', 'ricoh', 'brother', 'lexmark', 'konica', 'minolta',
-    'sharp', 'oki ', 'toshiba e-studio',
-])
-
-
-def _is_printer(port_elem):
-    """Return True if the service on this port is identified as a printer."""
-    svc = port_elem.find('service')
-    if svc is not None:
-        if svc.attrib.get('devicetype', '').lower() == 'printer':
-            return True
-        product = svc.attrib.get('product', '').lower()
-        if any(kw in product for kw in _PRINTER_KEYWORDS):
-            return True
-    for script in port_elem.findall('script'):
-        if script.attrib.get('id') == 'snmp-sysdescr':
-            sysdescr = script.attrib.get('output', '').lower()
-            if any(kw in sysdescr for kw in _PRINTER_KEYWORDS):
-                return True
-    return False
-
-
 def generate_findings(output_path, target_scan):
     """Parse nmap script output and write findings.txt and findings.md."""
     nmap_dir = f'{output_path}/nmap_results'
@@ -816,9 +792,6 @@ def generate_findings(output_path, target_scan):
                 if ip:
                     printer_ips.add(ip)
 
-    def is_printer_host(ip, port_elem):
-        return ip in printer_ips or _is_printer(port_elem)
-
     # ── parse every nmap XML result file ─────────────────────────────────────
     open_ports_by_host = {}  # {ip: [port_key, ...]} — for external exposure check
 
@@ -849,7 +822,7 @@ def generate_findings(output_path, target_scan):
                 scripts  = scripts_for_elem(port_elem)
 
                 # ── ftp-anon ─────────────────────────────────────────────
-                if 'ftp-anon' in scripts and not is_printer_host(ip, port_elem):
+                if 'ftp-anon' in scripts and ip not in printer_ips:
                     out = scripts['ftp-anon']
                     if 'Anonymous FTP login allowed' in out:
                         add('HIGH', ip, port_str, 'Anonymous FTP',
@@ -977,7 +950,7 @@ def generate_findings(output_path, target_scan):
                                 f'Certificate expired on {expiry}.')
 
                 # ── snmp-brute (skip printers) ────────────────────────────
-                if 'snmp-brute' in scripts and not is_printer_host(ip, port_elem):
+                if 'snmp-brute' in scripts and ip not in printer_ips:
                     out = scripts['snmp-brute']
                     if 'Valid credentials' in out:
                         communities = re.findall(r'(\S+)\s+-\s+Valid credentials', out)
@@ -1589,6 +1562,7 @@ def main():
                     ports = SERVICE_CATEGORIES[name]
                     print(f'\t({i}) {name}  [{", ".join(ports)}]')
                 print(f'\t(9) Full Port Scan  [1-65535]')
+                print(f'\t(c) Custom Port Scan  [enter your own comma-separated ports]')
 
                 selection = input(
                     f'\nWhich categories would you like to scan (e.g. 1,3 — default: All)? '
@@ -1597,6 +1571,17 @@ def main():
                 if selection in ('9', 'full', 'f'):
                     scan_type = 'Full'
                     dest_ports = ['1-65535']
+                    break
+
+                if selection.lower() in ('c', 'custom'):
+                    while True:
+                        raw = input(
+                            'Enter ports comma-separated (e.g. 80,443,U:53): '
+                        ).strip()
+                        if raw:
+                            dest_ports = [p.strip() for p in raw.split(',') if p.strip()]
+                            scan_type = 'Custom'
+                            break
                     break
 
                 if not selection:
