@@ -374,6 +374,14 @@ class TestGenerateFindings:
         generate_findings(str(nmap_dir), 'Internal')
         assert 'Anonymous FTP' not in (nmap_dir / 'findings.txt').read_text()
 
+    def test_anonymous_ftp_suppressed_for_printer(self, nmap_dir):
+        xml = _nmap_xml('10.0.0.2', 'tcp', '21',
+                        scripts={'ftp-anon': 'Anonymous FTP login allowed'},
+                        service_attrs={'name': 'ftp', 'product': 'HP JetDirect'})
+        (nmap_dir / 'nmap_results' / 'port21.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        assert 'Anonymous FTP' not in (nmap_dir / 'findings.txt').read_text()
+
     # ── SMB signing ──────────────────────────────────────────────────────────
 
     def test_smb2_signing_not_required(self, nmap_dir):

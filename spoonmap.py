@@ -830,7 +830,7 @@ def generate_findings(output_path, target_scan):
                 scripts  = scripts_for_elem(port_elem)
 
                 # ── ftp-anon ─────────────────────────────────────────────
-                if 'ftp-anon' in scripts:
+                if 'ftp-anon' in scripts and not _is_printer(port_elem):
                     out = scripts['ftp-anon']
                     if 'Anonymous FTP login allowed' in out:
                         add('HIGH', ip, port_str, 'Anonymous FTP',
