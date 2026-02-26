@@ -382,6 +382,25 @@ class TestGenerateFindings:
         generate_findings(str(nmap_dir), 'Internal')
         assert 'Anonymous FTP' not in (nmap_dir / 'findings.txt').read_text()
 
+    def test_anonymous_ftp_suppressed_via_port_9100(self, nmap_dir):
+        (nmap_dir / 'live_hosts').mkdir()
+        (nmap_dir / 'live_hosts' / 'port9100.txt').write_text('10.0.0.3\n')
+        xml = _nmap_xml('10.0.0.3', 'tcp', '21',
+                        scripts={'ftp-anon': 'Anonymous FTP login allowed'})
+        (nmap_dir / 'nmap_results' / 'port21.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        assert 'Anonymous FTP' not in (nmap_dir / 'findings.txt').read_text()
+
+    def test_anonymous_ftp_not_suppressed_for_different_host(self, nmap_dir):
+        # port9100.txt lists a different IP — the scanned host is not a printer
+        (nmap_dir / 'live_hosts').mkdir()
+        (nmap_dir / 'live_hosts' / 'port9100.txt').write_text('10.0.0.99\n')
+        xml = _nmap_xml('10.0.0.4', 'tcp', '21',
+                        scripts={'ftp-anon': 'Anonymous FTP login allowed'})
+        (nmap_dir / 'nmap_results' / 'port21.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        assert 'Anonymous FTP' in (nmap_dir / 'findings.txt').read_text()
+
     # ── SMB signing ──────────────────────────────────────────────────────────
 
     def test_smb2_signing_not_required(self, nmap_dir):
@@ -1015,6 +1034,15 @@ class TestSnmpBruteFinding:
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'SNMP Default Community String' not in content
+
+    def test_snmp_brute_suppressed_via_port_9100(self, nmap_dir):
+        (nmap_dir / 'live_hosts').mkdir()
+        (nmap_dir / 'live_hosts' / 'port9100.txt').write_text('10.0.0.12\n')
+        xml = _nmap_xml('10.0.0.12', 'udp', '161',
+                        scripts={'snmp-brute': 'public - Valid credentials'})
+        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        assert 'SNMP Default Community String' not in (nmap_dir / 'findings.txt').read_text()
 
     def test_snmp_brute_no_valid_creds_no_finding(self, nmap_dir):
         xml = _nmap_xml(

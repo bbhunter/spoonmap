@@ -806,6 +806,19 @@ def generate_findings(output_path, target_scan):
             return f'udp/{stem[2:]}'
         return f'tcp/{stem}'
 
+    # ── collect printer IPs (port 9100 open = JetDirect = printer) ───────────
+    printer_ips = set()
+    p9100 = f'{output_path}/live_hosts/port9100.txt'
+    if os.path.exists(p9100):
+        with open(p9100) as fh:
+            for line in fh:
+                ip = line.strip()
+                if ip:
+                    printer_ips.add(ip)
+
+    def is_printer_host(ip, port_elem):
+        return ip in printer_ips or _is_printer(port_elem)
+
     # ── parse every nmap XML result file ─────────────────────────────────────
     open_ports_by_host = {}  # {ip: [port_key, ...]} — for external exposure check
 
@@ -836,7 +849,7 @@ def generate_findings(output_path, target_scan):
                 scripts  = scripts_for_elem(port_elem)
 
                 # ── ftp-anon ─────────────────────────────────────────────
-                if 'ftp-anon' in scripts and not _is_printer(port_elem):
+                if 'ftp-anon' in scripts and not is_printer_host(ip, port_elem):
                     out = scripts['ftp-anon']
                     if 'Anonymous FTP login allowed' in out:
                         add('HIGH', ip, port_str, 'Anonymous FTP',
@@ -964,7 +977,7 @@ def generate_findings(output_path, target_scan):
                                 f'Certificate expired on {expiry}.')
 
                 # ── snmp-brute (skip printers) ────────────────────────────
-                if 'snmp-brute' in scripts and not _is_printer(port_elem):
+                if 'snmp-brute' in scripts and not is_printer_host(ip, port_elem):
                     out = scripts['snmp-brute']
                     if 'Valid credentials' in out:
                         communities = re.findall(r'(\S+)\s+-\s+Valid credentials', out)
