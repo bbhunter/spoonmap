@@ -3,7 +3,9 @@
 # Author: Spoonman (Larry.Spohn@TrustedSec.com)
 # QA and Personal Pythonian Consultant: Bandrel (Justin.Bollinger@TrustedSec.com)
 
+import contextlib
 import datetime
+import glob as _glob
 import json
 import os
 from pathlib import Path
@@ -1402,6 +1404,37 @@ def _cleanup_cmd(dir_path):
     sys.exit(0)
 
 
+@contextlib.contextmanager
+def _path_completion():
+    """Enable filesystem tab-completion for a single input() call.
+
+    Uses readline when available; silently skips on platforms without it
+    (e.g. Windows without pyreadline).  The completer is reset to None
+    on exit so it doesn't bleed into unrelated prompts.
+    """
+    try:
+        import readline
+
+        def _completer(text, state):
+            pattern = os.path.expanduser(text) + '*'
+            matches = _glob.glob(pattern)
+            # Append '/' to directories so the user can keep tabbing deeper
+            matches = [m + '/' if os.path.isdir(m) else m for m in matches]
+            return matches[state] if state < len(matches) else None
+
+        readline.set_completer_delims(' \t\n')
+        readline.set_completer(_completer)
+        readline.parse_and_bind('tab: complete')
+        yield
+    except ImportError:
+        yield
+    finally:
+        try:
+            readline.set_completer(None)  # type: ignore[name-defined]
+        except Exception:
+            pass
+
+
 # The Main Guts
 def main():
     global dir_path
@@ -1582,9 +1615,10 @@ def main():
 
         if not output_path:
             output_path = dir_path
-            output_path = input(f'\nPlease enter full path for output '
-                f'(default: {dir_path}): '
-                ) or output_path
+            with _path_completion():
+                output_path = input(f'\nPlease enter full path for output '
+                    f'(default: {dir_path}): '
+                    ) or output_path
             os.makedirs(output_path, exist_ok=True)
 
         if not target_file:
@@ -1595,10 +1629,11 @@ def main():
                 print('One CIDR or IP Address per line\n')
                 print('\t192.168.0.0/24')
                 print('\t192.168.1.23')
-                target_file = input(f'\nPlease enter the full path for the file '
-                    f'containing target hosts (default: {target_file}): '
-                    ) or target_file
-            
+                with _path_completion():
+                    target_file = input(f'\nPlease enter the full path for the file '
+                        f'containing target hosts (default: {target_file}): '
+                        ) or target_file
+
                 if os.path.exists(target_file):
                     break
 
@@ -1614,9 +1649,10 @@ def main():
                     print('One CIDR or IP Address per line\n')
                     print('\t192.168.0.0/24')
                     print('\t192.168.1.23')
-                    exclusions_file = input(f'\nPlease enter the full path for the file '
-                        f'containing excluded hosts if applicable (default: {dir_path}/{exclusions_file}): '
-                        ) or exclusions_file
+                    with _path_completion():
+                        exclusions_file = input(f'\nPlease enter the full path for the file '
+                            f'containing excluded hosts if applicable (default: {dir_path}/{exclusions_file}): '
+                            ) or exclusions_file
 
                     if os.path.exists(exclusions_file):
                         break
