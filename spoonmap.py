@@ -1359,13 +1359,19 @@ def _write_findings_md(output_path, target_scan, findings):
         group = [f for f in findings if f[0] == sev]
         if not group:
             continue
-        lines += [f'## {sev}', '',
-                  '| Host | Port | Finding | Detail |',
-                  '|------|------|---------|--------|']
+        lines += [f'## {sev}', '']
+        # Sub-group by finding title, preserving first-seen insertion order
+        by_title: dict = {}
         for _, host, port, title, detail in group:
-            detail_safe = detail.replace('|', '\\|')
-            lines.append(f'| `{host}` | {port} | {title} | {detail_safe} |')
-        lines.append('')
+            by_title.setdefault(title, []).append((host, port, detail))
+        for title, rows in by_title.items():
+            lines += [f'### {title}', '',
+                      '| Host | Port | Detail |',
+                      '|------|------|--------|']
+            for host, port, detail in rows:
+                detail_safe = detail.replace('|', '\\|')
+                lines.append(f'| `{host}` | {port} | {detail_safe} |')
+            lines.append('')
     lines.append(f'**Total findings:** {len(findings)}')
     with open(f'{output_path}/findings.md', 'w') as fh:
         fh.write('\n'.join(lines) + '\n')

@@ -254,6 +254,42 @@ class TestWriteFindingsMd:
         content = (tmp_path / 'findings.md').read_text()
         assert f'**Total findings:** {len(SAMPLE_FINDINGS)}' in content
 
+    def test_finding_title_is_h3_subheading(self, tmp_path):
+        _write_findings_md(str(tmp_path), 'External', SAMPLE_FINDINGS)
+        content = (tmp_path / 'findings.md').read_text()
+        assert '### Anonymous FTP' in content
+        assert '### Weak SSH Algorithms' in content
+
+    def test_finding_column_absent_from_table_header(self, tmp_path):
+        _write_findings_md(str(tmp_path), 'External', SAMPLE_FINDINGS)
+        content = (tmp_path / 'findings.md').read_text()
+        assert '| Host | Port | Detail |' in content
+        assert '| Finding |' not in content
+
+    def test_multiple_hosts_same_finding_single_heading(self, tmp_path):
+        findings = [
+            ('HIGH', '10.0.0.1', 'tcp/21', 'Anonymous FTP', 'Login allowed'),
+            ('HIGH', '10.0.0.2', 'tcp/21', 'Anonymous FTP', 'Login allowed'),
+            ('HIGH', '10.0.0.3', 'tcp/21', 'Anonymous FTP', 'Login allowed'),
+        ]
+        _write_findings_md(str(tmp_path), 'Internal', findings)
+        content = (tmp_path / 'findings.md').read_text()
+        assert content.count('### Anonymous FTP') == 1
+        assert '10.0.0.1' in content
+        assert '10.0.0.2' in content
+        assert '10.0.0.3' in content
+
+    def test_different_findings_same_severity_separate_headings(self, tmp_path):
+        findings = [
+            ('HIGH', '10.0.0.1', 'tcp/21', 'Anonymous FTP', 'Login allowed'),
+            ('HIGH', '10.0.0.2', 'tcp/22', 'Weak SSH Auth', 'password accepted'),
+        ]
+        _write_findings_md(str(tmp_path), 'External', findings)
+        content = (tmp_path / 'findings.md').read_text()
+        assert '### Anonymous FTP' in content
+        assert '### Weak SSH Auth' in content
+        assert content.count('| Host | Port | Detail |') == 2
+
 
 # ── generate_findings ─────────────────────────────────────────────────────────
 
