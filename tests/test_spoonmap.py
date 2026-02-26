@@ -8,10 +8,12 @@ import pytest
 import spoonmap
 from spoonmap import (
     EXTERNAL_SENSITIVE_PORTS,
+    INTERNAL_PORT_SCRIPTS,
     SERVICE_CATEGORIES,
     _cleanup_cmd,
     _delete_previous_results,
     _get_scripts_for_port,
+    _is_printer,
     _previous_results_exist,
     _select_probe_ports,
     _write_findings_md,
@@ -295,7 +297,9 @@ class TestWriteFindingsMd:
 
 def _script_elems(scripts):
     return ''.join(
-        '<script id="{}" output="{}"/>\n'.format(sid, out.replace('"', '&quot;'))
+        '<script id="{}" output="{}"/>\n'.format(
+            sid, out.replace('"', '&quot;').replace('\n', '&#10;')
+        )
         for sid, out in (scripts or {}).items()
     )
 
@@ -902,3 +906,107 @@ class TestCleanupCmd:
                 _cleanup_cmd(str(tmp_path))
         assert exc.value.code == 1
         assert 'Usage' in capsys.readouterr().out
+
+
+# ── _is_printer ───────────────────────────────────────────────────────────────
+
+import xml.etree.ElementTree as _etree
+
+
+def _port_elem_with_service(**service_attrs):
+    """Build a minimal <port> element with an optional <service> child."""
+    attrs_str = ' '.join(f'{k}="{v}"' for k, v in service_attrs.items())
+    xml_str = f'<port protocol="udp" portid="161"><service {attrs_str}/></port>'
+    return _etree.fromstring(xml_str)
+
+
+class TestIsPrinter:
+    def test_devicetype_printer_detected(self):
+        elem = _port_elem_with_service(name='snmp', devicetype='printer')
+        assert _is_printer(elem) is True
+
+    def test_printer_keyword_in_product(self):
+        elem = _port_elem_with_service(name='snmp', product='HP JetDirect')
+        assert _is_printer(elem) is True
+
+    def test_laserjet_in_product(self):
+        elem = _port_elem_with_service(name='snmp', product='HP LaserJet 4350')
+        assert _is_printer(elem) is True
+
+    def test_non_printer_not_flagged(self):
+        elem = _port_elem_with_service(name='snmp', product='Net-SNMP', devicetype='')
+        assert _is_printer(elem) is False
+
+    def test_no_service_elem_not_flagged(self):
+        elem = _etree.fromstring('<port protocol="udp" portid="161"/>')
+        assert _is_printer(elem) is False
+
+
+# ── snmp-brute finding ────────────────────────────────────────────────────────
+
+class TestSnmpBruteFinding:
+    def test_snmp_brute_generates_finding_for_non_printer(self, nmap_dir):
+        xml = _nmap_xml(
+            '10.0.0.5', 'udp', '161',
+            scripts={'snmp-brute': 'public - Valid credentials\nprivate - Valid credentials'},
+            service_attrs={'name': 'snmp', 'product': 'Net-SNMP'},
+        )
+        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'SNMP Default Community String' in content
+        assert '10.0.0.5' in content
+
+    def test_snmp_brute_community_strings_listed_in_detail(self, nmap_dir):
+        xml = _nmap_xml(
+            '10.0.0.5', 'udp', '161',
+            scripts={'snmp-brute': 'public - Valid credentials\nprivate - Valid credentials'},
+        )
+        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'public' in content
+        assert 'private' in content
+
+    def test_snmp_brute_suppressed_for_printer(self, nmap_dir):
+        xml = _nmap_xml(
+            '10.0.0.10', 'udp', '161',
+            scripts={'snmp-brute': 'public - Valid credentials'},
+            service_attrs={'name': 'snmp', 'devicetype': 'printer'},
+        )
+        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'SNMP Default Community String' not in content
+
+    def test_snmp_brute_no_valid_creds_no_finding(self, nmap_dir):
+        xml = _nmap_xml(
+            '10.0.0.5', 'udp', '161',
+            scripts={'snmp-brute': 'public - No response\nprivate - No response'},
+        )
+        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'SNMP Default Community String' not in content
+
+    def test_snmp_brute_tcp_port_161_also_checked(self, nmap_dir):
+        xml = _nmap_xml(
+            '10.0.0.7', 'tcp', '161',
+            scripts={'snmp-brute': 'public - Valid credentials'},
+        )
+        (nmap_dir / 'nmap_results' / 'port161.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'SNMP Default Community String' in content
+
+
+# ── INTERNAL_PORT_SCRIPTS includes snmp-brute ─────────────────────────────────
+
+class TestInternalPortScriptsSnmp:
+    def test_snmp_tcp_161_included(self):
+        assert '161' in INTERNAL_PORT_SCRIPTS
+        assert 'snmp-brute' in INTERNAL_PORT_SCRIPTS['161']
+
+    def test_snmp_udp_161_included(self):
+        assert 'U:161' in INTERNAL_PORT_SCRIPTS
+        assert 'snmp-brute' in INTERNAL_PORT_SCRIPTS['U:161']

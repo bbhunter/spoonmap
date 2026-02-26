@@ -611,6 +611,8 @@ EXTERNAL_PORT_SCRIPTS = {
     '25':    'smtp-ntlm-info',
     '110':   'pop3-ntlm-info',
     '143':   'imap-ntlm-info',
+    '161':   'snmp-brute',
+    'U:161': 'snmp-brute',
     '443':   'ssl-cert',
     '465':   'smtp-ntlm-info,ssl-cert',
     '587':   'smtp-ntlm-info',
@@ -638,6 +640,8 @@ INTERNAL_PORT_SCRIPTS = {
     '1433':  'ms-sql-info',
     '3389':  'rdp-enum-encryption,rdp-vuln-ms12-020',
     '4786':  f'{_DIR}/nse/cisco-siet.nse',
+    '161':   'snmp-brute',
+    'U:161': 'snmp-brute',
     'U:1434': 'ms-sql-info',
 }
 
@@ -750,6 +754,24 @@ def _scan_extra_sql_ports(output_path, source_port):
 
 
 SEVERITY_ORDER = ['CRITICAL', 'HIGH', 'MEDIUM', 'INFO']
+
+
+_PRINTER_KEYWORDS = frozenset([
+    'hp jetdirect', 'laserjet', 'xerox', 'canon', 'epson',
+    'kyocera', 'ricoh', 'brother', 'lexmark', 'konica', 'minolta',
+    'sharp', 'oki ', 'toshiba e-studio',
+])
+
+
+def _is_printer(port_elem):
+    """Return True if the service on this port is identified as a printer."""
+    svc = port_elem.find('service')
+    if svc is None:
+        return False
+    if svc.attrib.get('devicetype', '').lower() == 'printer':
+        return True
+    product = svc.attrib.get('product', '').lower()
+    return any(kw in product for kw in _PRINTER_KEYWORDS)
 
 
 def generate_findings(output_path, target_scan):
@@ -934,6 +956,18 @@ def generate_findings(output_path, target_scan):
                         if expiry < datetime.date.today():
                             add('MEDIUM', ip, port_str, 'Expired TLS Certificate',
                                 f'Certificate expired on {expiry}.')
+
+                # ── snmp-brute (skip printers) ────────────────────────────
+                if 'snmp-brute' in scripts and not _is_printer(port_elem):
+                    out = scripts['snmp-brute']
+                    if 'Valid credentials' in out:
+                        communities = re.findall(r'(\S+)\s+-\s+Valid credentials', out)
+                        if communities:
+                            detail = (f'Default SNMP community string(s) accepted: '
+                                      f'{", ".join(communities)}.')
+                        else:
+                            detail = 'Default SNMP community string accepted.'
+                        add('HIGH', ip, port_str, 'SNMP Default Community String', detail)
 
             # ── host-level scripts (smb-security-mode, ms-sql-info, etc.) ────
             # These NSE scripts use hostrule and appear under <hostscript>,
@@ -1278,6 +1312,16 @@ _FINDING_REPRO = {
             '|       name: Microsoft SQL Server 2019 RTM\n'
             '|       number: 15.00.2000.00\n'
             '|_      Product: Microsoft SQL Server 2019'
+        ),
+    },
+    'SNMP Default Community String': {
+        'flags': '-sU --script snmp-brute',
+        'sample': (
+            'PORT    STATE SERVICE\n'
+            '161/udp open  snmp\n'
+            '| snmp-brute:\n'
+            '|   public - Valid credentials\n'
+            '|_  private - Valid credentials'
         ),
     },
 }
