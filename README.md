@@ -127,9 +127,11 @@ Rates that are too high can create a denial-of-service condition — use caution
 
 When `script_scan` is enabled, nmap runs targeted NSE scripts against relevant ports. Scripts are chosen based on scan type (External vs Internal):
 
-**External scans** run: `ftp-anon`, `ssh-auth-methods`, `ssh2-enum-algos`, `*-ntlm-info`, `ssl-cert`, `ms-sql-ntlm-info`, `rdp-ntlm-info`, `docker-version`, `snmp-brute`
+**External scans** run: `ftp-anon`, `ssh-auth-methods`, `ssh2-enum-algos`, `*-ntlm-info`, `ssl-cert`, `ms-sql-ntlm-info`, `rdp-ntlm-info`, `docker-version`, `snmp-brute`, `snmp-sysdescr`
 
-**Internal scans** run: `ftp-anon`, `rpcinfo`, `nfs-showmount`, `nfs-ls`, `smb-security-mode`, `smb2-security-mode`, `smb-vuln-ms17-010`, `smb-vuln-ms08-067`, `smb-double-pulsar-backdoor`, `smb-vuln-cve-2017-7494`, `rmi-dumpregistry`, `ms-sql-info`, `rdp-enum-encryption`, `rdp-vuln-ms12-020`, `docker-version`, `snmp-brute`
+**Internal scans** run: `ftp-anon`, `rpcinfo`, `nfs-showmount`, `nfs-ls`, `smb-security-mode`, `smb2-security-mode`, `smb-vuln-ms17-010`, `smb-vuln-ms08-067`, `smb-double-pulsar-backdoor`, `smb-vuln-cve-2017-7494`, `rmi-dumpregistry`, `ms-sql-info`, `rdp-enum-encryption`, `rdp-vuln-ms12-020`, `docker-version`, `snmp-brute`, `snmp-sysdescr`
+
+`snmp-sysdescr` reads the device's SNMP sysDescr string and is used to identify printers. SNMP and anonymous FTP findings are suppressed for printer devices to reduce noise.
 
 After scanning, `generate_findings()` parses all nmap XML results and produces severity-sorted `findings.txt` and `findings.md` reports. Findings include:
 
