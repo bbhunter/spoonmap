@@ -1004,6 +1004,271 @@ def generate_findings(output_path, target_scan):
     print('\x1b[33m' + f'\nFindings written to {output_path}/findings.txt and findings.md' + '\x1b[0m')
 
 
+# ── Reproduce commands and sample output for each finding type ────────────────
+_FINDING_REPRO = {
+    'MS17-010 EternalBlue (CVE-2017-0143)': {
+        'flags': '--script smb-vuln-ms17-010',
+        'sample': (
+            'PORT    STATE SERVICE\n'
+            '445/tcp open  microsoft-ds\n'
+            '| smb-vuln-ms17-010:\n'
+            '|   VULNERABLE:\n'
+            '|   Remote Code Execution vulnerability in Microsoft SMBv1 servers (ms17-010)\n'
+            '|     State: VULNERABLE\n'
+            '|     IDs:  CVE:CVE-2017-0143\n'
+            '|     Risk factor: HIGH\n'
+            '|     References:\n'
+            '|       https://technet.microsoft.com/en-us/library/security/ms17-010.aspx\n'
+            '|_      https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2017-0143'
+        ),
+    },
+    'MS08-067 NetAPI (CVE-2008-4250)': {
+        'flags': '--script smb-vuln-ms08-067',
+        'sample': (
+            'PORT    STATE SERVICE\n'
+            '445/tcp open  microsoft-ds\n'
+            '| smb-vuln-ms08-067:\n'
+            '|   VULNERABLE:\n'
+            '|   Microsoft Windows system vulnerable to remote code execution (MS08-067)\n'
+            '|     State: LIKELY VULNERABLE\n'
+            '|     IDs:  CVE:CVE-2008-4250\n'
+            '|     References:\n'
+            '|_      https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2008-4250'
+        ),
+    },
+    'DoublePulsar Backdoor Active': {
+        'flags': '--script smb-double-pulsar-backdoor',
+        'sample': (
+            'PORT    STATE SERVICE\n'
+            '445/tcp open  microsoft-ds\n'
+            '| smb-double-pulsar-backdoor:\n'
+            '|   DoublePulsar SMB backdoor is INSTALLED\n'
+            '|   Architecture: x64\n'
+            '|_  XOR Key: 0xAB12CD34'
+        ),
+    },
+    'SambaCry (CVE-2017-7494)': {
+        'flags': '--script smb-vuln-cve-2017-7494',
+        'sample': (
+            'PORT    STATE SERVICE\n'
+            '445/tcp open  netbios-ssn\n'
+            '| smb-vuln-cve-2017-7494:\n'
+            '|   VULNERABLE:\n'
+            '|   SAMBA Remote Code Execution from Writable Share\n'
+            '|     State: VULNERABLE\n'
+            '|     IDs:  CVE:CVE-2017-7494\n'
+            '|_  References: https://www.samba.org/samba/security/CVE-2017-7494.html'
+        ),
+    },
+    'MS12-020 RDP (CVE-2012-0002)': {
+        'flags': '--script rdp-vuln-ms12-020',
+        'sample': (
+            'PORT     STATE SERVICE\n'
+            '3389/tcp open  ms-wbt-server\n'
+            '| rdp-vuln-ms12-020:\n'
+            '|   VULNERABLE:\n'
+            '|   MS12-020 Remote Desktop Protocol Denial Of Service Vulnerability\n'
+            '|     State: VULNERABLE\n'
+            '|     IDs:  CVE:CVE-2012-0002\n'
+            '|_    Risk factor: HIGH'
+        ),
+    },
+    'Unauthenticated Docker API': {
+        'flags': '--script docker-version',
+        'sample': (
+            'PORT     STATE SERVICE\n'
+            '2375/tcp open  docker\n'
+            '| docker-version:\n'
+            '|   Version: 24.0.5\n'
+            '|   API Version: 1.43\n'
+            '|   Go Version: go1.20.6\n'
+            '|   Git Commit: a61e2b4\n'
+            '|   OS: linux\n'
+            '|_  Architecture: amd64'
+        ),
+    },
+    'Service Exposed Externally': {
+        'flags': '-sV',
+        'sample': (
+            'PORT     STATE SERVICE VERSION\n'
+            '3306/tcp open  mysql   MySQL 8.0.32'
+        ),
+    },
+    'Anonymous FTP': {
+        'flags': '--script ftp-anon',
+        'sample': (
+            'PORT   STATE SERVICE\n'
+            '21/tcp open  ftp\n'
+            '| ftp-anon: Anonymous FTP login allowed (FTP code 230)\n'
+            '|_drwxr-xr-x  2 ftp ftp 4096 Jan 15 12:00 pub'
+        ),
+    },
+    'Weak SSH Authentication': {
+        'flags': '--script ssh-auth-methods',
+        'sample': (
+            'PORT   STATE SERVICE\n'
+            '22/tcp open  ssh\n'
+            '| ssh-auth-methods:\n'
+            '|   Supported authentication methods:\n'
+            '|     publickey\n'
+            '|     password\n'
+            '|_    keyboard-interactive'
+        ),
+    },
+    'NTLM Information Disclosure': {
+        'flags': '--script "*-ntlm-info"',
+        'sample': (
+            'PORT    STATE SERVICE\n'
+            '445/tcp open  microsoft-ds\n'
+            '| smb-ntlm-info:\n'
+            '|   Target_Name: CORP\n'
+            '|   NetBIOS_Domain_Name: CORP\n'
+            '|   NetBIOS_Computer_Name: DC01\n'
+            '|   DNS_Domain_Name: corp.local\n'
+            '|_  DNS_Computer_Name: DC01.corp.local'
+        ),
+    },
+    'SMBv1 Signing Not Required': {
+        'flags': '--script smb-security-mode',
+        'sample': (
+            'PORT    STATE SERVICE\n'
+            '445/tcp open  microsoft-ds\n'
+            '| smb-security-mode:\n'
+            '|   account_used: guest\n'
+            '|   authentication_level: user\n'
+            '|   challenge_response: supported\n'
+            '|_  message_signing: disabled (dangerous, but default)'
+        ),
+    },
+    'SMBv2 Signing Not Required': {
+        'flags': '--script smb2-security-mode',
+        'sample': (
+            'PORT    STATE SERVICE\n'
+            '445/tcp open  microsoft-ds\n'
+            '| smb2-security-mode:\n'
+            '|   3.1.1:\n'
+            '|_    Message signing enabled but not required'
+        ),
+    },
+    'NFS Shares Exposed': {
+        'flags': '--script nfs-showmount,nfs-ls',
+        'sample': (
+            'PORT    STATE SERVICE\n'
+            '111/tcp open  rpcbind\n'
+            '| nfs-showmount:\n'
+            '|   /exports  *\n'
+            '|   /home     10.0.0.0/24\n'
+            '| nfs-ls: Volume /exports\n'
+            '|   access: Read Lookup NoModify NoExtend NoDelete NoExecute\n'
+            '|   drwxr-xr-x  2  1000  1000  4096  Jan 15 12:00  .\n'
+            '|_  -rw-r--r--  1  1000  1000  1024  Jan 15 12:00  data.csv'
+        ),
+    },
+    'Dameware Remote Control Detected': {
+        'flags': '-sV',
+        'sample': (
+            'PORT     STATE SERVICE  VERSION\n'
+            '6129/tcp open  dameware DameWare Remote Control 12.0'
+        ),
+    },
+    'SAP Gateway Detected': {
+        'flags': '-sV',
+        'sample': (
+            'PORT     STATE SERVICE  VERSION\n'
+            '3300/tcp open  sapgw00  SAP Gateway'
+        ),
+    },
+    'Cisco Smart Install Vulnerable': {
+        'flags': '-sV',
+        'sample': (
+            'PORT     STATE SERVICE  VERSION\n'
+            '4786/tcp open  smart-install  Cisco Smart Install (VULNERABLE)'
+        ),
+    },
+    'Cisco CUCM TFTP Detected': {
+        'flags': '-sV',
+        'sample': (
+            'PORT     STATE SERVICE  VERSION\n'
+            '6970/tcp open  tftp     Cisco Unified Communications Manager TFTP'
+        ),
+    },
+    'Weak SSH Algorithms': {
+        'flags': '--script ssh2-enum-algos',
+        'sample': (
+            'PORT   STATE SERVICE\n'
+            '22/tcp open  ssh\n'
+            '| ssh2-enum-algos:\n'
+            '|   kex_algorithms: (8)\n'
+            '|       diffie-hellman-group1-sha1 -- [info] removed in OpenSSH 8.8\n'
+            '|       diffie-hellman-group14-sha1\n'
+            '|   encryption_algorithms: (8)\n'
+            '|       3des-cbc -- [info] disabled in OpenSSH 6.7\n'
+            '|       aes128-cbc\n'
+            '|   mac_algorithms: (10)\n'
+            '|_      hmac-md5 -- [info] disabled in OpenSSH 6.7'
+        ),
+    },
+    'Weak RDP Encryption': {
+        'flags': '--script rdp-enum-encryption',
+        'sample': (
+            'PORT     STATE SERVICE\n'
+            '3389/tcp open  ms-wbt-server\n'
+            '| rdp-enum-encryption:\n'
+            '|   Security layer\n'
+            '|     CredSSP (NLA): SUCCESS\n'
+            '|     SSL: SUCCESS\n'
+            '|_    Native RDP: SUCCESS'
+        ),
+    },
+    'Java RMI Registry Exposed': {
+        'flags': '--script rmi-dumpregistry',
+        'sample': (
+            'PORT     STATE SERVICE\n'
+            '1090/tcp open  java-rmi\n'
+            '| rmi-dumpregistry:\n'
+            '|   jmxrmi\n'
+            '|     javax.management.remote.rmi.RMIServerImpl_Stub\n'
+            '|_  @10.0.0.5:36721'
+        ),
+    },
+    'Expired TLS Certificate': {
+        'flags': '--script ssl-cert',
+        'sample': (
+            'PORT    STATE SERVICE\n'
+            '443/tcp open  https\n'
+            '| ssl-cert: Subject: commonName=example.corp\n'
+            '| Not valid before: 2021-01-01T00:00:00\n'
+            '|_Not valid after:  2022-01-01T00:00:00'
+        ),
+    },
+    'SQL Server Instance Discovered': {
+        'flags': '--script ms-sql-info',
+        'sample': (
+            'PORT     STATE SERVICE\n'
+            '1433/tcp open  ms-sql-s\n'
+            '| ms-sql-info:\n'
+            '|   10.0.0.5\\MSSQLSERVER:\n'
+            '|     Instance name: MSSQLSERVER\n'
+            '|     Version:\n'
+            '|       name: Microsoft SQL Server 2019 RTM\n'
+            '|       number: 15.00.2000.00\n'
+            '|_      Product: Microsoft SQL Server 2019'
+        ),
+    },
+}
+
+
+def _build_repro_cmd(title, port_str, host):
+    """Build an nmap command to reproduce a finding."""
+    parts = port_str.split('/', 1)
+    if len(parts) != 2:
+        return f'nmap -sV {host}  # could not parse port from "{port_str}"'
+    proto, pnum = parts
+    flags = _FINDING_REPRO.get(title, {}).get('flags', '-sV')
+    udp_flag = '-sU ' if proto == 'udp' else ''
+    return f'nmap {udp_flag}-p {pnum} {flags} {host}'
+
+
 def _write_findings_txt(output_path, target_scan, findings):
     today = datetime.date.today()
     lines = [
@@ -1015,14 +1280,43 @@ def _write_findings_txt(output_path, target_scan, findings):
         f'Output Dir: {output_path}',
         '',
     ]
+
+    # Group by (severity, title, port_str) so all hosts with the same
+    # vulnerability on the same port are together for easy copy-paste.
+    groups = {}  # (sev, title, port_str) → list[host]
+    for sev, host, port_str, title, _detail in findings:
+        key = (sev, title, port_str)
+        groups.setdefault(key, []).append(host)
+
     for sev in SEVERITY_ORDER:
-        group = [f for f in findings if f[0] == sev]
-        if not group:
+        sev_keys = sorted(
+            [k for k in groups if k[0] == sev],
+            key=lambda k: (k[1], k[2]),
+        )
+        if not sev_keys:
             continue
-        lines += [sev, '-' * len(sev)]
-        for _, host, port, title, detail in group:
-            lines.append(f'{host:<18} port {port:<12} [{title}] {detail}')
-        lines.append('')
+        lines += [sev, '-' * len(sev), '']
+        for key in sev_keys:
+            _, title, port_str = key
+            hosts = groups[key]
+            repro = _FINDING_REPRO.get(title, {})
+            lines.append(f'  [{title}]  port {port_str}')
+            lines.append(f'  Affected hosts ({len(hosts)}):')
+            for h in sorted(hosts):
+                lines.append(f'    {h}')
+            lines.append('')
+            if repro:
+                cmd = _build_repro_cmd(title, port_str, hosts[0])
+                lines.append('  Reproduce:')
+                lines.append(f'    {cmd}')
+                lines.append('')
+                lines.append('  Sample output:')
+                for sample_line in repro['sample'].splitlines():
+                    lines.append(f'    {sample_line}')
+                lines.append('')
+            lines.append('  ' + '-' * 56)
+            lines.append('')
+
     lines.append(f'Total findings: {len(findings)}')
     with open(f'{output_path}/findings.txt', 'w') as fh:
         fh.write('\n'.join(lines) + '\n')
