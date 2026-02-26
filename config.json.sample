@@ -5,6 +5,8 @@
     "masscan_batch_size": 5,
     "__banner_scan_choices__" : "True, False",
     "banner_scan" : "True",
+    "__script_scan_choices__" : "True, False",
+    "script_scan" : "False",
     "__target_scan_choices__" : "External, Internal",
     "target_scan" : "Internal",
     "__max_rate_external_recommedation__" : "Default = 10000",

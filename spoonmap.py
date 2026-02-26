@@ -3,6 +3,7 @@
 # Author: Spoonman (Larry.Spohn@TrustedSec.com)
 # QA and Personal Pythonian Consultant: Bandrel (Justin.Bollinger@TrustedSec.com)
 
+import datetime
 import json
 import os
 from pathlib import Path
@@ -152,6 +153,12 @@ def preprocess_targets(target_file, output_path):
     print('\x1b[33m' + f'Masscan target file: {masscan_file}' + '\x1b[0m')
 
     return masscan_file, ip_to_hostname
+
+def _get_scripts_for_port(dest_port, target_scan):
+    """Return comma-separated NSE script list for dest_port, or None."""
+    table = EXTERNAL_PORT_SCRIPTS if target_scan == 'External' else INTERNAL_PORT_SCRIPTS
+    return table.get(dest_port)
+
 
 def _run_masscan_batch(batch, rate, output_file, target_file, source_port, exclusions_file):
     """Run masscan for one batch and return {port_key: set_of_ips}."""
@@ -338,7 +345,8 @@ def create_hostname_target_file(ip_file, hostname_file, ip_to_hostname):
             hostname = ip_to_hostname.get(ip, ip)
             outf.write(f'{hostname}\n')
 
-def nmap_worker(work_queue, completed_count, total_count, source_port, lock, interrupt_event, ip_to_hostname):
+def nmap_worker(work_queue, completed_count, total_count, source_port, lock,
+                interrupt_event, ip_to_hostname, script_scan=False, target_scan='Internal'):
     """Worker thread function to process NMAP scans from queue"""
     while not interrupt_event.is_set():
         try:
@@ -385,6 +393,11 @@ def nmap_worker(work_queue, completed_count, total_count, source_port, lock, int
                     '-oX', output_file
                 ]
 
+            if script_scan:
+                scripts = _get_scripts_for_port(dest_port, target_scan)
+                if scripts:
+                    nmap_cmd.extend(['--script', scripts, '--script-timeout', '30s'])
+
             # Save terminal state before running nmap
             term_state = save_terminal_state()
 
@@ -426,7 +439,8 @@ def nmap_worker(work_queue, completed_count, total_count, source_port, lock, int
                 print('\x1b[31m' + f'Worker thread error: {e}' + '\x1b[0m')
             work_queue.task_done()
 
-def nmap_scan(source_port, max_threads=5, ip_to_hostname=None):
+def nmap_scan(source_port, max_threads=5, ip_to_hostname=None,
+              script_scan=False, target_scan='Internal'):
     """
     Perform NMAP scans using multiple threads for efficiency
 
@@ -434,6 +448,8 @@ def nmap_scan(source_port, max_threads=5, ip_to_hostname=None):
         source_port: Source port to use for scans
         max_threads: Maximum number of concurrent NMAP scans (default: 5)
         ip_to_hostname: Dictionary mapping IPs to hostnames (default: None)
+        script_scan: Whether to run NSE scripts (default: False)
+        target_scan: 'External' or 'Internal' (default: 'Internal')
     """
     if ip_to_hostname is None:
         ip_to_hostname = {}
@@ -472,7 +488,8 @@ def nmap_scan(source_port, max_threads=5, ip_to_hostname=None):
         for _ in range(max_threads):
             thread = threading.Thread(
                 target=nmap_worker,
-                args=(work_queue, completed_count, total_count, source_port, lock, interrupt_event, ip_to_hostname)
+                args=(work_queue, completed_count, total_count, source_port, lock,
+                      interrupt_event, ip_to_hostname, script_scan, target_scan)
             )
             thread.daemon = True
             thread.start()
@@ -531,6 +548,71 @@ PROBE_PORT_PRIORITY = [
     '8080',  # Alternate HTTP — common
 ]
 
+# Scripts run on EXTERNAL scans only
+EXTERNAL_PORT_SCRIPTS = {
+    '21':    'ftp-anon',
+    '22':    'ssh-auth-methods,ssh2-enum-algos',
+    '23':    'telnet-ntlm-info',
+    '25':    'smtp-ntlm-info',
+    '110':   'pop3-ntlm-info',
+    '143':   'imap-ntlm-info',
+    '443':   'ssl-cert',
+    '465':   'smtp-ntlm-info,ssl-cert',
+    '587':   'smtp-ntlm-info',
+    '636':   'ssl-cert',
+    '993':   'imap-ntlm-info,ssl-cert',
+    '995':   'pop3-ntlm-info,ssl-cert',
+    '1433':  'ms-sql-ntlm-info',
+    '3389':  'rdp-ntlm-info',
+    '8443':  'ssl-cert',
+    '10443': 'ssl-cert',
+}
+
+# Scripts run on INTERNAL scans only (no ssl-cert — not relevant for internal assessments)
+INTERNAL_PORT_SCRIPTS = {
+    '21':    'ftp-anon',
+    '111':   'rpcinfo,nfs-showmount,nfs-ls',
+    '139':   'smb-security-mode',
+    '445':   'smb-security-mode,smb2-security-mode',
+    '1090':  'rmi-dumpregistry',
+    '1433':  'ms-sql-info',
+    '3389':  'rdp-enum-encryption',
+    'U:1434': 'ms-sql-info',
+}
+
+# Deprecated/weak SSH algorithms used by the ssh2-enum-algos finding check
+WEAK_SSH_ALGOS = {
+    'encrypt': {'arcfour', 'arcfour128', 'arcfour256',
+                'aes128-cbc', 'aes192-cbc', 'aes256-cbc',
+                '3des-cbc', 'blowfish-cbc', 'cast128-cbc'},
+    'mac':     {'hmac-md5', 'hmac-md5-96', 'hmac-sha1', 'hmac-sha1-96',
+                'hmac-ripemd160'},
+    'kex':     {'diffie-hellman-group1-sha1', 'diffie-hellman-group14-sha1'},
+}
+
+# Ports that should never be directly internet-facing; (port_string, severity, label)
+EXTERNAL_SENSITIVE_PORTS = [
+    ('445',   'HIGH', 'SMB — should not be internet-facing'),
+    ('139',   'HIGH', 'NetBIOS Session Service — should not be internet-facing'),
+    ('135',   'HIGH', 'MS-RPC — should not be internet-facing'),
+    ('389',   'HIGH', 'LDAP — should not be internet-facing'),
+    ('636',   'HIGH', 'LDAPS — should not be internet-facing'),
+    ('1433',  'HIGH', 'MSSQL — database port should not be internet-facing'),
+    ('1521',  'HIGH', 'Oracle — database port should not be internet-facing'),
+    ('3306',  'HIGH', 'MySQL — database port should not be internet-facing'),
+    ('5432',  'HIGH', 'PostgreSQL — database port should not be internet-facing'),
+    ('6379',  'HIGH', 'Redis — database port should not be internet-facing'),
+    ('9200',  'HIGH', 'Elasticsearch — should not be internet-facing'),
+    ('27017', 'HIGH', 'MongoDB — database port should not be internet-facing'),
+    ('111',   'HIGH', 'RPC/NFS — should not be internet-facing'),
+    ('U:161', 'HIGH', 'SNMP — should not be internet-facing'),
+    ('161',   'HIGH', 'SNMP — should not be internet-facing'),
+    ('3389',  'HIGH', 'RDP — direct internet exposure is high risk'),
+    ('21',    'HIGH', 'FTP — should not be exposed unless wrapped in SSL/SSH'),
+    ('23',    'HIGH', 'Telnet — unencrypted, should not be internet-facing'),
+    ('U:137', 'HIGH', 'NetBIOS Name Service — should not be internet-facing'),
+]
+
 SERVICE_CATEGORIES = {
     'Web': [
         '80', '443', '8000', '8080', '8081', '8443', '8888', '9090', '10443'
@@ -559,6 +641,303 @@ SERVICE_CATEGORIES = {
 }
 
 
+def _scan_extra_sql_ports(output_path, source_port):
+    """Scan SQL Server named instances discovered on non-standard ports."""
+    discovered = {}  # {host_ip: [port, ...]}
+
+    for fname in ('port1433.xml', 'portU:1434.xml'):
+        fpath = f'{output_path}/nmap_results/{fname}'
+        if not os.path.exists(fpath):
+            continue
+        try:
+            root = etree.parse(fpath)
+            for host in root.findall('host'):
+                ip = host.findall('address')[0].attrib['addr']
+                for script in host.iter('script'):
+                    if script.attrib.get('id') != 'ms-sql-info':
+                        continue
+                    # Each <table> under the script represents one instance
+                    for instance_table in script.findall('table/table'):
+                        tcp_elem = instance_table.find("elem[@key='tcp']")
+                        if tcp_elem is not None and tcp_elem.text not in ('1433', None):
+                            discovered.setdefault(ip, []).append(tcp_elem.text)
+        except Exception as e:
+            print('\x1b[31m' + f'Warning: could not parse {fname} for SQL instances: {e}' + '\x1b[0m')
+
+    for ip, ports in discovered.items():
+        for port in ports:
+            out_file = f'{output_path}/nmap_results/port{port}_sql.xml'
+            if os.path.exists(out_file):
+                continue
+            print('\x1b[33m' + f'Discovered SQL Server instance on {ip}:{port} — running nmap -sV...' + '\x1b[0m')
+            term_state = save_terminal_state()
+            try:
+                proc = subprocess.Popen([
+                    'nmap', '-T4', '-sS', '-sV', '--version-intensity', '0',
+                    '-Pn', '-p', port, '--source-port', source_port,
+                    ip, '-oX', out_file
+                ])
+                proc.wait()
+            except Exception as e:
+                print('\x1b[31m' + f'Error scanning SQL port {port}: {e}' + '\x1b[0m')
+            finally:
+                restore_terminal_state(term_state)
+
+
+SEVERITY_ORDER = ['CRITICAL', 'HIGH', 'MEDIUM', 'INFO']
+
+
+def generate_findings(output_path, target_scan):
+    """Parse nmap script output and write findings.txt and findings.md."""
+    nmap_dir = f'{output_path}/nmap_results'
+    if not os.path.exists(nmap_dir):
+        return
+
+    findings = []  # list of (severity, host, port_str, title, detail)
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+    def add(sev, host, port, title, detail=''):
+        findings.append((sev, host, str(port), title, detail))
+
+    def scripts_for_elem(elem):
+        """Return dict of {script_id: output} for a port or hostscript element."""
+        return {s.attrib['id']: s.attrib.get('output', '')
+                for s in elem.findall('script')}
+
+    def port_str_from_fname(fname):
+        """Derive a port string from a filename like port445.xml or portU:1434.xml."""
+        stem = fname.replace('.xml', '').lstrip('port')
+        # Strip optional _sql or other suffixes after the port number/key
+        stem = re.sub(r'_\w+$', '', stem)
+        if stem.startswith('U:'):
+            return f'udp/{stem[2:]}'
+        return f'tcp/{stem}'
+
+    # ── parse every nmap XML result file ─────────────────────────────────────
+    open_ports_by_host = {}  # {ip: [port_key, ...]} — for external exposure check
+
+    for fname in sorted(os.listdir(nmap_dir)):
+        if not fname.endswith('.xml'):
+            continue
+        fpath = f'{nmap_dir}/{fname}'
+        try:
+            root = etree.parse(fpath)
+        except Exception:
+            continue
+
+        file_port_str = port_str_from_fname(fname)
+
+        for host in root.findall('host'):
+            addr_elem = host.find("address[@addrtype='ipv4']")
+            if addr_elem is None:
+                addr_elem = host.findall('address')[0]
+            ip = addr_elem.attrib['addr']
+
+            for port_elem in host.iter('port'):
+                portid   = port_elem.attrib.get('portid', '')
+                protocol = port_elem.attrib.get('protocol', 'tcp')
+                port_key = f'U:{portid}' if protocol == 'udp' else portid
+                port_str = f'{protocol}/{portid}'
+
+                open_ports_by_host.setdefault(ip, []).append(port_key)
+                scripts  = scripts_for_elem(port_elem)
+
+                # ── ftp-anon ─────────────────────────────────────────────
+                if 'ftp-anon' in scripts:
+                    out = scripts['ftp-anon']
+                    if 'Anonymous FTP login allowed' in out:
+                        add('HIGH', ip, port_str, 'Anonymous FTP',
+                            'Anonymous FTP login is permitted.')
+
+                # ── ssh-auth-methods (external) ──────────────────────────
+                if 'ssh-auth-methods' in scripts and target_scan == 'External':
+                    out = scripts['ssh-auth-methods']
+                    weak = [m for m in ('password', 'keyboard-interactive')
+                            if m in out]
+                    if weak:
+                        add('HIGH', ip, port_str, 'Weak SSH Authentication',
+                            f'Insecure auth method(s) enabled externally: {", ".join(weak)}.')
+
+                # ── ssh2-enum-algos (external) ────────────────────────────
+                if 'ssh2-enum-algos' in scripts and target_scan == 'External':
+                    out = scripts['ssh2-enum-algos']
+                    found_weak = []
+                    for category, weak_set in WEAK_SSH_ALGOS.items():
+                        for algo in weak_set:
+                            if algo in out:
+                                found_weak.append(algo)
+                    if found_weak:
+                        add('MEDIUM', ip, port_str, 'Weak SSH Algorithms',
+                            f'Deprecated algorithm(s) offered: {", ".join(sorted(found_weak))}.')
+
+                # ── *-ntlm-info (external only) ───────────────────────────
+                if target_scan == 'External':
+                    for sid, out in scripts.items():
+                        if sid.endswith('-ntlm-info') and out.strip():
+                            detail = out.strip().replace('\n', ' | ')[:200]
+                            add('HIGH', ip, port_str, 'NTLM Information Disclosure',
+                                f'Internal host details exposed: {detail}')
+
+                # ── nfs-showmount / nfs-ls ────────────────────────────────
+                for sid in ('nfs-showmount', 'nfs-ls'):
+                    if sid in scripts and target_scan == 'Internal':
+                        out = scripts[sid].strip()
+                        if out:
+                            add('HIGH', ip, port_str, 'NFS Shares Exposed',
+                                f'NFS mount points visible: {out[:200]}')
+
+                # ── rmi-dumpregistry ──────────────────────────────────────
+                if 'rmi-dumpregistry' in scripts and target_scan == 'Internal':
+                    out = scripts['rmi-dumpregistry'].strip()
+                    if out:
+                        add('MEDIUM', ip, port_str, 'Java RMI Registry Exposed',
+                            f'RMI objects: {out[:200]}')
+
+                # ── rdp-enum-encryption ───────────────────────────────────
+                if 'rdp-enum-encryption' in scripts and target_scan == 'Internal':
+                    out = scripts['rdp-enum-encryption']
+                    weak_rdp = ('Classic RDP' in out or
+                                'CredSSP support: false' in out.lower() or
+                                'CredSSP support: False' in out)
+                    if weak_rdp:
+                        add('MEDIUM', ip, port_str, 'Weak RDP Encryption',
+                            'Classic RDP encryption or NLA not enforced.')
+
+            # ── host-level scripts (smb-security-mode, ms-sql-info, etc.) ────
+            # These NSE scripts use hostrule and appear under <hostscript>,
+            # not inside a <port> element.
+            hostscript_elem = host.find('hostscript')
+            if hostscript_elem is not None:
+                hscripts = scripts_for_elem(hostscript_elem)
+
+                # ── smb-security-mode / smb2-security-mode ────────────────
+                for sid in ('smb-security-mode', 'smb2-security-mode'):
+                    if sid in hscripts and target_scan == 'Internal':
+                        out = hscripts[sid]
+                        if 'not required' in out.lower() or 'disabled' in out.lower():
+                            proto = 'SMBv1' if sid == 'smb-security-mode' else 'SMBv2'
+                            add('HIGH', ip, file_port_str, f'{proto} Signing Not Required',
+                                'SMB relay attacks are possible without signing enforcement.')
+
+                # ── ms-sql-info ───────────────────────────────────────────
+                if 'ms-sql-info' in hscripts and target_scan == 'Internal':
+                    out = hscripts['ms-sql-info'].strip()
+                    if out:
+                        add('INFO', ip, file_port_str, 'SQL Server Instance Discovered',
+                            out[:300])
+
+                # ── Dameware on port 6129 ─────────────────────────────────
+                if portid == '6129':
+                    svc = port_elem.find('service')
+                    if svc is not None:
+                        svc_text = ' '.join([
+                            svc.attrib.get('name', ''),
+                            svc.attrib.get('product', ''),
+                            svc.attrib.get('version', ''),
+                        ]).lower()
+                        if 'dameware' in svc_text:
+                            add('HIGH', ip, port_str, 'Dameware Remote Control Detected',
+                                'Service banner identifies DameWare Mini Remote Control. '
+                                'Manual validation needed for CVE-2019-3980 (unauthenticated RCE). '
+                                'Ref: https://github.com/tenable/poc/blob/master/Solarwinds/Dameware/dwrcs_dwDrvInst_rce.py')
+
+                # ── SAP Gateway on port 3300 ─────────────────────────────
+                if portid == '3300' and protocol == 'tcp':
+                    add('HIGH', ip, port_str, 'SAP Gateway Detected',
+                        'Port 3300 is used by SAP Gateway. May be vulnerable to unauthenticated '
+                        'remote code execution. '
+                        'Ref: https://github.com/chipik/SAP_GW_RCE_exploit')
+
+                # ── Cisco Smart Install on port 4786 ─────────────────────
+                if portid == '4786' and protocol == 'tcp':
+                    add('HIGH', ip, port_str, 'Cisco Smart Install Detected',
+                        'Port 4786 is used by Cisco Smart Install. This feature allows '
+                        'unauthenticated configuration changes and arbitrary file read/write '
+                        'on Cisco switches (CVE-2018-0171). Disable with: no vstack')
+
+                # ── Cisco CUCM TFTP on port 6970 ─────────────────────────
+                if portid == '6970' and protocol == 'tcp':
+                    add('HIGH', ip, port_str, 'Cisco CUCM TFTP Detected',
+                        'Port 6970 is used by Cisco Unified Communications Manager TFTP. '
+                        'May be vulnerable to credential theft via SeeYouCM-Thief. '
+                        'Ref: https://github.com/trustedsec/SeeYouCM-Thief')
+
+                # ── ssl-cert — expired (External only) ───────────────────
+                if 'ssl-cert' in scripts and target_scan == 'External':
+                    out = scripts['ssl-cert']
+                    m = re.search(r'Not valid after:\s+(\d{4}-\d{2}-\d{2})', out)
+                    if m:
+                        expiry = datetime.date.fromisoformat(m.group(1))
+                        if expiry < datetime.date.today():
+                            add('MEDIUM', ip, port_str, 'Expired TLS Certificate',
+                                f'Certificate expired on {expiry}.')
+
+    # ── external exposure findings (port list, no script needed) ─────────────
+    if target_scan == 'External':
+        for ip, open_keys in open_ports_by_host.items():
+            for port_key, severity, label in EXTERNAL_SENSITIVE_PORTS:
+                if port_key in open_keys:
+                    proto = 'udp' if port_key.startswith('U:') else 'tcp'
+                    pnum  = port_key[2:] if port_key.startswith('U:') else port_key
+                    add(severity, ip, f'{proto}/{pnum}',
+                        'Service Exposed Externally', label)
+
+    # ── sort and write ────────────────────────────────────────────────────────
+    findings.sort(key=lambda f: (SEVERITY_ORDER.index(f[0]), f[1], f[2]))
+
+    _write_findings_txt(output_path, target_scan, findings)
+    _write_findings_md(output_path, target_scan, findings)
+    print('\x1b[33m' + f'\nFindings written to {output_path}/findings.txt and findings.md' + '\x1b[0m')
+
+
+def _write_findings_txt(output_path, target_scan, findings):
+    today = datetime.date.today()
+    lines = [
+        '=' * 60,
+        'SpooNMAP Security Findings Report',
+        '=' * 60,
+        f'Scan Type:  {target_scan}',
+        f'Date:       {today}',
+        f'Output Dir: {output_path}',
+        '',
+    ]
+    for sev in SEVERITY_ORDER:
+        group = [f for f in findings if f[0] == sev]
+        if not group:
+            continue
+        lines += [sev, '-' * len(sev)]
+        for _, host, port, title, detail in group:
+            lines.append(f'{host:<18} port {port:<12} [{title}] {detail}')
+        lines.append('')
+    lines.append(f'Total findings: {len(findings)}')
+    with open(f'{output_path}/findings.txt', 'w') as fh:
+        fh.write('\n'.join(lines) + '\n')
+
+
+def _write_findings_md(output_path, target_scan, findings):
+    today = datetime.date.today()
+    lines = [
+        '# SpooNMAP Security Findings Report',
+        '',
+        f'**Scan:** {target_scan} | **Date:** {today}',
+        '',
+    ]
+    for sev in SEVERITY_ORDER:
+        group = [f for f in findings if f[0] == sev]
+        if not group:
+            continue
+        lines += [f'## {sev}', '',
+                  '| Host | Port | Finding | Detail |',
+                  '|------|------|---------|--------|']
+        for _, host, port, title, detail in group:
+            detail_safe = detail.replace('|', '\\|')
+            lines.append(f'| `{host}` | {port} | {title} | {detail_safe} |')
+        lines.append('')
+    lines.append(f'**Total findings:** {len(findings)}')
+    with open(f'{output_path}/findings.md', 'w') as fh:
+        fh.write('\n'.join(lines) + '\n')
+
+
 # The Main Guts
 def main():
     global dir_path
@@ -573,6 +952,7 @@ def main():
         scan_type = ''
         dest_ports = []
         banner_scan = ''
+        script_scan = ''
         target_scan = ''
         source_port = '53'
         max_rate = ''
@@ -619,6 +999,7 @@ def main():
             exclusions_file = config_parser['exclusions_file']
             nmap_threads = config_parser.get('nmap_threads', 5)
             masscan_batch_size = config_parser.get('masscan_batch_size', 5)
+            script_scan = config_parser.get('script_scan', 'False') == 'True'
 
         if scan_type == '':
             category_names = list(SERVICE_CATEGORIES.keys())
@@ -664,6 +1045,21 @@ def main():
                 banner_scan = True
             else:
                 banner_scan = False
+
+        if script_scan == '':
+            if banner_scan:
+                script_choice = 'n'
+                script_choice = input(
+                    '\nWould you like to run NSE security scripts on identified services '
+                    '(default: No)? '
+                ) or script_choice
+                script_scan = script_choice[0].lower() == 'y'
+            else:
+                script_scan = False
+
+        # NSE scripts require banner scanning
+        if script_scan:
+            banner_scan = True
 
         if not target_scan:
             source_choice = '1'
@@ -748,6 +1144,7 @@ def main():
         print(f'\nScan Type: {scan_type}')
         print(f'Target Ports: {dest_ports}')
         print(f'Service Banner: {banner_scan}')
+        print(f'NSE Script Scanning: {script_scan}')
         print(f'Source Port: {source_port}')
         print(f'Masscan Max Packet Rate (pps): {max_rate}')
         print(f'Target File: {target_file}')
@@ -761,8 +1158,11 @@ def main():
         status_summary = mass_scan(scan_type, dest_ports, source_port, max_rate, masscan_target_file, exclusions_file, masscan_batch_size)
 
         # If service banners requested, send to nmap
-        if banner_scan or banner_scan == 'Yes':
-            nmap_scan(source_port, nmap_threads, ip_to_hostname)
+        if banner_scan or script_scan:
+            nmap_scan(source_port, nmap_threads, ip_to_hostname, script_scan, target_scan)
+
+            if script_scan and target_scan == 'Internal':
+                _scan_extra_sql_ports(output_path, source_port)
 
         # Combine all live hosts into one file
         all_ips = set()
@@ -777,7 +1177,7 @@ def main():
                     output_file.write(ip)
 
             # Combine all XML results into one file
-            if banner_scan :
+            if banner_scan or script_scan:
                 result_dir = f'{output_path}/nmap_results/'
             else:
                 result_dir = f'{output_path}/masscan_results/'
@@ -792,6 +1192,9 @@ def main():
             with open(f'{output_path}/spoonmap_output.xml', 'w+') as spoonmap_output:
                 spoonmap_output.write(xml_result)
             print('\x1b[33m' + f'\nResults written to {output_path}/spoonmap_output.xml' + '\x1b[0m')
+
+            if script_scan:
+                generate_findings(output_path, target_scan)
 
         else:
             status_summary += '\nNo hosts found.'
