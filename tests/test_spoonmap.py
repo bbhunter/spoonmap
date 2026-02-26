@@ -949,6 +949,22 @@ class TestIsPrinter:
         elem = _etree.fromstring('<port protocol="udp" portid="161"/>')
         assert _is_printer(elem) is False
 
+    def test_sysdescr_jetdirect_detected(self):
+        xml_str = (
+            '<port protocol="udp" portid="161">'
+            '<script id="snmp-sysdescr" output="HP ETHERNET MULTI-ENVIRONMENT,ROM D.22.14,JETDIRECT,JD170"/>'
+            '</port>'
+        )
+        assert _is_printer(_etree.fromstring(xml_str)) is True
+
+    def test_sysdescr_non_printer_not_flagged(self):
+        xml_str = (
+            '<port protocol="udp" portid="161">'
+            '<script id="snmp-sysdescr" output="Linux router 5.4.0"/>'
+            '</port>'
+        )
+        assert _is_printer(_etree.fromstring(xml_str)) is False
+
 
 # ── snmp-brute finding ────────────────────────────────────────────────────────
 
@@ -981,6 +997,19 @@ class TestSnmpBruteFinding:
             '10.0.0.10', 'udp', '161',
             scripts={'snmp-brute': 'public - Valid credentials'},
             service_attrs={'name': 'snmp', 'devicetype': 'printer'},
+        )
+        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'SNMP Default Community String' not in content
+
+    def test_snmp_brute_suppressed_via_sysdescr(self, nmap_dir):
+        xml = _nmap_xml(
+            '10.0.0.11', 'udp', '161',
+            scripts={
+                'snmp-brute': 'public - Valid credentials',
+                'snmp-sysdescr': 'HP ETHERNET MULTI-ENVIRONMENT,ROM D.22.14,JETDIRECT,JD170',
+            },
         )
         (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')

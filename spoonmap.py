@@ -611,8 +611,8 @@ EXTERNAL_PORT_SCRIPTS = {
     '25':    'smtp-ntlm-info',
     '110':   'pop3-ntlm-info',
     '143':   'imap-ntlm-info',
-    '161':   'snmp-brute',
-    'U:161': 'snmp-brute',
+    '161':   'snmp-brute,snmp-sysdescr',
+    'U:161': 'snmp-brute,snmp-sysdescr',
     '443':   'ssl-cert',
     '465':   'smtp-ntlm-info,ssl-cert',
     '587':   'smtp-ntlm-info',
@@ -640,8 +640,8 @@ INTERNAL_PORT_SCRIPTS = {
     '1433':  'ms-sql-info',
     '3389':  'rdp-enum-encryption,rdp-vuln-ms12-020',
     '4786':  f'{_DIR}/nse/cisco-siet.nse',
-    '161':   'snmp-brute',
-    'U:161': 'snmp-brute',
+    '161':   'snmp-brute,snmp-sysdescr',
+    'U:161': 'snmp-brute,snmp-sysdescr',
     'U:1434': 'ms-sql-info',
 }
 
@@ -757,7 +757,7 @@ SEVERITY_ORDER = ['CRITICAL', 'HIGH', 'MEDIUM', 'INFO']
 
 
 _PRINTER_KEYWORDS = frozenset([
-    'hp jetdirect', 'laserjet', 'xerox', 'canon', 'epson',
+    'hp jetdirect', 'jetdirect', 'laserjet', 'xerox', 'canon', 'epson',
     'kyocera', 'ricoh', 'brother', 'lexmark', 'konica', 'minolta',
     'sharp', 'oki ', 'toshiba e-studio',
 ])
@@ -766,12 +766,18 @@ _PRINTER_KEYWORDS = frozenset([
 def _is_printer(port_elem):
     """Return True if the service on this port is identified as a printer."""
     svc = port_elem.find('service')
-    if svc is None:
-        return False
-    if svc.attrib.get('devicetype', '').lower() == 'printer':
-        return True
-    product = svc.attrib.get('product', '').lower()
-    return any(kw in product for kw in _PRINTER_KEYWORDS)
+    if svc is not None:
+        if svc.attrib.get('devicetype', '').lower() == 'printer':
+            return True
+        product = svc.attrib.get('product', '').lower()
+        if any(kw in product for kw in _PRINTER_KEYWORDS):
+            return True
+    for script in port_elem.findall('script'):
+        if script.attrib.get('id') == 'snmp-sysdescr':
+            sysdescr = script.attrib.get('output', '').lower()
+            if any(kw in sysdescr for kw in _PRINTER_KEYWORDS):
+                return True
+    return False
 
 
 def generate_findings(output_path, target_scan):
