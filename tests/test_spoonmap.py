@@ -7,6 +7,7 @@ import pytest
 
 import spoonmap
 from spoonmap import (
+    EXTERNAL_SENSITIVE_PORTS,
     SERVICE_CATEGORIES,
     _cleanup_cmd,
     _delete_previous_results,
@@ -352,6 +353,39 @@ class TestGenerateFindings:
         generate_findings(str(nmap_dir), 'Internal')
         assert 'Signing Not Required' not in (nmap_dir / 'findings.txt').read_text()
 
+    # ── SMBv1 Enabled ─────────────────────────────────────────────────────────
+
+    def test_smbv1_enabled_detected(self, nmap_dir):
+        xml = _nmap_xml_hostscript('10.0.0.6', 'tcp', '445',
+                                   hostscripts={'smb-security-mode':
+                                                'account_used: guest message_signing: required'})
+        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'SMBv1 Enabled' in content
+        assert 'MEDIUM' in content
+        assert '10.0.0.6' in content
+
+    def test_smbv1_enabled_not_on_external(self, nmap_dir):
+        xml = _nmap_xml_hostscript('1.2.3.4', 'tcp', '445',
+                                   hostscripts={'smb-security-mode':
+                                                'account_used: guest message_signing: required'})
+        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        assert 'SMBv1 Enabled' not in (nmap_dir / 'findings.txt').read_text()
+
+    def test_smbv1_enabled_and_signing_not_required_both_fire(self, nmap_dir):
+        # Signing disabled implies SMBv1 is active — both findings should appear
+        xml = _nmap_xml_hostscript('10.0.0.9', 'tcp', '445',
+                                   hostscripts={'smb-security-mode':
+                                                'message_signing: disabled (dangerous, but default)'})
+        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'SMBv1 Enabled' in content
+        assert 'SMBv1 Signing Not Required' in content
+        assert '10.0.0.9' in content
+
     # ── EternalBlue (MS17-010) ────────────────────────────────────────────────
 
     def test_ms17010_vulnerable_critical_finding(self, nmap_dir):
@@ -696,6 +730,23 @@ class TestServiceCategoriesDockerPorts:
 
     def test_specialized_includes_docker_port_4243(self):
         assert '4243' in SERVICE_CATEGORIES['Specialized']
+
+    def test_remote_management_includes_winrm_5985(self):
+        assert '5985' in SERVICE_CATEGORIES['Remote Management']
+
+    def test_remote_management_includes_winrm_5986(self):
+        assert '5986' in SERVICE_CATEGORIES['Remote Management']
+
+    def test_web_includes_weblogic_7001(self):
+        assert '7001' in SERVICE_CATEGORIES['Web']
+
+    def test_web_includes_weblogic_7002(self):
+        assert '7002' in SERVICE_CATEGORIES['Web']
+
+    def test_weblogic_ports_in_external_sensitive(self):
+        sensitive_ports = {p for p, _, _ in EXTERNAL_SENSITIVE_PORTS}
+        assert '7001' in sensitive_ports
+        assert '7002' in sensitive_ports
 
 
 # ── Full Port Scan in mass_scan() ─────────────────────────────────────────────

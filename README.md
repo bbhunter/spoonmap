@@ -20,9 +20,9 @@ ____/ /__  /_/ / /_/ / /_/ /  /|  / _  /  / / _  ___ |  ____/
 
 
 Service Categories (comma-separated numbers, default: All)
-	(1) Web          [80, 443, 8000, 8080, 8081, 8443, 8888, 9090, 10443]
+	(1) Web          [80, 443, 7001, 7002, 8000, 8080, 8081, 8443, 8888, 9090, 10443]
 	(2) Database     [1433, U:1434, 1521, 3306, 5432, 6379, 9200, 27017]
-	(3) Remote Management  [22, 23, 3389, 5900, 5901, 6129, 1723]
+	(3) Remote Management  [22, 23, 3389, 5900, 5901, 6129, 1723, 5985, 5986]
 	(4) Email        [25, 110, 143, 465, 587, 993, 995]
 	(5) Authentication     [389, 636, 445, 135, 139, U:137]
 	(6) Network Infrastructure  [53, 179, 500, U:500, 161, U:161]
@@ -57,7 +57,7 @@ You can also create a `config.json` file (based on `config.json.sample`) to skip
     "banner_scan": "True",
     "script_scan": "False",
     "target_scan": "Internal",
-    "max_rate": "2000",
+    "max_rate": "1000",
     "target_file": "ranges.txt",
     "output_path": "./",
     "exclusions_file": "exclusions.txt",
@@ -71,6 +71,16 @@ For a fully custom port list, omit `scan_categories` and use `"dest_ports": ["80
 UDP ports are specified with a `U:` prefix (e.g. `"U:53"`).
 
 If a previous scan's output is detected in `output_path`, the tool offers to delete it or resume where it left off.
+
+To remove scan data non-interactively, use the `--cleanup` flag:
+
+```
+# Path taken from output_path in config.json
+./spoonmap.py --cleanup
+
+# Or specify the directory explicitly
+./spoonmap.py --cleanup /path/to/output
+```
 
 ## config.json Parameters
 
@@ -141,7 +151,8 @@ After scanning, `generate_findings()` parses all nmap XML results and produces s
 | HIGH | SAP Gateway detected (3300) |
 | HIGH | Cisco Smart Install detected (4786) |
 | HIGH | Cisco CUCM TFTP detected (6970) |
-| HIGH | Service Exposed Externally (databases, RDP, SMB, SNMP, etc.) |
+| HIGH | Service Exposed Externally (databases, RDP, SMB, SNMP, WebLogic, etc.) |
+| MEDIUM | SMBv1 protocol enabled |
 | MEDIUM | Weak SSH algorithms (deprecated ciphers/MACs/KEX) |
 | MEDIUM | Weak RDP encryption / NLA not enforced |
 | MEDIUM | Java RMI registry exposed |
@@ -183,6 +194,11 @@ http://[CUCM IP Address]:6970/ConfigFileCacheList.txt
 2375, 4243
 Docker API (unauthenticated access auto-detected by script_scan)
 https://www.rapid7.com/db/modules/exploit/linux/http/docker_daemon_tcp
+
+7001, 7002
+Oracle WebLogic Server
+https://www.rapid7.com/db/modules/exploit/multi/http/oracle_weblogic_wsat_deserialization_rce
+https://www.rapid7.com/db/modules/exploit/multi/http/oracle_weblogic_deserialize_asyncresponseservice
 
 8080
 Adobe ColdFusion BlazeDS

@@ -18,7 +18,12 @@ cp config.json.sample config.json
 ./spoonmap.py
 ```
 
-There is no build step, test suite, or linter configured.
+Run the test suite with:
+
+```bash
+uv run pytest tests/
+uv run pytest tests/test_spoonmap.py::TestGenerateFindings  # single class
+```
 
 ## Architecture
 
@@ -28,7 +33,9 @@ The entire tool is a single script: `spoonmap.py`. Execution flow:
 2. `preprocess_targets()` — reads the target file; resolves hostnames via DNS to IPs (masscan requires IPs); writes `masscan_targets.txt` and `ip_hostname_map.json` to the output directory
 3. `mass_scan()` — iterates over each port, runs masscan as a subprocess, parses XML output, deduplicates IPs per port using in-memory sets, writes `live_hosts/port<N>.txt`
 4. `nmap_scan()` — if banner scanning is enabled, uses a thread pool (`Queue` + worker threads, default 5 threads) to run nmap concurrently against each `live_hosts/port<N>.txt`; workers skip ports already present in `nmap_results/`
-5. `main()` — aggregates all live hosts into `all_live_hosts.txt` and merges all per-port XML into `spoonmap_output.xml`
+5. `main()` — aggregates all live hosts into `all_live_hosts.txt` and merges all per-port XML into `spoonmap_output.xml`; if `script_scan` is enabled, calls `generate_findings()` to produce `findings.txt` / `findings.md`
+
+Pass `--cleanup [dir]` to remove prior scan output non-interactively (reads `output_path` from `config.json` if no directory is given).
 
 ## Output Structure
 
@@ -38,24 +45,28 @@ The entire tool is a single script: `spoonmap.py`. Execution flow:
   ip_hostname_map.json      # hostname → IP mapping
   masscan_results/portN.xml # raw masscan XML per port
   live_hosts/portN.txt      # deduplicated IPs per port
-  nmap_results/portN.xml    # nmap banner scan XML per port
+  nmap_results/portN.xml    # nmap banner/script XML per port
   all_live_hosts.txt        # union of all live IPs
   spoonmap_output.xml       # merged XML (nmap if banner scan, masscan otherwise)
+  findings.txt              # severity-sorted findings report (script_scan only)
+  findings.md               # same report in Markdown table format
 ```
 
 ## config.json Parameters
 
 | Key | Values |
 |-----|--------|
-| `scan_type` | `Small Port Scan`, `Medium Port Scan`, `Large Port Scan`, `Extra Large Port Scan`, `Full Port Scan`, `Custom Port Scan` |
-| `dest_ports` | Array of port strings; prefix `U:` for UDP (e.g. `"U:53"`); only used for `Custom Port Scan` |
+| `scan_categories` | `"All"`, `"Full"`, or array of category names (e.g. `["Web","Database"]`); omit to use `dest_ports` |
+| `dest_ports` | Array of port strings; prefix `U:` for UDP (e.g. `"U:53"`); overrides `scan_categories` |
 | `banner_scan` | `"True"` or `"False"` |
+| `script_scan` | `"True"` or `"False"`; runs NSE security scripts (implies `banner_scan`) |
 | `target_scan` | `"External"` (source port 53) or `"Internal"` (source port 88) |
-| `max_rate` | Packets/second string; recommended: external=20000, internal=2000, full scan halve these |
+| `max_rate` | Packets/second string; recommended: external=10000, internal=1000 |
 | `target_file` | Path to file with one IP/CIDR/hostname per line |
 | `output_path` | Directory for all output files |
 | `exclusions_file` | Path to file with IPs/CIDRs to exclude (passed to masscan `--excludefile`) |
 | `nmap_threads` | Integer, concurrent nmap processes (default: 5) |
+| `masscan_batch_size` | Integer, ports per masscan invocation (default: 5) |
 
 ## Key Implementation Details
 

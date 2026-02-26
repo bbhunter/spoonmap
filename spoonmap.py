@@ -670,19 +670,21 @@ EXTERNAL_SENSITIVE_PORTS = [
     ('21',    'HIGH', 'FTP — should not be exposed unless wrapped in SSL/SSH'),
     ('23',    'HIGH', 'Telnet — unencrypted, should not be internet-facing'),
     ('U:137', 'HIGH', 'NetBIOS Name Service — should not be internet-facing'),
+    ('7001',  'HIGH', 'WebLogic — admin/app server port should not be internet-facing'),
+    ('7002',  'HIGH', 'WebLogic — admin/app server SSL port should not be internet-facing'),
     ('2375',  'CRITICAL', 'Docker API — unauthenticated remote access should never be internet-facing'),
     ('4243',  'CRITICAL', 'Docker API — unauthenticated remote access should never be internet-facing'),
 ]
 
 SERVICE_CATEGORIES = {
     'Web': [
-        '80', '443', '8000', '8080', '8081', '8443', '8888', '9090', '10443'
+        '80', '443', '7001', '7002', '8000', '8080', '8081', '8443', '8888', '9090', '10443'
     ],
     'Database': [
         '1433', 'U:1434', '1521', '3306', '5432', '6379', '9200', '27017'
     ],
     'Remote Management': [
-        '22', '23', '3389', '5900', '5901', '6129', '1723'
+        '22', '23', '3389', '5900', '5901', '6129', '1723', '5985', '5986'
     ],
     'Email': [
         '25', '110', '143', '465', '587', '993', '995'
@@ -947,6 +949,15 @@ def generate_findings(output_path, target_scan):
                             add('HIGH', ip, file_port_str, f'{proto} Signing Not Required',
                                 'SMB relay attacks are possible without signing enforcement.')
 
+                # ── smb-security-mode → SMBv1 enabled ────────────────────
+                if 'smb-security-mode' in hscripts and target_scan == 'Internal':
+                    out = hscripts['smb-security-mode'].strip()
+                    if out:
+                        add('MEDIUM', ip, file_port_str, 'SMBv1 Enabled',
+                            'SMBv1 protocol is active on this host. This legacy protocol '
+                            'has known critical vulnerabilities (EternalBlue, MS08-067). '
+                            'Disable SMBv1 immediately.')
+
                 # ── smb-vuln-ms17-010 (EternalBlue) ──────────────────────
                 if 'smb-vuln-ms17-010' in hscripts and target_scan == 'Internal':
                     out = hscripts['smb-vuln-ms17-010']
@@ -1148,6 +1159,18 @@ _FINDING_REPRO = {
             '| smb2-security-mode:\n'
             '|   3.1.1:\n'
             '|_    Message signing enabled but not required'
+        ),
+    },
+    'SMBv1 Enabled': {
+        'flags': '--script smb-security-mode',
+        'sample': (
+            'PORT    STATE SERVICE\n'
+            '445/tcp open  microsoft-ds\n'
+            '| smb-security-mode:\n'
+            '|   account_used: guest\n'
+            '|   authentication_level: user\n'
+            '|   challenge_response: supported\n'
+            '|_  message_signing: required'
         ),
     },
     'NFS Shares Exposed': {
