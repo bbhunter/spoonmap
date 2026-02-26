@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -229,6 +230,37 @@ def _select_probe_ports(dest_ports, max_ports=5):
     if not probe:
         probe = list(dest_ports[:max_ports])
     return probe
+
+
+# Result dirs and files written during a scan run.
+_RESULT_DIRS  = ('masscan_results', 'live_hosts', 'nmap_results')
+_RESULT_FILES = ('all_live_hosts.txt', 'masscan_targets.txt',
+                 'ip_hostname_map.json', 'spoonmap_output.xml',
+                 'findings.txt', 'findings.md')
+
+
+def _previous_results_exist(output_path):
+    """Return True if any prior scan output is present under output_path."""
+    for d in _RESULT_DIRS:
+        p = os.path.join(output_path, d)
+        if os.path.isdir(p) and os.listdir(p):
+            return True
+    for f in _RESULT_FILES:
+        if os.path.exists(os.path.join(output_path, f)):
+            return True
+    return False
+
+
+def _delete_previous_results(output_path):
+    """Remove all prior scan output under output_path."""
+    for d in _RESULT_DIRS:
+        p = os.path.join(output_path, d)
+        if os.path.isdir(p):
+            shutil.rmtree(p)
+    for f in _RESULT_FILES:
+        p = os.path.join(output_path, f)
+        if os.path.exists(p):
+            os.remove(p)
 
 
 def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusions_file, batch_size=5):
@@ -1159,6 +1191,20 @@ def main():
         print(f'Exclusions File: {exclusions_file}')
         print(f'NMAP Concurrent Threads: {nmap_threads}')
         print(f'Masscan Batch Size: {masscan_batch_size}\n')
+
+        # Detect previous scan results and ask whether to delete or append
+        if _previous_results_exist(output_path):
+            print('\x1b[33m' + '\nPrevious scan results detected in output directory.' + '\x1b[0m')
+            while True:
+                choice = input('Delete previous results or append to them? '
+                               '[d]elete / [a]ppend (default: append): ').strip().lower() or 'a'
+                if choice and choice[0] in ('d', 'a'):
+                    break
+            if choice[0] == 'd':
+                _delete_previous_results(output_path)
+                print('\x1b[33m' + 'Previous results deleted.' + '\x1b[0m')
+            else:
+                print('\x1b[33m' + 'Appending to previous results.' + '\x1b[0m')
 
         # Preprocess targets to handle hostnames
         masscan_target_file, ip_to_hostname = preprocess_targets(target_file, output_path)

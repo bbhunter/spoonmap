@@ -5,7 +5,9 @@ import textwrap
 import pytest
 
 from spoonmap import (
+    _delete_previous_results,
     _get_scripts_for_port,
+    _previous_results_exist,
     _select_probe_ports,
     _write_findings_md,
     _write_findings_txt,
@@ -429,3 +431,85 @@ class TestGenerateFindings:
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert content.index('HIGH') < content.index('INFO')
+
+
+# ── _previous_results_exist / _delete_previous_results ───────────────────────
+
+class TestPreviousResults:
+    def test_empty_dir_returns_false(self, tmp_path):
+        assert _previous_results_exist(str(tmp_path)) is False
+
+    def test_detects_masscan_results_dir(self, tmp_path):
+        d = tmp_path / 'masscan_results'
+        d.mkdir()
+        (d / 'port80.xml').write_text('<nmaprun/>')
+        assert _previous_results_exist(str(tmp_path)) is True
+
+    def test_detects_live_hosts_dir(self, tmp_path):
+        d = tmp_path / 'live_hosts'
+        d.mkdir()
+        (d / 'port80.txt').write_text('10.0.0.1\n')
+        assert _previous_results_exist(str(tmp_path)) is True
+
+    def test_detects_nmap_results_dir(self, tmp_path):
+        d = tmp_path / 'nmap_results'
+        d.mkdir()
+        (d / 'port22.xml').write_text('<nmaprun/>')
+        assert _previous_results_exist(str(tmp_path)) is True
+
+    def test_detects_aggregate_file(self, tmp_path):
+        (tmp_path / 'all_live_hosts.txt').write_text('10.0.0.1\n')
+        assert _previous_results_exist(str(tmp_path)) is True
+
+    def test_detects_spoonmap_output_xml(self, tmp_path):
+        (tmp_path / 'spoonmap_output.xml').write_text('<nmaprun/>')
+        assert _previous_results_exist(str(tmp_path)) is True
+
+    def test_detects_findings_txt(self, tmp_path):
+        (tmp_path / 'findings.txt').write_text('findings\n')
+        assert _previous_results_exist(str(tmp_path)) is True
+
+    def test_empty_result_dir_not_detected(self, tmp_path):
+        # An empty result directory is not considered a previous run
+        (tmp_path / 'masscan_results').mkdir()
+        assert _previous_results_exist(str(tmp_path)) is False
+
+    def test_delete_removes_result_dirs(self, tmp_path):
+        for d in ('masscan_results', 'live_hosts', 'nmap_results'):
+            p = tmp_path / d
+            p.mkdir()
+            (p / 'file.xml').write_text('<nmaprun/>')
+        _delete_previous_results(str(tmp_path))
+        for d in ('masscan_results', 'live_hosts', 'nmap_results'):
+            assert not (tmp_path / d).exists()
+
+    def test_delete_removes_aggregate_files(self, tmp_path):
+        for f in ('all_live_hosts.txt', 'masscan_targets.txt',
+                  'ip_hostname_map.json', 'spoonmap_output.xml',
+                  'findings.txt', 'findings.md'):
+            (tmp_path / f).write_text('data')
+        _delete_previous_results(str(tmp_path))
+        for f in ('all_live_hosts.txt', 'masscan_targets.txt',
+                  'ip_hostname_map.json', 'spoonmap_output.xml',
+                  'findings.txt', 'findings.md'):
+            assert not (tmp_path / f).exists()
+
+    def test_delete_leaves_other_files_untouched(self, tmp_path):
+        (tmp_path / 'config.json').write_text('{}')
+        (tmp_path / 'ranges.txt').write_text('10.0.0.0/24\n')
+        _delete_previous_results(str(tmp_path))
+        assert (tmp_path / 'config.json').exists()
+        assert (tmp_path / 'ranges.txt').exists()
+
+    def test_delete_is_idempotent(self, tmp_path):
+        # Calling delete on a clean dir must not raise
+        _delete_previous_results(str(tmp_path))
+        _delete_previous_results(str(tmp_path))
+
+    def test_false_after_delete(self, tmp_path):
+        d = tmp_path / 'nmap_results'
+        d.mkdir()
+        (d / 'port22.xml').write_text('<nmaprun/>')
+        (tmp_path / 'findings.txt').write_text('x')
+        _delete_previous_results(str(tmp_path))
+        assert _previous_results_exist(str(tmp_path)) is False
