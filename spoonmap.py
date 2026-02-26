@@ -610,10 +610,10 @@ INTERNAL_PORT_SCRIPTS = {
     '21':    'ftp-anon',
     '111':   'rpcinfo,nfs-showmount,nfs-ls',
     '139':   'smb-security-mode',
-    '445':   'smb-security-mode,smb2-security-mode,smb-vuln-ms17-010,smb-vuln-ms08-067',
+    '445':   'smb-security-mode,smb2-security-mode,smb-vuln-ms17-010,smb-vuln-ms08-067,smb-double-pulsar-backdoor,smb-vuln-cve-2017-7494',
     '1090':  'rmi-dumpregistry',
     '1433':  'ms-sql-info',
-    '3389':  'rdp-enum-encryption',
+    '3389':  'rdp-enum-encryption,rdp-vuln-ms12-020',
     '4786':  f'{_DIR}/nse/cisco-siet.nse',
     'U:1434': 'ms-sql-info',
 }
@@ -841,6 +841,14 @@ def generate_findings(output_path, target_scan):
                         add('MEDIUM', ip, port_str, 'Weak RDP Encryption',
                             'Classic RDP encryption or NLA not enforced.')
 
+                # ── rdp-vuln-ms12-020 ─────────────────────────────────────
+                if 'rdp-vuln-ms12-020' in scripts and target_scan == 'Internal':
+                    out = scripts['rdp-vuln-ms12-020']
+                    if 'VULNERABLE' in out and 'NOT VULNERABLE' not in out:
+                        add('CRITICAL', ip, port_str, 'MS12-020 RDP (CVE-2012-0002)',
+                            'Host is vulnerable to unauthenticated RDP RCE/DoS (MS12-020). '
+                            'Apply MS12-020 patch immediately or disable RDP.')
+
                 # ── Dameware on port 6129 ─────────────────────────────────
                 if portid == '6129':
                     svc = port_elem.find('service')
@@ -923,6 +931,22 @@ def generate_findings(output_path, target_scan):
                         add('CRITICAL', ip, file_port_str, 'MS08-067 NetAPI (CVE-2008-4250)',
                             'Host is vulnerable to unauthenticated SMB RCE (Conficker vector). '
                             'Apply MS08-067 patch immediately and isolate host.')
+
+                # ── smb-double-pulsar-backdoor ────────────────────────────
+                if 'smb-double-pulsar-backdoor' in hscripts and target_scan == 'Internal':
+                    out = hscripts['smb-double-pulsar-backdoor']
+                    if 'VULNERABLE' in out and 'NOT VULNERABLE' not in out:
+                        add('CRITICAL', ip, file_port_str, 'DoublePulsar Backdoor Active',
+                            'Host has an active DoublePulsar implant — it has already been '
+                            'compromised. Isolate immediately and begin incident response.')
+
+                # ── smb-vuln-cve-2017-7494 (SambaCry) ────────────────────
+                if 'smb-vuln-cve-2017-7494' in hscripts and target_scan == 'Internal':
+                    out = hscripts['smb-vuln-cve-2017-7494']
+                    if 'VULNERABLE' in out and 'NOT VULNERABLE' not in out:
+                        add('CRITICAL', ip, file_port_str, 'SambaCry (CVE-2017-7494)',
+                            'Samba is vulnerable to unauthenticated RCE via a writable share '
+                            '(SambaCry). Update Samba immediately.')
 
                 # ── ms-sql-info ───────────────────────────────────────────
                 if 'ms-sql-info' in hscripts and target_scan == 'Internal':

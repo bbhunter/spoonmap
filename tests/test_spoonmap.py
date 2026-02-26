@@ -394,6 +394,62 @@ class TestGenerateFindings:
         generate_findings(str(nmap_dir), 'Internal')
         assert 'MS08-067' not in (nmap_dir / 'findings.txt').read_text()
 
+    # ── DoublePulsar ──────────────────────────────────────────────────────────
+
+    def test_doublepulsar_vulnerable_critical_finding(self, nmap_dir):
+        xml = _nmap_xml_hostscript('10.0.0.9', 'tcp', '445',
+                                   hostscripts={'smb-double-pulsar-backdoor': 'VULNERABLE'})
+        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'DoublePulsar' in content
+        assert 'CRITICAL' in content
+
+    def test_doublepulsar_not_vulnerable_no_finding(self, nmap_dir):
+        xml = _nmap_xml_hostscript('10.0.0.9', 'tcp', '445',
+                                   hostscripts={'smb-double-pulsar-backdoor': 'NOT VULNERABLE'})
+        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        assert 'DoublePulsar' not in (nmap_dir / 'findings.txt').read_text()
+
+    # ── SambaCry ──────────────────────────────────────────────────────────────
+
+    def test_sambacry_vulnerable_critical_finding(self, nmap_dir):
+        xml = _nmap_xml_hostscript('10.0.0.10', 'tcp', '445',
+                                   hostscripts={'smb-vuln-cve-2017-7494': 'VULNERABLE'})
+        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'SambaCry' in content
+        assert 'CRITICAL' in content
+
+    def test_sambacry_not_vulnerable_no_finding(self, nmap_dir):
+        xml = _nmap_xml_hostscript('10.0.0.10', 'tcp', '445',
+                                   hostscripts={'smb-vuln-cve-2017-7494': 'NOT VULNERABLE'})
+        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        assert 'SambaCry' not in (nmap_dir / 'findings.txt').read_text()
+
+    # ── MS12-020 RDP ──────────────────────────────────────────────────────────
+
+    def test_ms12020_vulnerable_critical_finding(self, nmap_dir):
+        # rdp-vuln-ms12-020 is a portrule script — appears under <port>
+        xml = _nmap_xml('10.0.0.11', 'tcp', '3389',
+                        scripts={'rdp-vuln-ms12-020': 'State: VULNERABLE'})
+        (nmap_dir / 'nmap_results' / 'port3389.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'MS12-020' in content
+        assert 'CRITICAL' in content
+        assert '10.0.0.11' in content
+
+    def test_ms12020_not_vulnerable_no_finding(self, nmap_dir):
+        xml = _nmap_xml('10.0.0.11', 'tcp', '3389',
+                        scripts={'rdp-vuln-ms12-020': 'NOT VULNERABLE'})
+        (nmap_dir / 'nmap_results' / 'port3389.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        assert 'MS12-020' not in (nmap_dir / 'findings.txt').read_text()
+
     # ── NTLM info disclosure ─────────────────────────────────────────────────
 
     def test_ntlm_disclosure_on_external(self, nmap_dir):
