@@ -803,29 +803,6 @@ def generate_findings(output_path, target_scan):
                         add('MEDIUM', ip, port_str, 'Weak RDP Encryption',
                             'Classic RDP encryption or NLA not enforced.')
 
-            # ── host-level scripts (smb-security-mode, ms-sql-info, etc.) ────
-            # These NSE scripts use hostrule and appear under <hostscript>,
-            # not inside a <port> element.
-            hostscript_elem = host.find('hostscript')
-            if hostscript_elem is not None:
-                hscripts = scripts_for_elem(hostscript_elem)
-
-                # ── smb-security-mode / smb2-security-mode ────────────────
-                for sid in ('smb-security-mode', 'smb2-security-mode'):
-                    if sid in hscripts and target_scan == 'Internal':
-                        out = hscripts[sid]
-                        if 'not required' in out.lower() or 'disabled' in out.lower():
-                            proto = 'SMBv1' if sid == 'smb-security-mode' else 'SMBv2'
-                            add('HIGH', ip, file_port_str, f'{proto} Signing Not Required',
-                                'SMB relay attacks are possible without signing enforcement.')
-
-                # ── ms-sql-info ───────────────────────────────────────────
-                if 'ms-sql-info' in hscripts and target_scan == 'Internal':
-                    out = hscripts['ms-sql-info'].strip()
-                    if out:
-                        add('INFO', ip, file_port_str, 'SQL Server Instance Discovered',
-                            out[:300])
-
                 # ── Dameware on port 6129 ─────────────────────────────────
                 if portid == '6129':
                     svc = port_elem.find('service')
@@ -871,6 +848,29 @@ def generate_findings(output_path, target_scan):
                         if expiry < datetime.date.today():
                             add('MEDIUM', ip, port_str, 'Expired TLS Certificate',
                                 f'Certificate expired on {expiry}.')
+
+            # ── host-level scripts (smb-security-mode, ms-sql-info, etc.) ────
+            # These NSE scripts use hostrule and appear under <hostscript>,
+            # not inside a <port> element.
+            hostscript_elem = host.find('hostscript')
+            if hostscript_elem is not None:
+                hscripts = scripts_for_elem(hostscript_elem)
+
+                # ── smb-security-mode / smb2-security-mode ────────────────
+                for sid in ('smb-security-mode', 'smb2-security-mode'):
+                    if sid in hscripts and target_scan == 'Internal':
+                        out = hscripts[sid]
+                        if 'not required' in out.lower() or 'disabled' in out.lower():
+                            proto = 'SMBv1' if sid == 'smb-security-mode' else 'SMBv2'
+                            add('HIGH', ip, file_port_str, f'{proto} Signing Not Required',
+                                'SMB relay attacks are possible without signing enforcement.')
+
+                # ── ms-sql-info ───────────────────────────────────────────
+                if 'ms-sql-info' in hscripts and target_scan == 'Internal':
+                    out = hscripts['ms-sql-info'].strip()
+                    if out:
+                        add('INFO', ip, file_port_str, 'SQL Server Instance Discovered',
+                            out[:300])
 
     # ── external exposure findings (port list, no script needed) ─────────────
     if target_scan == 'External':

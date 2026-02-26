@@ -7,10 +7,18 @@ name = "spoonmap"
 version = "0.1.0"
 description = "masscan + nmap orchestration wrapper for fast network scanning"
 readme = "README.md"
-requires-python = ">=3.6"
+requires-python = ">=3.8"
 
 [project.scripts]
 spoonmap = "spoonmap:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.hatch.build.targets.wheel]
 # Include the sample config and empty exclusions template alongside the module
