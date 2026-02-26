@@ -1001,6 +1001,14 @@ def main():
             masscan_batch_size = config_parser.get('masscan_batch_size', 5)
             script_scan = config_parser.get('script_scan', 'False') == 'True'
 
+            # Resolve relative paths in config relative to the script directory
+            if target_file and not os.path.isabs(target_file):
+                target_file = os.path.join(dir_path, target_file)
+            if output_path and not os.path.isabs(output_path):
+                output_path = os.path.join(dir_path, output_path)
+            if exclusions_file and not os.path.isabs(exclusions_file):
+                exclusions_file = os.path.join(dir_path, exclusions_file)
+
         if scan_type == '':
             category_names = list(SERVICE_CATEGORIES.keys())
             while True:
@@ -1124,7 +1132,7 @@ def main():
                 ) or exclusions_choice
 
             if exclusions_choice[0].lower() == 'y':
-                exclusions_file = 'exclusions.txt'
+                exclusions_file = f'{dir_path}/exclusions.txt'
                 while True:
                     print('\nExample Exclusions File')
                     print('One CIDR or IP Address per line\n')
