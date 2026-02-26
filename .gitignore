@@ -1,1 +1,14 @@
 config.json
+__pycache__/
+*.pyc
+
+# generated scan output
+all_live_hosts.txt
+masscan_targets.txt
+ip_hostname_map.json
+masscan_results/
+live_hosts/
+nmap_results/
+spoonmap_output.xml
+findings.txt
+findings.md

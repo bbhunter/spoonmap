@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "spoonmap"
+version = "0.1.0"
+description = "masscan + nmap orchestration wrapper for fast network scanning"
+readme = "README.md"
+requires-python = ">=3.6"
+
+[project.scripts]
+spoonmap = "spoonmap:main"
+
+[tool.hatch.build.targets.wheel]
+# Include the sample config and empty exclusions template alongside the module
+artifacts = [
+    "config.json.sample",
+    "exclusions.txt",
+]
