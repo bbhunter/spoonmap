@@ -375,6 +375,25 @@ class TestGenerateFindings:
         generate_findings(str(nmap_dir), 'External')
         assert 'MS17-010' not in (nmap_dir / 'findings.txt').read_text()
 
+    # ── MS08-067 (NetAPI / Conficker) ─────────────────────────────────────────
+
+    def test_ms08067_vulnerable_critical_finding(self, nmap_dir):
+        xml = _nmap_xml_hostscript('10.0.0.8', 'tcp', '445',
+                                   hostscripts={'smb-vuln-ms08-067': 'VULNERABLE'})
+        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'MS08-067' in content
+        assert 'CRITICAL' in content
+        assert '10.0.0.8' in content
+
+    def test_ms08067_not_vulnerable_no_finding(self, nmap_dir):
+        xml = _nmap_xml_hostscript('10.0.0.8', 'tcp', '445',
+                                   hostscripts={'smb-vuln-ms08-067': 'NOT VULNERABLE'})
+        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        assert 'MS08-067' not in (nmap_dir / 'findings.txt').read_text()
+
     # ── NTLM info disclosure ─────────────────────────────────────────────────
 
     def test_ntlm_disclosure_on_external(self, nmap_dir):

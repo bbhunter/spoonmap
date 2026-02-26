@@ -610,7 +610,7 @@ INTERNAL_PORT_SCRIPTS = {
     '21':    'ftp-anon',
     '111':   'rpcinfo,nfs-showmount,nfs-ls',
     '139':   'smb-security-mode',
-    '445':   'smb-security-mode,smb2-security-mode,smb-vuln-ms17-010',
+    '445':   'smb-security-mode,smb2-security-mode,smb-vuln-ms17-010,smb-vuln-ms08-067',
     '1090':  'rmi-dumpregistry',
     '1433':  'ms-sql-info',
     '3389':  'rdp-enum-encryption',
@@ -915,6 +915,14 @@ def generate_findings(output_path, target_scan):
                         add('CRITICAL', ip, file_port_str, 'MS17-010 EternalBlue (CVE-2017-0143)',
                             'Host is vulnerable to unauthenticated SMBv1 RCE (EternalBlue). '
                             'Apply MS17-010 patch immediately and disable SMBv1.')
+
+                # ── smb-vuln-ms08-067 (Conficker/NetAPI) ─────────────────
+                if 'smb-vuln-ms08-067' in hscripts and target_scan == 'Internal':
+                    out = hscripts['smb-vuln-ms08-067']
+                    if 'VULNERABLE' in out and 'NOT VULNERABLE' not in out:
+                        add('CRITICAL', ip, file_port_str, 'MS08-067 NetAPI (CVE-2008-4250)',
+                            'Host is vulnerable to unauthenticated SMB RCE (Conficker vector). '
+                            'Apply MS08-067 patch immediately and isolate host.')
 
                 # ── ms-sql-info ───────────────────────────────────────────
                 if 'ms-sql-info' in hscripts and target_scan == 'Internal':
