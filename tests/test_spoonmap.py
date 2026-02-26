@@ -129,6 +129,14 @@ class TestGetScriptsForPort:
         # ssl-cert is external-only
         assert _get_scripts_for_port('443', 'Internal') is None
 
+    def test_4786_external_uses_cisco_siet(self):
+        result = _get_scripts_for_port('4786', 'External')
+        assert result is not None and result.endswith('cisco-siet.nse')
+
+    def test_4786_internal_uses_cisco_siet(self):
+        result = _get_scripts_for_port('4786', 'Internal')
+        assert result is not None and result.endswith('cisco-siet.nse')
+
     def test_unknown_port_external(self):
         assert _get_scripts_for_port('9999', 'External') is None
 
@@ -391,11 +399,28 @@ class TestGenerateFindings:
         generate_findings(str(nmap_dir), 'Internal')
         assert 'Dameware' in (nmap_dir / 'findings.txt').read_text()
 
-    def test_cisco_smart_install_detected(self, nmap_dir):
-        xml = _nmap_xml('10.0.0.1', 'tcp', '4786')
+    def test_cisco_smart_install_vulnerable(self, nmap_dir):
+        # cisco-siet.nse confirms VULNERABLE → finding raised
+        xml = _nmap_xml('10.0.0.1', 'tcp', '4786',
+                        scripts={'cisco-siet': 'Host: 10.0.0.1  Status: VULNERABLE'})
         (nmap_dir / 'nmap_results' / 'port4786.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         assert 'Cisco Smart Install' in (nmap_dir / 'findings.txt').read_text()
+
+    def test_cisco_smart_install_not_vulnerable_no_finding(self, nmap_dir):
+        # cisco-siet.nse returns NOT VULNERABLE → no finding
+        xml = _nmap_xml('10.0.0.1', 'tcp', '4786',
+                        scripts={'cisco-siet': 'Host: 10.0.0.1  Status: NOT VULNERABLE'})
+        (nmap_dir / 'nmap_results' / 'port4786.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        assert 'Cisco Smart Install' not in (nmap_dir / 'findings.txt').read_text()
+
+    def test_cisco_smart_install_no_script_no_finding(self, nmap_dir):
+        # port 4786 open but no cisco-siet script output → no finding (avoid false positives)
+        xml = _nmap_xml('10.0.0.1', 'tcp', '4786')
+        (nmap_dir / 'nmap_results' / 'port4786.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        assert 'Cisco Smart Install' not in (nmap_dir / 'findings.txt').read_text()
 
     def test_sap_gateway_detected(self, nmap_dir):
         xml = _nmap_xml('10.0.0.1', 'tcp', '3300')

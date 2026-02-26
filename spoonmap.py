@@ -567,6 +567,10 @@ def lineCount(file):
         return 0
 
 
+# Absolute path to the directory containing spoonmap.py — used to locate
+# bundled community NSE scripts under nse/ regardless of the caller's CWD.
+_DIR = os.path.dirname(os.path.realpath(__file__))
+
 PROBE_PORT_PRIORITY = [
     '445',   # SMB — near-universal on Windows networks
     '3389',  # RDP — very common on Windows
@@ -596,6 +600,7 @@ EXTERNAL_PORT_SCRIPTS = {
     '995':   'pop3-ntlm-info,ssl-cert',
     '1433':  'ms-sql-ntlm-info',
     '3389':  'rdp-ntlm-info',
+    '4786':  f'{_DIR}/nse/cisco-siet.nse',
     '8443':  'ssl-cert',
     '10443': 'ssl-cert',
 }
@@ -609,6 +614,7 @@ INTERNAL_PORT_SCRIPTS = {
     '1090':  'rmi-dumpregistry',
     '1433':  'ms-sql-info',
     '3389':  'rdp-enum-encryption',
+    '4786':  f'{_DIR}/nse/cisco-siet.nse',
     'U:1434': 'ms-sql-info',
 }
 
@@ -858,11 +864,16 @@ def generate_findings(output_path, target_scan):
                         'Ref: https://github.com/chipik/SAP_GW_RCE_exploit')
 
                 # ── Cisco Smart Install on port 4786 ─────────────────────
+                # Only flag when cisco-siet.nse confirms the protocol —
+                # bare port detection is too noisy (false positives).
                 if portid == '4786' and protocol == 'tcp':
-                    add('HIGH', ip, port_str, 'Cisco Smart Install Detected',
-                        'Port 4786 is used by Cisco Smart Install. This feature allows '
-                        'unauthenticated configuration changes and arbitrary file read/write '
-                        'on Cisco switches (CVE-2018-0171). Disable with: no vstack')
+                    csi_out = scripts.get('cisco-siet', '')
+                    if csi_out and 'NOT VULNERABLE' not in csi_out and 'VULNERABLE' in csi_out:
+                        add('HIGH', ip, port_str, 'Cisco Smart Install Vulnerable',
+                            'Confirmed via cisco-siet probe (CVE-2018-0171): device accepts '
+                            'unauthenticated Smart Install commands, enabling arbitrary '
+                            'configuration changes and file read/write. '
+                            'Disable with: no vstack')
 
                 # ── Cisco CUCM TFTP on port 6970 ─────────────────────────
                 if portid == '6970' and protocol == 'tcp':

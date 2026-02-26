@@ -25,4 +25,5 @@ testpaths = ["tests"]
 artifacts = [
     "config.json.sample",
     "exclusions.txt",
+    "nse/cisco-siet.nse",
 ]
