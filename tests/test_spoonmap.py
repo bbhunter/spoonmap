@@ -450,6 +450,39 @@ class TestGenerateFindings:
         generate_findings(str(nmap_dir), 'Internal')
         assert 'MS12-020' not in (nmap_dir / 'findings.txt').read_text()
 
+    # ── Unauthenticated Docker API ────────────────────────────────────────────
+
+    def test_docker_api_exposed_on_2375(self, nmap_dir):
+        xml = _nmap_xml('10.0.0.12', 'tcp', '2375',
+                        scripts={'docker-version': 'Version: 20.10.7'})
+        (nmap_dir / 'nmap_results' / 'port2375.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'Docker API' in content
+        assert 'CRITICAL' in content
+        assert '10.0.0.12' in content
+
+    def test_docker_api_exposed_on_4243(self, nmap_dir):
+        xml = _nmap_xml('10.0.0.12', 'tcp', '4243',
+                        scripts={'docker-version': 'Version: 20.10.7'})
+        (nmap_dir / 'nmap_results' / 'port4243.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        assert 'Docker API' in (nmap_dir / 'findings.txt').read_text()
+
+    def test_docker_api_no_response_no_finding(self, nmap_dir):
+        # No docker-version script output means API did not respond
+        xml = _nmap_xml('10.0.0.12', 'tcp', '2375')
+        (nmap_dir / 'nmap_results' / 'port2375.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        assert 'Docker API' not in (nmap_dir / 'findings.txt').read_text()
+
+    def test_docker_api_fires_on_external_too(self, nmap_dir):
+        xml = _nmap_xml('1.2.3.4', 'tcp', '2375',
+                        scripts={'docker-version': 'Version: 20.10.7'})
+        (nmap_dir / 'nmap_results' / 'port2375.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        assert 'Docker API' in (nmap_dir / 'findings.txt').read_text()
+
     # ── NTLM info disclosure ─────────────────────────────────────────────────
 
     def test_ntlm_disclosure_on_external(self, nmap_dir):

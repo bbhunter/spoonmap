@@ -600,6 +600,8 @@ EXTERNAL_PORT_SCRIPTS = {
     '995':   'pop3-ntlm-info,ssl-cert',
     '1433':  'ms-sql-ntlm-info',
     '3389':  'rdp-ntlm-info',
+    '2375':  'docker-version',
+    '4243':  'docker-version',
     '4786':  f'{_DIR}/nse/cisco-siet.nse',
     '8443':  'ssl-cert',
     '10443': 'ssl-cert',
@@ -611,6 +613,8 @@ INTERNAL_PORT_SCRIPTS = {
     '111':   'rpcinfo,nfs-showmount,nfs-ls',
     '139':   'smb-security-mode',
     '445':   'smb-security-mode,smb2-security-mode,smb-vuln-ms17-010,smb-vuln-ms08-067,smb-double-pulsar-backdoor,smb-vuln-cve-2017-7494',
+    '2375':  'docker-version',
+    '4243':  'docker-version',
     '1090':  'rmi-dumpregistry',
     '1433':  'ms-sql-info',
     '3389':  'rdp-enum-encryption,rdp-vuln-ms12-020',
@@ -649,6 +653,8 @@ EXTERNAL_SENSITIVE_PORTS = [
     ('21',    'HIGH', 'FTP — should not be exposed unless wrapped in SSL/SSH'),
     ('23',    'HIGH', 'Telnet — unencrypted, should not be internet-facing'),
     ('U:137', 'HIGH', 'NetBIOS Name Service — should not be internet-facing'),
+    ('2375',  'CRITICAL', 'Docker API — unauthenticated remote access should never be internet-facing'),
+    ('4243',  'CRITICAL', 'Docker API — unauthenticated remote access should never be internet-facing'),
 ]
 
 SERVICE_CATEGORIES = {
@@ -823,6 +829,14 @@ def generate_findings(output_path, target_scan):
                         if out:
                             add('HIGH', ip, port_str, 'NFS Shares Exposed',
                                 f'NFS mount points visible: {out[:200]}')
+
+                # ── docker-version (unauthenticated Docker API) ───────────
+                if 'docker-version' in scripts:
+                    out = scripts['docker-version'].strip()
+                    if out:
+                        add('CRITICAL', ip, port_str, 'Unauthenticated Docker API',
+                            f'Docker API is accessible without authentication — '
+                            f'full container control and likely host root via escape. {out[:150]}')
 
                 # ── rmi-dumpregistry ──────────────────────────────────────
                 if 'rmi-dumpregistry' in scripts and target_scan == 'Internal':
