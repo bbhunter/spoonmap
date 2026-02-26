@@ -114,7 +114,10 @@ class TestGetScriptsForPort:
         assert _get_scripts_for_port('21', 'Internal') == 'ftp-anon'
 
     def test_internal_smb(self):
-        assert _get_scripts_for_port('445', 'Internal') == 'smb-security-mode,smb2-security-mode'
+        result = _get_scripts_for_port('445', 'Internal')
+        assert 'smb-security-mode' in result
+        assert 'smb2-security-mode' in result
+        assert 'smb-vuln-ms17-010' in result
 
     def test_internal_mssql(self):
         assert _get_scripts_for_port('1433', 'Internal') == 'ms-sql-info'
@@ -136,6 +139,10 @@ class TestGetScriptsForPort:
     def test_4786_internal_uses_cisco_siet(self):
         result = _get_scripts_for_port('4786', 'Internal')
         assert result is not None and result.endswith('cisco-siet.nse')
+
+    def test_445_internal_includes_ms17010(self):
+        result = _get_scripts_for_port('445', 'Internal')
+        assert result is not None and 'smb-vuln-ms17-010' in result
 
     def test_unknown_port_external(self):
         assert _get_scripts_for_port('9999', 'External') is None
@@ -339,6 +346,34 @@ class TestGenerateFindings:
         (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         assert 'Signing Not Required' not in (nmap_dir / 'findings.txt').read_text()
+
+    # ── EternalBlue (MS17-010) ────────────────────────────────────────────────
+
+    def test_ms17010_vulnerable_critical_finding(self, nmap_dir):
+        # smb-vuln-ms17-010 is a hostrule script — appears under <hostscript>
+        xml = _nmap_xml_hostscript('10.0.0.7', 'tcp', '445',
+                                   hostscripts={'smb-vuln-ms17-010': 'VULNERABLE'})
+        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'MS17-010' in content
+        assert 'CRITICAL' in content
+        assert '10.0.0.7' in content
+
+    def test_ms17010_not_vulnerable_no_finding(self, nmap_dir):
+        xml = _nmap_xml_hostscript('10.0.0.7', 'tcp', '445',
+                                   hostscripts={'smb-vuln-ms17-010': 'NOT VULNERABLE'})
+        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        assert 'MS17-010' not in (nmap_dir / 'findings.txt').read_text()
+
+    def test_ms17010_only_on_internal(self, nmap_dir):
+        # Should not fire on External scans
+        xml = _nmap_xml_hostscript('1.2.3.4', 'tcp', '445',
+                                   hostscripts={'smb-vuln-ms17-010': 'VULNERABLE'})
+        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        assert 'MS17-010' not in (nmap_dir / 'findings.txt').read_text()
 
     # ── NTLM info disclosure ─────────────────────────────────────────────────
 
