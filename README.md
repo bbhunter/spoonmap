@@ -1,202 +1,189 @@
 # SpooNMAP
 
 ## Dependencies
-This script is simply a wrapper for NMAP and Masscan. Install them from your
-favorite package manager, or install from source.
+This script is a wrapper for masscan (fast port discovery) and nmap (service banner grabbing / NSE scripts). Install both from your favourite package manager or from source.
 
-The script also utilizes Python's magical f-strings, so Python 3.6 or above
-is required.
+Python 3.6+ is required (uses f-strings).
 
 ## Usage
-Again, make sure that you have Python 3.6 or above installed. Simply executing
-the script will prompt you for all of the required scanning options.
+Simply executing the script will prompt you for all required options.
 
 ```
-# ./spoonmap.py 
+# ./spoonmap.py
 
-________                   _____   _______  _________________ 
+________                   _____   _______  _________________
 __  ___/______________________  | / /__   |/  /__    |__  __ \
 _____ \___  __ \  __ \  __ \_   |/ /__  /|_/ /__  /| |_  /_/ /
-____/ /__  /_/ / /_/ / /_/ /  /|  / _  /  / / _  ___ |  ____/ 
-/____/ _  .___/\____/\____//_/ |_/  /_/  /_/  /_/  |_/_/      
-       /_/                                                 
-    
+____/ /__  /_/ / /_/ / /_/ /  /|  / _  /  / / _  ___ |  ____/
+/____/ _  .___/\____/\____//_/ |_/  /_/  /_/  /_/  |_/_/
+       /_/
 
-Scan Type
-	(1) Small Port Scan
-	(2) Medium Port Scan
-	(3) Large Port Scan
-	(4) Extra Large Port Scan (Small, Medium, and Large)
-	(5) Full Port Scan
-	(6) Custom Port Scan
 
-What type of scan would you like to perform (default: Small Port Scan)? 
+Service Categories (comma-separated numbers, default: All)
+	(1) Web          [80, 443, 8000, 8080, 8081, 8443, 8888, 9090, 10443]
+	(2) Database     [1433, U:1434, 1521, 3306, 5432, 6379, 9200, 27017]
+	(3) Remote Management  [22, 23, 3389, 5900, 5901, 6129, 1723]
+	(4) Email        [25, 110, 143, 465, 587, 993, 995]
+	(5) Authentication     [389, 636, 445, 135, 139, U:137]
+	(6) Network Infrastructure  [53, 179, 500, U:500, 161, U:161]
+	(7) File Transfer      [21, 111]
+	(8) Specialized  [1090, 3300, 4786, 6970, 2375, 4243]
+	(9) Full Port Scan  [1-65535]
 
-Would you like to enumerate service banners for any identified services (default: Yes)? 
+Which categories would you like to scan (e.g. 1,3 — default: All)?
+
+Would you like to enumerate service banners for any identified services (default: Yes)?
+
+Would you like to run NSE security scripts on identified services (default: No)?
 
 Target Scan
 	(1) External
 	(2) Internal
 
-Is this an internal or external scan (default: External)? 
+Is this an internal or external scan (default: External)?
 
-How fast would you like to scan (default: 20000 packets/second)? 
+How fast would you like to scan (default: 10000 packets/second)?
 
-Example Target File
-One CIDR or IP Address per line
+Please enter the full path for the file containing target hosts (default: /opt/spoonmap/ranges.txt):
 
-	192.168.0.0/24
-	192.168.1.23
-
-Please enter the full path for the file containing target hosts (default: /opt/spoonmap/ranges.txt): 
-
-Would you like to exclude any hosts?  (default: No) 
-
-Scan Type: Small Port Scan
-Target Ports: ['80', '443', '8000', '8080', '8008', '8181', '8443']
-Service Banner: False
-Source Port: 53
-Masscan Max Packet Rate (pps): 2000
-Target File: ranges.txt
-Exclusions File: exclusions.txt
-
-Scanning port 80...
+Would you like to exclude any hosts? (default: No)
 ```
-You can also create a configuration file to avoid all of the prompts. Use the
-provided 'config.json.sample' as an example. Just make sure that your file 
-is named 'config.json'
-```
-# cat config.json
+
+You can also create a `config.json` file (based on `config.json.sample`) to skip all prompts:
+
+```json
 {
-    "__scan_type_choices__" : "Small Port Scan, Medium Port Scan, Large Port Scan, Extra Large Port Scan, Full Port Scan, Custom Port Scan", 
-    "scan_type" : "Custom Port Scan", 
-    "dest_ports" : ["80","443","8000","8080","U:53"],
-    "__banner_scan_choices__" : "True, False", 
-    "banner_scan" : "True", 
-    "__target_scan_choices__" : "External, Internal", 
-    "target_scan" : "Internal",
-    "__max_rate_external_recommedation__" : "Single Port = 20000, Full Port = 10000", 
-    "__max_rate_internal_recommedation__" : "Single Port = 2000, Full Port = 1000", 
-    "max_rate" : "2000",
-    "target_file" : "ranges.txt",
-    "output_path" : "./",
-    "exclusions_file" : "exclusions.txt"
+    "scan_categories": ["Web", "Database", "Remote Management"],
+    "banner_scan": "True",
+    "script_scan": "False",
+    "target_scan": "Internal",
+    "max_rate": "2000",
+    "target_file": "ranges.txt",
+    "output_path": "./",
+    "exclusions_file": "exclusions.txt",
+    "nmap_threads": 5
 }
 ```
-Note: To perform UDP scans simply prepend 'U:' to the port you'd like to scan (i.e 'U:53').
-#### config.json Parameters
-##### scan_type
-This paramater is used to determine what ports to scan.
-* Small Port Scan
-    * 80, 443, 8000, 8080, 8008, 8181, 8443
-* Medium Port Scan
-    * 7001, 1433, 445, 139, 21, 22, 23, 25, \
-    53, 111, 389, 4243, 3389, 3306, 4786, \
-    5900, 5901, 6379, 6970, 9100
-* Large Port Scan
-    * 1090, 1098, 1099, 10999, 11099, 11111, \
-    3300, 4243, 4444, 4445, 45000, 45001, \
-    47001, 47002, 4786, 4848, 50500, 5555, \
-    5556, 6129, 6379, 6970, 7000, \
-    7002, 7003, 7004, 7070, 7071, \
-    8001, 8002, 8003, 8686, 9000, \
-    9001, 9002, 9003, 9012, 9503
-* Extra Large Port Scan
-    * Small, Medium, and Large Ports Combined
-* Full Port Scan
-    * 1-65,535
-* Custom Port Scan
-    * Dealer's Choice
-##### dest_ports
-* Only used if 'Custom Port Scan' is selected.
-##### banner_scan
-This parameter is used to determine whether NMAP will be used
-to grab service banners.
-* True
-* False
-##### target_scan
-This paramater is used to determine what source port to spoof.
-* External Port Scan
-    * source port = 53
-* Internal Port Scan
-    * source port = 88
-##### max_rate
-This parameter is used to determine how fast to scan in masscan.
-If it is not set manually, it is determined from the
-scan_type and target_scan parameters.
-**Note: Selecting a max_rate that is too high can easily create
-a denial-of-service. In my testing, the following rates have been
-found to be safe. YMMV**
-* 'External' and 'Common Port Scan'
-    * max_rate = 20,000 packets/second
-* 'External' and 'Full Port Scan'
-    * max_rate = 10,000 packets/second
-* 'Internal' and 'Common Port Scan'
-    * max_rate = 2,000 packets/second
-* 'Internal' and 'Full Port Scan'
-    * max_rate = 1,000 packets/second
-* Everything else
-    * max_rate = 2,000 packets/second
-    
-## Potential Hacks to Look For  
 
-1090, 1098, 1099, 4444, 11099, 47001, 47002, 10999  
-Java RMI  
-https://www.rapid7.com/db/modules/exploit/multi/misc/java_rmi_server  
-https://medium.com/@afinepl/java-rmi-for-pentesters-structure-recon-and-communication-non-jmx-registries-a10d5c996a79  
-https://medium.com/@afinepl/java-rmi-for-pentesters-part-two-reconnaissance-attack-against-non-jmx-registries-187a6561314d  
+To scan all categories, set `"scan_categories": "All"`.
+To scan all 65535 ports, set `"scan_categories": "Full"`.
+For a fully custom port list, omit `scan_categories` and use `"dest_ports": ["80","443","U:53"]` instead.
+UDP ports are specified with a `U:` prefix (e.g. `"U:53"`).
 
-7000-7004, 8000-8003, 9000-9003, 9503, 7070, 7071  
-WebLogic  
-https://www.exploit-db.com/search?q=weblogic  
-  
-45000, 45001  
-JDWP  
-https://www.rapid7.com/db/modules/exploit/multi/misc/java_jdwp_debugger  
-https://github.com/IOActive/jdwp-shellifier  
-  
-8686, 9012, 50500  
-JMX  
-https://www.rapid7.com/db/modules/exploit/multi/misc/java_jmx_server  
-  
-4848  
-GlassFish  
-https://www.rapid7.com/db/modules/auxiliary/scanner/http/glassfish_traversal  
+If a previous scan's output is detected in `output_path`, the tool offers to delete it or resume where it left off.
 
-11111, 4444, 4445  
-JBoss  
-https://www.rapid7.com/db/modules/auxiliary/scanner/http/jboss_vulnscan  
-https://github.com/joaomatosf/jexboss  
-  
-4786  
-Cisco Smart Install  
-https://www.rapid7.com/db/modules/auxiliary/scanner/misc/cisco_smart_install  
-https://github.com/Sab0tag3d/SIET  
-  
-5555, 5556  
-HP Data Protector  
-https://www.rapid7.com/db/modules/exploit/multi/misc/hp_data_protector_exec_integutil  
-https://www.rapid7.com/db/modules/exploit/windows/misc/hp_dataprotector_cmd_exec  
+## config.json Parameters
 
-3300  
-SAP  
-https://github.com/chipik/SAP_GW_RCE_exploit  
+| Key | Values | Notes |
+|-----|--------|-------|
+| `scan_categories` | `"All"`, `"Full"`, or array of category names | `"Full"` scans all 65535 ports; e.g. `["Web","Database"]`; omit to use `dest_ports` |
+| `dest_ports` | Array of port strings | Overrides `scan_categories`; use `U:` prefix for UDP |
+| `banner_scan` | `"True"` / `"False"` | Runs nmap -sV against discovered hosts |
+| `script_scan` | `"True"` / `"False"` | Runs NSE security scripts (implies `banner_scan`) |
+| `target_scan` | `"External"` / `"Internal"` | External → source port 53; Internal → source port 88 |
+| `max_rate` | Packets/second string | See rate guidance below |
+| `target_file` | Path | One IP, CIDR, or hostname per line |
+| `output_path` | Path | Directory for all output; relative paths resolve to script dir |
+| `exclusions_file` | Path | IPs/CIDRs passed to masscan `--excludefile` |
+| `nmap_threads` | Integer | Concurrent nmap processes (default: 5) |
+| `masscan_batch_size` | Integer | Ports per masscan invocation (default: 5) |
 
-6129  
-Dameware  
-https://www.tenable.com/security/research/tra-2019-43  
-https://github.com/tenable/poc/blob/master/Solarwinds/Dameware/dwrcs_dwDrvInst_rce.py  
-  
-6379  
-Redis  
-https://www.rapid7.com/db/modules/exploit/linux/redis/redis_replication_cmd_exec  
-  
-6970  
-Cisco Unified Communications Manager  
-https://github.com/trustedsec/SeeYouCM-Thief  
-http://[CUCM IP Address]:6970/ConfigFileCacheList.txt    
-  
-8080  
-Adobe CodFusion BlazeDS  
-https://www.tenable.com/plugins/nessus/99731  
+### max_rate guidance
+Rates that are too high can create a denial-of-service condition — use caution.
 
+| Scan | Recommended rate |
+|------|-----------------|
+| External + category/custom scan | 10,000 pps |
+| External + full port scan | 10,000 pps |
+| Internal + category/custom scan | 1,000 pps |
+| Internal + full port scan | 1,000 pps |
+
+## Output Structure
+
+```
+<output_path>/
+  masscan_targets.txt         # IPs-only target list for masscan
+  ip_hostname_map.json        # hostname → resolved IP mapping
+  masscan_results/portN.xml   # raw masscan XML per port
+  live_hosts/portN.txt        # deduplicated IPs per port
+  nmap_results/portN.xml      # nmap banner/script XML per port
+  all_live_hosts.txt          # union of all live IPs
+  spoonmap_output.xml         # merged nmap XML (or masscan if no banner scan)
+  findings.txt                # severity-sorted findings report (script_scan only)
+  findings.md                 # same report in Markdown table format
+```
+
+## NSE Script Scanning and Findings
+
+When `script_scan` is enabled, nmap runs targeted NSE scripts against relevant ports. Scripts are chosen based on scan type (External vs Internal):
+
+**External scans** run: `ftp-anon`, `ssh-auth-methods`, `ssh2-enum-algos`, `*-ntlm-info`, `ssl-cert`, `ms-sql-ntlm-info`, `rdp-ntlm-info`, `docker-version`
+
+**Internal scans** run: `ftp-anon`, `rpcinfo`, `nfs-showmount`, `nfs-ls`, `smb-security-mode`, `smb2-security-mode`, `smb-vuln-ms17-010`, `smb-vuln-ms08-067`, `smb-double-pulsar-backdoor`, `smb-vuln-cve-2017-7494`, `rmi-dumpregistry`, `ms-sql-info`, `rdp-enum-encryption`, `rdp-vuln-ms12-020`, `docker-version`
+
+After scanning, `generate_findings()` parses all nmap XML results and produces severity-sorted `findings.txt` and `findings.md` reports. Findings include:
+
+| Severity | Finding |
+|----------|---------|
+| CRITICAL | MS17-010 EternalBlue (CVE-2017-0143) |
+| CRITICAL | MS08-067 NetAPI / Conficker (CVE-2008-4250) |
+| CRITICAL | DoublePulsar backdoor active |
+| CRITICAL | SambaCry (CVE-2017-7494) |
+| CRITICAL | MS12-020 RDP RCE/DoS (CVE-2012-0002) |
+| CRITICAL | Unauthenticated Docker API (2375/4243) |
+| CRITICAL | Service Exposed Externally (Docker ports) |
+| HIGH | Anonymous FTP login |
+| HIGH | Weak SSH authentication (password/keyboard-interactive externally) |
+| HIGH | NTLM information disclosure (external) |
+| HIGH | SMB/SMBv2 signing not required |
+| HIGH | NFS shares exposed |
+| HIGH | Dameware Remote Control detected |
+| HIGH | SAP Gateway detected (3300) |
+| HIGH | Cisco Smart Install detected (4786) |
+| HIGH | Cisco CUCM TFTP detected (6970) |
+| HIGH | Service Exposed Externally (databases, RDP, SMB, SNMP, etc.) |
+| MEDIUM | Weak SSH algorithms (deprecated ciphers/MACs/KEX) |
+| MEDIUM | Weak RDP encryption / NLA not enforced |
+| MEDIUM | Java RMI registry exposed |
+| MEDIUM | Expired TLS certificate |
+| INFO | SQL Server instance discovered |
+
+On Internal scans, if `ms-sql-info` discovers SQL Server named instances on non-standard ports, nmap is automatically re-run against those ports.
+
+## Potential Hacks to Look For
+
+1090
+Java RMI (auto-detected by script_scan on port 1090)
+https://www.rapid7.com/db/modules/exploit/multi/misc/java_rmi_server
+https://medium.com/@afinepl/java-rmi-for-pentesters-structure-recon-and-communication-non-jmx-registries-a10d5c996a79
+
+4786
+Cisco Smart Install (auto-detected by script_scan)
+https://www.rapid7.com/db/modules/auxiliary/scanner/misc/cisco_smart_install
+https://github.com/Sab0tag3d/SIET
+
+3300
+SAP Gateway (auto-detected by script_scan)
+https://github.com/chipik/SAP_GW_RCE_exploit
+
+6129
+Dameware (auto-detected by script_scan)
+https://www.tenable.com/security/research/tra-2019-43
+https://github.com/tenable/poc/blob/master/Solarwinds/Dameware/dwrcs_dwDrvInst_rce.py
+
+6379
+Redis
+https://www.rapid7.com/db/modules/exploit/linux/redis/redis_replication_cmd_exec
+
+6970
+Cisco Unified Communications Manager TFTP (auto-detected by script_scan)
+https://github.com/trustedsec/SeeYouCM-Thief
+http://[CUCM IP Address]:6970/ConfigFileCacheList.txt
+
+2375, 4243
+Docker API (unauthenticated access auto-detected by script_scan)
+https://www.rapid7.com/db/modules/exploit/linux/http/docker_daemon_tcp
+
+8080
+Adobe ColdFusion BlazeDS
+https://www.tenable.com/plugins/nessus/99731

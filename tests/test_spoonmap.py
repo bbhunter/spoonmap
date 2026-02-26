@@ -1,10 +1,13 @@
 """Tests for spoonmap.py"""
 import datetime
 import textwrap
+from unittest.mock import patch
 
 import pytest
 
+import spoonmap
 from spoonmap import (
+    SERVICE_CATEGORIES,
     _delete_previous_results,
     _get_scripts_for_port,
     _previous_results_exist,
@@ -14,6 +17,7 @@ from spoonmap import (
     generate_findings,
     is_hostname,
     lineCount,
+    mass_scan,
 )
 
 
@@ -681,3 +685,78 @@ class TestPreviousResults:
         (tmp_path / 'findings.txt').write_text('x')
         _delete_previous_results(str(tmp_path))
         assert _previous_results_exist(str(tmp_path)) is False
+
+
+# ── SERVICE_CATEGORIES docker ports ───────────────────────────────────────────
+
+class TestServiceCategoriesDockerPorts:
+    def test_specialized_includes_docker_port_2375(self):
+        assert '2375' in SERVICE_CATEGORIES['Specialized']
+
+    def test_specialized_includes_docker_port_4243(self):
+        assert '4243' in SERVICE_CATEGORIES['Specialized']
+
+
+# ── Full Port Scan in mass_scan() ─────────────────────────────────────────────
+
+class TestFullPortScan:
+    def test_full_scan_skips_probe_and_calls_masscan_with_range(self, tmp_path):
+        spoonmap.output_path = str(tmp_path)
+        fake_results = {'80': {'10.0.0.1'}, '443': {'10.0.0.2'}}
+        with patch('spoonmap._run_masscan_batch', return_value=fake_results) as mock_batch:
+            result = mass_scan('Full', ['1-65535'], '53', '10000',
+                               '/fake/targets.txt', '')
+        mock_batch.assert_called_once_with(
+            ['1-65535'], '10000',
+            str(tmp_path) + '/masscan_results/portFull.xml',
+            '/fake/targets.txt', '53', '',
+        )
+        assert 'Hosts Found on Port 80' in result
+        assert 'Hosts Found on Port 443' in result
+
+    def test_full_scan_writes_live_hosts_files(self, tmp_path):
+        spoonmap.output_path = str(tmp_path)
+        fake_results = {'22': {'10.0.0.5', '10.0.0.6'}}
+        with patch('spoonmap._run_masscan_batch', return_value=fake_results):
+            mass_scan('Full', ['1-65535'], '53', '10000', '/fake/targets.txt', '')
+        live_file = tmp_path / 'live_hosts' / 'port22.txt'
+        assert live_file.exists()
+        assert '10.0.0.5' in live_file.read_text()
+        assert '10.0.0.6' in live_file.read_text()
+
+
+# ── Config: Full scan_categories ──────────────────────────────────────────────
+
+class TestConfigFullScanCategory:
+    def _resolve(self, scan_categories):
+        """Replicate the config-loading branch logic for scan_categories."""
+        all_ports = []
+        scan_type = ''
+        if scan_categories == 'All' or scan_categories == ['All']:
+            scan_type = 'All'
+            all_ports = [p for cat in SERVICE_CATEGORIES.values() for p in cat]
+        elif scan_categories in ('Full', ['Full']):
+            scan_type = 'Full'
+            all_ports = ['1-65535']
+        elif isinstance(scan_categories, list):
+            valid = [c for c in scan_categories if c in SERVICE_CATEGORIES]
+            scan_type = ', '.join(valid)
+            all_ports = [p for name in valid for p in SERVICE_CATEGORIES[name]]
+        dest_ports = [p for p in all_ports if not p.startswith('U:')] + \
+                     [p for p in all_ports if p.startswith('U:')]
+        return scan_type, dest_ports
+
+    def test_full_string_sets_scan_type_and_ports(self):
+        scan_type, dest_ports = self._resolve('Full')
+        assert scan_type == 'Full'
+        assert dest_ports == ['1-65535']
+
+    def test_full_list_sets_scan_type_and_ports(self):
+        scan_type, dest_ports = self._resolve(['Full'])
+        assert scan_type == 'Full'
+        assert dest_ports == ['1-65535']
+
+    def test_all_is_unaffected(self):
+        scan_type, dest_ports = self._resolve('All')
+        assert scan_type == 'All'
+        assert '1-65535' not in dest_ports

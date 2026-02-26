@@ -274,6 +274,23 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
 
     effective_rate = max_rate
 
+    # Full port scan: skip adaptive probe, run single masscan over 1-65535
+    if scan_type == 'Full':
+        print('\x1b[33m' + 'Full port scan: running masscan 1-65535 (no probe)...' + '\x1b[0m')
+        output_file = f'{output_path}/masscan_results/portFull.xml'
+        full_results = _run_masscan_batch(['1-65535'], max_rate, output_file,
+                                          target_file, source_port, exclusions_file)
+        os.makedirs(output_path + '/live_hosts', exist_ok=True)
+        for port_key, ips in full_results.items():
+            with open(f'{output_path}/live_hosts/port{port_key}.txt', 'w') as f:
+                for ip in sorted(ips):
+                    f.write(f'{ip}\n')
+            host_count = len(ips)
+            status_update = f'\nHosts Found on Port {port_key}: {host_count}'
+            status_summary += status_update
+            print('\x1b[33m' + status_update + '\x1b[0m')
+        return status_summary
+
     probe_ports = _select_probe_ports(dest_ports)
     probe_set = set(probe_ports)
     remaining_ports = [p for p in dest_ports if p not in probe_set]
@@ -680,7 +697,7 @@ SERVICE_CATEGORIES = {
         '21', '111'
     ],
     'Specialized': [
-        '1090', '3300', '4786', '6970'
+        '1090', '3300', '4786', '6970', '2375', '4243'
     ],
 }
 
@@ -1071,6 +1088,9 @@ def main():
             if scan_categories == 'All' or scan_categories == ['All']:
                 scan_type = 'All'
                 all_ports = [p for cat in SERVICE_CATEGORIES.values() for p in cat]
+            elif scan_categories in ('Full', ['Full']):
+                scan_type = 'Full'
+                all_ports = ['1-65535']
             elif isinstance(scan_categories, list):
                 valid = [c for c in scan_categories if c in SERVICE_CATEGORIES]
                 scan_type = ', '.join(valid)
@@ -1113,10 +1133,16 @@ def main():
                 for i, name in enumerate(category_names, 1):
                     ports = SERVICE_CATEGORIES[name]
                     print(f'\t({i}) {name}  [{", ".join(ports)}]')
+                print(f'\t(9) Full Port Scan  [1-65535]')
 
                 selection = input(
                     f'\nWhich categories would you like to scan (e.g. 1,3 — default: All)? '
                 ).strip()
+
+                if selection in ('9', 'full', 'f'):
+                    scan_type = 'Full'
+                    dest_ports = ['1-65535']
+                    break
 
                 if not selection:
                     # Default: all categories
