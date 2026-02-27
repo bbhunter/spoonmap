@@ -103,12 +103,13 @@ To remove scan data non-interactively, use the `--cleanup` flag:
 ### max_rate guidance
 Rates that are too high can create a denial-of-service condition — use caution.
 
-| Scan type | Default `max_rate` | Effective rate for multi-port batches |
-|-----------|-------------------|---------------------------------------|
-| External | 20,000 pps | capped at 10,000 pps |
-| Internal | 2,000 pps | capped at 1,000 pps |
+| Scan type | Default `max_rate` | Full scan cap |
+|-----------|-------------------|---------------|
+| External  | 20,000 pps        | 10,000 pps    |
+| Internal  | 2,000 pps         | 1,000 pps     |
 
-When `masscan_batch_size > 1` (the default is 5), SpooNMAP caps the scanning rate per batch to avoid pacing issues when sending packets across multiple ports simultaneously. The probe phase and full port scans use the full `max_rate`.
+The adaptive probe phase and category/custom batched scans always use the full `max_rate`.
+Full port scans (`-p 1-65535`) are capped to half the default to avoid saturation.
 
 ### Inter-scan wait (automatic)
 When scanning small target ranges (e.g. a /24), each per-port masscan invocation completes in a fraction of a second, producing rapid back-to-back traffic bursts that can saturate the local network. SpooNMAP automatically passes `--wait N` to masscan so the process lingers after its last packet, acting as a natural cooldown between invocations.
@@ -182,7 +183,7 @@ When `script_scan` is enabled, nmap runs targeted NSE scripts against relevant p
 
 **External scans** run: `ftp-anon`, `ssh-auth-methods`, `ssh2-enum-algos`, `*-ntlm-info`, `ssl-cert`, `ms-sql-ntlm-info`, `rdp-ntlm-info`, `docker-version`, `snmp-brute`
 
-**Internal scans** run: `ftp-anon`, `rpcinfo`, `nfs-showmount`, `nfs-ls`, `smb-security-mode`, `smb2-security-mode`, `smb-vuln-ms17-010`, `smb-vuln-ms08-067`, `smb-double-pulsar-backdoor`, `smb-vuln-cve-2017-7494`, `rmi-dumpregistry`, `ms-sql-info`, `rdp-enum-encryption`, `rdp-vuln-ms12-020`, `docker-version`, `snmp-brute`
+**Internal scans** run: `ftp-anon`, `rpcinfo`, `nfs-showmount`, `nfs-ls`, `smb-security-mode`, `smb2-security-mode`, `smb-vuln-ms17-010`, `smb-vuln-ms08-067`, `smb-double-pulsar-backdoor`, `smb-vuln-cve-2017-7494`, `rmi-dumpregistry`, `ms-sql-info`, `docker-version`, `snmp-brute`
 
 Port 9100 (JetDirect raw printing protocol) is included in the Specialized category. Hosts with port 9100 open are identified as printers; SNMP default community string and anonymous FTP findings are suppressed for these hosts to reduce noise.
 
@@ -209,7 +210,6 @@ After scanning, `generate_findings()` parses all nmap XML results and produces s
 | HIGH | Service Exposed Externally (databases, RDP, SMB, SNMP, WebLogic, etc.) |
 | MEDIUM | SMBv1 protocol enabled |
 | MEDIUM | Weak SSH algorithms (deprecated ciphers/MACs/KEX) |
-| MEDIUM | Weak RDP encryption / NLA not enforced |
 | MEDIUM | Java RMI registry exposed |
 | MEDIUM | Expired TLS certificate |
 | INFO | SQL Server instance discovered |

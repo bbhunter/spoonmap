@@ -355,13 +355,10 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
     port_ips = {}
 
     effective_rate = max_rate
+    # (no cap — category/custom batched scans always use full max_rate)
 
-    # Cap rate when scanning multiple ports per batch to avoid pacing issues
-    if batch_size > 1:
-        if source_port == '53':   # External
-            effective_rate = str(min(int(max_rate), 10000))
-        else:                      # Internal
-            effective_rate = str(min(int(max_rate), 1000))
+    # Full scans cover all 65535 ports in one invocation — cap to avoid saturation.
+    full_scan_rate = str(min(int(max_rate), 10000 if source_port == '53' else 1000))
 
     # Calculate --wait to prevent inter-scan saturation on small target ranges
     target_host_count = _count_hosts_in_file(target_file)
@@ -373,7 +370,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
     if scan_type == 'Full':
         print(_COLOR_INFO + 'Full port scan: running masscan 1-65535 (no probe)...' + _COLOR_RESET)
         output_file = f'{output_path}/masscan_results/portFull.xml'
-        full_results = _run_masscan_batch(['1-65535'], max_rate, output_file,
+        full_results = _run_masscan_batch(['1-65535'], full_scan_rate, output_file,
                                           target_file, source_port, exclusions_file,
                                           wait_secs=wait_secs)
         os.makedirs(output_path + '/live_hosts', exist_ok=True)
@@ -579,7 +576,11 @@ def nmap_worker(work_queue, completed_count, total_count, source_port, lock,
             if script_scan:
                 scripts = _get_scripts_for_port(dest_port, target_scan)
                 if scripts:
-                    nmap_cmd.extend(['--script', scripts, '--script-timeout', '30s'])
+                    nmap_cmd.extend([
+                        '--script', scripts,
+                        '--script-timeout', '30s',
+                        '--host-timeout', '5m',
+                    ])
 
             # Save terminal state before running nmap
             term_state = save_terminal_state()
@@ -786,7 +787,6 @@ INTERNAL_PORT_SCRIPTS = {
     '4243':  'docker-version',
     '1090':  'rmi-dumpregistry',
     '1433':  'ms-sql-info',
-    '3389':  'rdp-enum-encryption',
     '4786':  f'{_DIR}/nse/cisco-siet.nse',
     '161':   'snmp-brute',
     'U:161': 'snmp-brute',
@@ -1027,16 +1027,6 @@ def generate_findings(output_path, target_scan):
                     if out:
                         add('MEDIUM', ip, port_str, 'Java RMI Registry Exposed',
                             f'RMI objects: {out[:200]}')
-
-                # ── rdp-enum-encryption ───────────────────────────────────
-                if 'rdp-enum-encryption' in scripts and target_scan == 'Internal':
-                    out = scripts['rdp-enum-encryption']
-                    weak_rdp = ('Classic RDP' in out or
-                                'CredSSP support: false' in out.lower() or
-                                'CredSSP support: False' in out)
-                    if weak_rdp:
-                        add('MEDIUM', ip, port_str, 'Weak RDP Encryption',
-                            'Classic RDP encryption or NLA not enforced.')
 
                 # ── Dameware on port 6129 ─────────────────────────────────
                 if portid == '6129':
@@ -1385,18 +1375,6 @@ _FINDING_REPRO = {
             '|       aes128-cbc\n'
             '|   mac_algorithms: (10)\n'
             '|_      hmac-md5 -- [info] disabled in OpenSSH 6.7'
-        ),
-    },
-    'Weak RDP Encryption': {
-        'flags': '--script rdp-enum-encryption',
-        'sample': (
-            'PORT     STATE SERVICE\n'
-            '3389/tcp open  ms-wbt-server\n'
-            '| rdp-enum-encryption:\n'
-            '|   Security layer\n'
-            '|     CredSSP (NLA): SUCCESS\n'
-            '|     SSL: SUCCESS\n'
-            '|_    Native RDP: SUCCESS'
         ),
     },
     'Java RMI Registry Exposed': {

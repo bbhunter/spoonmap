@@ -872,16 +872,28 @@ class TestFullPortScan:
         spoonmap.output_path = str(tmp_path)
         fake_results = {'80': {'10.0.0.1'}, '443': {'10.0.0.2'}}
         with patch('spoonmap._run_masscan_batch', return_value=fake_results) as mock_batch:
-            result = mass_scan('Full', ['1-65535'], '53', '10000',
+            result = mass_scan('Full', ['1-65535'], '53', '20000',
                                '/fake/targets.txt', '')
         mock_batch.assert_called_once_with(
-            ['1-65535'], '10000',
+            ['1-65535'], '10000',   # capped from 20000 (External cap)
             str(tmp_path) + '/masscan_results/portFull.xml',
             '/fake/targets.txt', '53', '',
             wait_secs=2,
         )
         assert 'Hosts Found on Port 80' in result
         assert 'Hosts Found on Port 443' in result
+
+    def test_full_scan_rate_capped_internal(self, tmp_path):
+        spoonmap.output_path = str(tmp_path)
+        fake_results = {'22': {'10.0.0.1'}}
+        with patch('spoonmap._run_masscan_batch', return_value=fake_results) as mock_batch:
+            mass_scan('Full', ['1-65535'], '88', '2000', '/fake/targets.txt', '')
+        mock_batch.assert_called_once_with(
+            ['1-65535'], '1000',   # capped from 2000 (Internal cap)
+            str(tmp_path) + '/masscan_results/portFull.xml',
+            '/fake/targets.txt', '88', '',
+            wait_secs=2,
+        )
 
     def test_full_scan_writes_live_hosts_files(self, tmp_path):
         spoonmap.output_path = str(tmp_path)
