@@ -9,8 +9,10 @@ import xml.etree.ElementTree as etree
 
 import spoonmap
 from spoonmap import (
+    EXTERNAL_PROBE_PORT_PRIORITY,
     EXTERNAL_SENSITIVE_PORTS,
     INTERNAL_PORT_SCRIPTS,
+    PROBE_PORT_PRIORITY,
     SERVICE_CATEGORIES,
     _cleanup_cmd,
     _delete_previous_results,
@@ -75,9 +77,9 @@ class TestSelectProbePorts:
         assert '9999' not in result[:3] or len(result) > 3
 
     def test_respects_priority_ordering(self):
-        # 445 is first in PROBE_PORT_PRIORITY
+        # 443 is now first in PROBE_PORT_PRIORITY
         result = _select_probe_ports(['22', '443', '445'], max_ports=1)
-        assert result == ['445']
+        assert result == ['443']
 
     def test_caps_at_default_max(self):
         ports = ['445', '3389', '80', '443', '22', '135', '139']
@@ -1123,3 +1125,167 @@ class TestHostElemToDict:
         result = _host_elem_to_dict(elem)
         assert result['ports'] == []
         assert result['hostscripts'] == {}
+
+
+# ── TestMassScanProbe ─────────────────────────────────────────────────────────
+
+class TestMassScanProbe:
+    """Tests for the adaptive probe logic inside mass_scan()."""
+
+    def _make_batch_side_effect(self, responses):
+        """Return a side_effect callable that yields successive response dicts."""
+        call_iter = iter(responses)
+        def side_effect(*args, **kwargs):
+            return next(call_iter)
+        return side_effect
+
+    # ── batch_size=1 cases ───────────────────────────────────────────────────
+
+    def test_batch1_fast_finds_hosts_on_first_port(self, tmp_path):
+        """fast call hits on first probe port → 1 probe call + 1 main batch, rate unchanged."""
+        spoonmap.output_path = str(tmp_path)
+        # External scan: EXTERNAL_PROBE_PORT_PRIORITY = ['443','80','8080','8443']
+        # dest_ports=['443','3306'] → probe_ports=['443'], remaining=['3306']
+        # (3306 is not in EXTERNAL_PROBE_PORT_PRIORITY so it stays in remaining)
+        responses = [
+            {'443': {'10.0.0.1'}},   # probe_fast_0 — hit
+            {},                       # main batch for port 3306
+        ]
+        with patch('spoonmap._run_masscan_batch',
+                   side_effect=self._make_batch_side_effect(responses)) as mock_b:
+            result = mass_scan('All', ['443', '3306'], '53', '10000',
+                               '/fake/targets.txt', '', batch_size=1)
+
+        # 2 calls: probe_fast_0 + 1 main batch
+        assert mock_b.call_count == 2
+        first_call_xml = mock_b.call_args_list[0][0][2]
+        assert 'probe_fast_0' in first_call_xml
+        assert 'Hosts Found on Port 443' in result
+
+    def test_batch1_fast_zero_slow_finds_hosts(self, tmp_path):
+        """fast=0, slow hits → effective_rate switched to half_rate."""
+        spoonmap.output_path = str(tmp_path)
+        # External: dest_ports=['443','3306'] → probe=['443'], remaining=['3306']
+        responses = [
+            {},                        # probe_fast_0 (443) — miss
+            {'443': {'10.0.0.5'}},    # probe_slow_0 (443) — hit
+            {},                        # main batch 3306
+        ]
+        with patch('spoonmap._run_masscan_batch',
+                   side_effect=self._make_batch_side_effect(responses)) as mock_b:
+            result = mass_scan('All', ['443', '3306'], '53', '10000',
+                               '/fake/targets.txt', '', batch_size=1)
+
+        assert mock_b.call_count == 3
+        # probe_slow_0 must use half_rate (5000)
+        slow_call = mock_b.call_args_list[1]
+        assert slow_call[0][1] == '5000'
+        assert 'probe_slow_0' in slow_call[0][2]
+        assert 'Hosts Found on Port 443' in result
+
+    def test_batch1_port1_miss_port2_fast_hits(self, tmp_path):
+        """port1 fast+slow=0, port2 fast hits → 3 probe calls, rate unchanged."""
+        spoonmap.output_path = str(tmp_path)
+        # Internal scan: PROBE_PORT_PRIORITY starts with 443, 445
+        # dest_ports=['443','445','3306'] → probe=['443','445'], remaining=['3306']
+        # (3306 is not in PROBE_PORT_PRIORITY so it stays in remaining)
+        responses = [
+            {},                         # probe_fast_0 (443) — miss
+            {},                         # probe_slow_0 (443) — miss
+            {'445': {'10.0.0.3'}},     # probe_fast_1 (445) — hit
+            {},                         # main batch 3306
+        ]
+        with patch('spoonmap._run_masscan_batch',
+                   side_effect=self._make_batch_side_effect(responses)) as mock_b:
+            result = mass_scan('All', ['443', '445', '3306'], '88', '1000',
+                               '/fake/targets.txt', '', batch_size=1)
+
+        assert mock_b.call_count == 4
+        # Third call is probe_fast_1 at max_rate
+        third_call = mock_b.call_args_list[2]
+        assert third_call[0][1] == '1000'
+        assert 'probe_fast_1' in third_call[0][2]
+        assert 'Hosts Found on Port 445' in result
+
+    def test_batch1_all_probe_ports_miss(self, tmp_path):
+        """All probe ports return 0 hosts → for-else fires, rate unchanged."""
+        spoonmap.output_path = str(tmp_path)
+        # Internal: dest_ports=['443','3306'] → probe=['443'], remaining=['3306']
+        # (3306 not in PROBE_PORT_PRIORITY)
+        responses = [
+            {},   # probe_fast_0 (443) — miss
+            {},   # probe_slow_0 (443) — miss
+            {},   # main batch 3306
+        ]
+        with patch('spoonmap._run_masscan_batch',
+                   side_effect=self._make_batch_side_effect(responses)) as mock_b:
+            mass_scan('All', ['443', '3306'], '88', '1000',
+                      '/fake/targets.txt', '', batch_size=1)
+
+        # 2 probe calls + 1 main batch call
+        assert mock_b.call_count == 3
+        # Main batch call must use max_rate (no rate reduction)
+        main_batch_call = mock_b.call_args_list[2]
+        assert main_batch_call[0][1] == '1000'
+
+    # ── batch_size > 1 (legacy two-call probe) ───────────────────────────────
+
+    def test_batch5_uses_legacy_two_call_probe(self, tmp_path):
+        """batch_size=5: first 2 calls use probe_fast.xml / probe_slow.xml filenames."""
+        spoonmap.output_path = str(tmp_path)
+        # External: EXTERNAL_PROBE_PORT_PRIORITY=['443','80','8080','8443']
+        # probe_ports=['443','80','8080'] (first 5 from priority intersect dest)
+        # remaining_ports=['22','25','135'] (not in EXTERNAL_PROBE_PORT_PRIORITY)
+        dest_ports = ['443', '80', '8080', '22', '25', '135']
+        responses = [
+            {'443': {'10.0.0.1'}},   # probe_fast
+            {'443': {'10.0.0.1'}},   # probe_slow (same IPs → no new_ips)
+            {},                       # main batch ['22', '25', '135']
+        ]
+        with patch('spoonmap._run_masscan_batch',
+                   side_effect=self._make_batch_side_effect(responses)) as mock_b:
+            mass_scan('All', dest_ports, '53', '10000',
+                      '/fake/targets.txt', '', batch_size=5)
+
+        assert 'probe_fast.xml' in mock_b.call_args_list[0][0][2]
+        assert 'probe_slow.xml' in mock_b.call_args_list[1][0][2]
+
+    # ── scan-type-aware probe port selection ─────────────────────────────────
+
+    def test_external_scan_uses_web_probe_ports_only(self, tmp_path):
+        """source_port=53 (External) → probe ports drawn only from EXTERNAL_PROBE_PORT_PRIORITY."""
+        spoonmap.output_path = str(tmp_path)
+        # dest_ports: mix of external-priority ('443','80') and non-priority ('445','22')
+        # probe_ports=['443','80'], remaining=['445','22']
+        dest_ports = ['443', '80', '445', '22']
+        with patch('spoonmap._run_masscan_batch', return_value={}) as mock_b:
+            mass_scan('All', dest_ports, '53', '10000',
+                      '/fake/targets.txt', '', batch_size=1)
+
+        probe_calls = [
+            call for call in mock_b.call_args_list
+            if 'probe_fast' in call[0][2] or 'probe_slow' in call[0][2]
+        ]
+        probed_ports = {p for call in probe_calls for p in call[0][0]}
+        assert probed_ports <= set(EXTERNAL_PROBE_PORT_PRIORITY)
+
+    def test_internal_scan_uses_full_probe_priority(self, tmp_path):
+        """source_port=88 (Internal) → probe ports drawn from full PROBE_PORT_PRIORITY."""
+        spoonmap.output_path = str(tmp_path)
+        # 445 is in PROBE_PORT_PRIORITY but NOT in EXTERNAL_PROBE_PORT_PRIORITY
+        # dest_ports=['443','445','3306'] → probe=['443','445'], remaining=['3306']
+        # (3306 not in PROBE_PORT_PRIORITY)
+        dest_ports = ['443', '445', '3306']
+        with patch('spoonmap._run_masscan_batch', return_value={}) as mock_b:
+            mass_scan('All', dest_ports, '88', '1000',
+                      '/fake/targets.txt', '', batch_size=1)
+
+        probe_calls = [
+            call for call in mock_b.call_args_list
+            if 'probe_fast' in call[0][2] or 'probe_slow' in call[0][2]
+        ]
+        probed_ports = {p for call in probe_calls for p in call[0][0]}
+        # 443 is first in PROBE_PORT_PRIORITY so it must be probed
+        assert '443' in probed_ports
+        # 445 is in PROBE_PORT_PRIORITY but not EXTERNAL_PROBE_PORT_PRIORITY
+        assert '445' in probed_ports

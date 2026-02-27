@@ -286,10 +286,12 @@ def _run_masscan_batch(batch, rate, output_file, target_file, source_port, exclu
     return results
 
 
-def _select_probe_ports(dest_ports, max_ports=5):
+def _select_probe_ports(dest_ports, max_ports=5, priority=None):
     """Return up to max_ports high-probability ports from dest_ports."""
+    if priority is None:
+        priority = PROBE_PORT_PRIORITY
     dest_set = set(dest_ports)
-    probe = [p for p in PROBE_PORT_PRIORITY if p in dest_set][:max_ports]
+    probe = [p for p in priority if p in dest_set][:max_ports]
     if not probe:
         probe = list(dest_ports[:max_ports])
     return probe
@@ -327,7 +329,7 @@ def _delete_previous_results(output_path):
             os.remove(p)
 
 
-def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusions_file, batch_size=5):
+def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusions_file, batch_size=1):
     status_summary = '\nSummary'
 
     if not os.path.exists(f'{output_path}/masscan_results'):
@@ -337,6 +339,13 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
     port_ips = {}
 
     effective_rate = max_rate
+
+    # Cap rate when scanning multiple ports per batch to avoid pacing issues
+    if batch_size > 1:
+        if source_port == '53':   # External
+            effective_rate = str(min(int(max_rate), 10000))
+        else:                      # Internal
+            effective_rate = str(min(int(max_rate), 1000))
 
     # Full port scan: skip adaptive probe, run single masscan over 1-65535
     if scan_type == 'Full':
@@ -355,33 +364,68 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
             print(_COLOR_PROGRESS + status_update + _COLOR_RESET)
         return status_summary
 
-    probe_ports = _select_probe_ports(dest_ports)
+    probe_priority = EXTERNAL_PROBE_PORT_PRIORITY if source_port == '53' else PROBE_PORT_PRIORITY
+    probe_ports = _select_probe_ports(dest_ports, priority=probe_priority)
     probe_set = set(probe_ports)
     remaining_ports = [p for p in dest_ports if p not in probe_set]
 
     # Only run probe when there are additional ports beyond the probe set
     if probe_ports and remaining_ports:
         half_rate = str(max(1, int(max_rate) // 2))
-        probe_label = ', '.join(probe_ports)
-        print(_COLOR_INFO + f'Probe: scanning {probe_label} at {max_rate} pps then {half_rate} pps to check for packet loss...' + _COLOR_RESET)
-        fast_results = _run_masscan_batch(probe_ports, max_rate,
-            f'{output_path}/masscan_results/probe_fast.xml', target_file, source_port, exclusions_file)
-        slow_results = _run_masscan_batch(probe_ports, half_rate,
-            f'{output_path}/masscan_results/probe_slow.xml', target_file, source_port, exclusions_file)
-
-        fast_ips = {ip for s in fast_results.values() for ip in s}
-        slow_ips = {ip for s in slow_results.values() for ip in s}
-        new_ips = slow_ips - fast_ips
-
-        if new_ips:
-            print(_COLOR_INFO + f'Probe found {len(new_ips)} additional host(s) at {half_rate} pps — switching to reduced rate for all batches.' + _COLOR_RESET)
-            effective_rate = half_rate
+        if batch_size == 1:
+            # Iterative single-port probe: try each probe port until a result is found
+            fast_results = {}
+            slow_results = {}
+            unprobed = list(probe_ports)   # survivors go to main batches
+            for pb_idx, port in enumerate(probe_ports):
+                unprobed.remove(port)
+                print(_COLOR_INFO + f'Probe: scanning port {port} at {max_rate} pps...' + _COLOR_RESET)
+                port_fast = _run_masscan_batch([port], max_rate,
+                    f'{output_path}/masscan_results/probe_fast_{pb_idx}.xml',
+                    target_file, source_port, exclusions_file)
+                for k, v in port_fast.items():
+                    fast_results.setdefault(k, set()).update(v)
+                fast_ips = {ip for s in port_fast.values() for ip in s}
+                if fast_ips:
+                    print(_COLOR_INFO + f'Probe found {len(fast_ips)} host(s) at {max_rate} pps — no packet loss detected.' + _COLOR_RESET)
+                    break
+                print(_COLOR_INFO + f'Probe found 0 hosts at {max_rate} pps — checking {half_rate} pps...' + _COLOR_RESET)
+                port_slow = _run_masscan_batch([port], half_rate,
+                    f'{output_path}/masscan_results/probe_slow_{pb_idx}.xml',
+                    target_file, source_port, exclusions_file)
+                for k, v in port_slow.items():
+                    slow_results.setdefault(k, set()).update(v)
+                slow_ips = {ip for s in port_slow.values() for ip in s}
+                if slow_ips:
+                    print(_COLOR_INFO + f'Probe found {len(slow_ips)} host(s) at {half_rate} pps — switching to reduced rate.' + _COLOR_RESET)
+                    effective_rate = half_rate
+                    break
+            else:
+                print(_COLOR_INFO + f'Probe found no hosts on any probe port — continuing at {max_rate} pps.' + _COLOR_RESET)
+            ports_to_batch = unprobed + remaining_ports
+            probe_ports_used = probe_ports[:len(probe_ports) - len(unprobed)]
         else:
-            print(_COLOR_INFO + f'Probe found no additional hosts — continuing at {max_rate} pps.' + _COLOR_RESET)
+            # batch_size > 1: original two-call probe with all probe ports
+            probe_label = ', '.join(probe_ports)
+            print(_COLOR_INFO + f'Probe: scanning {probe_label} at {max_rate} pps then {half_rate} pps to check for packet loss...' + _COLOR_RESET)
+            fast_results = _run_masscan_batch(probe_ports, max_rate,
+                f'{output_path}/masscan_results/probe_fast.xml', target_file, source_port, exclusions_file)
+            slow_results = _run_masscan_batch(probe_ports, half_rate,
+                f'{output_path}/masscan_results/probe_slow.xml', target_file, source_port, exclusions_file)
+            fast_ips = {ip for s in fast_results.values() for ip in s}
+            slow_ips = {ip for s in slow_results.values() for ip in s}
+            new_ips = slow_ips - fast_ips
+            if new_ips:
+                print(_COLOR_INFO + f'Probe found {len(new_ips)} additional host(s) at {half_rate} pps — switching to reduced rate for all batches.' + _COLOR_RESET)
+                effective_rate = half_rate
+            else:
+                print(_COLOR_INFO + f'Probe found no additional hosts — continuing at {max_rate} pps.' + _COLOR_RESET)
+            ports_to_batch = remaining_ports
+            probe_ports_used = probe_ports
 
         # Merge probe results into port_ips and write live_hosts files now
         os.makedirs(output_path + '/live_hosts', exist_ok=True)
-        for port_key in probe_ports:
+        for port_key in probe_ports_used:
             combined = fast_results.get(port_key, set()) | slow_results.get(port_key, set())
             if combined:
                 port_ips[port_key] = combined
@@ -392,8 +436,6 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
                 status_update = f'\nHosts Found on Port {port_key}: {host_count}'
                 status_summary += status_update
                 print(_COLOR_PROGRESS + status_update + _COLOR_RESET)
-
-        ports_to_batch = remaining_ports
     else:
         ports_to_batch = dest_ports  # no probe: batch all ports normally
 
@@ -661,17 +703,26 @@ def lineCount(file):
 # bundled community NSE scripts under nse/ regardless of the caller's CWD.
 _DIR = os.path.dirname(os.path.realpath(__file__))
 
+# Internal probe priority — 443 first as most universally reachable
 PROBE_PORT_PRIORITY = [
+    '443',   # HTTPS — most universally reachable
     '445',   # SMB — near-universal on Windows networks
-    '3389',  # RDP — very common on Windows
     '80',    # HTTP — universal
-    '443',   # HTTPS — universal
+    '3389',  # RDP — common on Windows
     '22',    # SSH — universal on Linux/network gear
     '135',   # RPC — common on Windows
     '139',   # NetBIOS — common on Windows
     '53',    # DNS — present on many infrastructure hosts
     '25',    # SMTP — common on mail servers
     '8080',  # Alternate HTTP — common
+]
+
+# External probe priority — web services only (SMB/RDP/etc. blocked by firewalls)
+EXTERNAL_PROBE_PORT_PRIORITY = [
+    '443',
+    '80',
+    '8080',
+    '8443',
 ]
 
 # Scripts run on EXTERNAL scans only
@@ -1591,7 +1642,7 @@ def main():
         status_summary = ''
         output_path = ''
         nmap_threads = 5  # Default number of concurrent NMAP threads
-        masscan_batch_size = 5  # Default number of ports per masscan invocation
+        masscan_batch_size = 1  # Default number of ports per masscan invocation
 
 
         # Get options from configuration file if it exists
@@ -1635,7 +1686,7 @@ def main():
             output_path = config_parser['output_path']
             exclusions_file = config_parser['exclusions_file']
             nmap_threads = config_parser.get('nmap_threads', 5)
-            masscan_batch_size = config_parser.get('masscan_batch_size', 5)
+            masscan_batch_size = int(config_parser.get('masscan_batch_size', 1))
             script_scan = config_parser.get('script_scan', 'False') == 'True'
 
             # Resolve relative paths in config relative to the script directory
@@ -1745,9 +1796,9 @@ def main():
 
         if not max_rate:
             if target_scan == "External":
-                max_rate = '10000'
+                max_rate = '20000'
             else:
-                max_rate = '1000'
+                max_rate = '2000'
             while True:
                 try:
                     rate_choice = input(f'\nHow fast would you like to scan '
