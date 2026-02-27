@@ -17,8 +17,15 @@ import sys
 import tempfile
 import termios
 import threading
+import time
 from queue import Queue
 import xml.etree.ElementTree as etree
+
+_COLOR_INFO     = '\x1b[36m'   # cyan    — "currently doing X"
+_COLOR_PROGRESS = '\x1b[32m'   # green   — completion status / results
+_COLOR_RESULT   = '\x1b[93m'   # bright yellow — output paths / final summary
+_COLOR_ERROR    = '\x1b[31m'   # red     — errors and warnings
+_COLOR_RESET    = '\x1b[0m'
 
 
 def verify_python_version():
@@ -50,6 +57,30 @@ def restore_terminal_state(state):
         subprocess.run(['stty', 'sane'], check=False, stderr=subprocess.DEVNULL)
     except:
         pass
+
+def _format_eta(seconds):
+    s = int(seconds)
+    if s < 60:
+        return f'~{s} second{"s" if s != 1 else ""}'
+    m = s // 60
+    if m < 60:
+        return f'~{m} minute{"s" if m != 1 else ""}'
+    h, rem_m = divmod(m, 60)
+    if rem_m == 0:
+        return f'~{h} hour{"s" if h != 1 else ""}'
+    return f'~{h} hour{"s" if h != 1 else ""} {rem_m} minute{"s" if rem_m != 1 else ""}'
+
+
+def _print_completion_status(label, completed, total, start_time):
+    pct = '{:.0%}'.format(completed / total)
+    msg = f'\n{label} Completion Status: {pct}'
+    remaining = total - completed
+    if completed >= 2 and remaining > 0:
+        elapsed = time.time() - start_time
+        eta = (elapsed / completed) * remaining
+        msg += f' — ETA: {_format_eta(eta)}'
+    print(_COLOR_PROGRESS + msg + _COLOR_RESET)
+
 
 def ascii_art():
     print(r'''
@@ -101,7 +132,7 @@ def resolve_hostname(hostname):
         ip = socket.gethostbyname(hostname.strip())
         return ip
     except (socket.gaierror, socket.herror, OSError) as e:
-        print('\x1b[31m' + f'Warning: Could not resolve hostname {hostname}: {e}' + '\x1b[0m')
+        print(_COLOR_ERROR + f'Warning: Could not resolve hostname {hostname}: {e}' + _COLOR_RESET)
         return None
 
 def preprocess_targets(target_file, output_path):
@@ -119,7 +150,7 @@ def preprocess_targets(target_file, output_path):
     ip_to_hostname = {}
     masscan_targets = []
 
-    print('\x1b[33m' + 'Preprocessing target file...' + '\x1b[0m')
+    print(_COLOR_INFO + 'Preprocessing target file...' + _COLOR_RESET)
 
     with open(target_file, 'r') as f:
         for line in f:
@@ -152,8 +183,8 @@ def preprocess_targets(target_file, output_path):
     with open(mapping_file, 'w') as f:
         json.dump(ip_to_hostname, f, indent=2)
 
-    print('\x1b[33m' + f'Resolved {len(ip_to_hostname)} hostnames to IPs' + '\x1b[0m')
-    print('\x1b[33m' + f'Masscan target file: {masscan_file}' + '\x1b[0m')
+    print(_COLOR_INFO + f'Resolved {len(ip_to_hostname)} hostnames to IPs' + _COLOR_RESET)
+    print(_COLOR_INFO + f'Masscan target file: {masscan_file}' + _COLOR_RESET)
 
     return masscan_file, ip_to_hostname
 
@@ -181,7 +212,11 @@ def _run_masscan_batch(batch, rate, output_file, target_file, source_port, exclu
     term_state = save_terminal_state()
 
     try:
-        masscan_process = subprocess.Popen(masscan_cmd)
+        masscan_process = subprocess.Popen(
+            masscan_cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         masscan_process.wait()
     except KeyboardInterrupt:
         print(f'Killing PID {str(masscan_process.pid)}...')
@@ -190,11 +225,11 @@ def _run_masscan_batch(batch, rate, output_file, target_file, source_port, exclu
         restore_terminal_state(term_state)
         raise
     except FileNotFoundError:
-        print('\x1b[31m' + 'Error: masscan not found. Please install masscan.' + '\x1b[0m')
+        print(_COLOR_ERROR + 'Error: masscan not found. Please install masscan.' + _COLOR_RESET)
         restore_terminal_state(term_state)
         quit(1)
     except Exception as e:
-        print('\x1b[31m' + f'Error running masscan: {e}' + '\x1b[0m')
+        print(_COLOR_ERROR + f'Error running masscan: {e}' + _COLOR_RESET)
         restore_terminal_state(term_state)
         quit(1)
     finally:
@@ -220,7 +255,7 @@ def _run_masscan_batch(batch, rate, output_file, target_file, source_port, exclu
                     port_key = f'U:{portid}' if protocol == 'udp' else portid
                     results.setdefault(port_key, set()).add(ip_address)
     except etree.ParseError as e:
-        print('\x1b[31m' + f'Error parsing masscan XML: {e}' + '\x1b[0m')
+        print(_COLOR_ERROR + f'Error parsing masscan XML: {e}' + _COLOR_RESET)
 
     return results
 
@@ -279,7 +314,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
 
     # Full port scan: skip adaptive probe, run single masscan over 1-65535
     if scan_type == 'Full':
-        print('\x1b[33m' + 'Full port scan: running masscan 1-65535 (no probe)...' + '\x1b[0m')
+        print(_COLOR_INFO + 'Full port scan: running masscan 1-65535 (no probe)...' + _COLOR_RESET)
         output_file = f'{output_path}/masscan_results/portFull.xml'
         full_results = _run_masscan_batch(['1-65535'], max_rate, output_file,
                                           target_file, source_port, exclusions_file)
@@ -291,7 +326,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
             host_count = len(ips)
             status_update = f'\nHosts Found on Port {port_key}: {host_count}'
             status_summary += status_update
-            print('\x1b[33m' + status_update + '\x1b[0m')
+            print(_COLOR_PROGRESS + status_update + _COLOR_RESET)
         return status_summary
 
     probe_ports = _select_probe_ports(dest_ports)
@@ -302,7 +337,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
     if probe_ports and remaining_ports:
         half_rate = str(max(1, int(max_rate) // 2))
         probe_label = ', '.join(probe_ports)
-        print('\x1b[33m' + f'Probe: scanning {probe_label} at {max_rate} pps then {half_rate} pps to check for packet loss...' + '\x1b[0m')
+        print(_COLOR_INFO + f'Probe: scanning {probe_label} at {max_rate} pps then {half_rate} pps to check for packet loss...' + _COLOR_RESET)
         fast_results = _run_masscan_batch(probe_ports, max_rate,
             f'{output_path}/masscan_results/probe_fast.xml', target_file, source_port, exclusions_file)
         slow_results = _run_masscan_batch(probe_ports, half_rate,
@@ -313,10 +348,10 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
         new_ips = slow_ips - fast_ips
 
         if new_ips:
-            print('\x1b[33m' + f'Probe found {len(new_ips)} additional host(s) at {half_rate} pps — switching to reduced rate for all batches.' + '\x1b[0m')
+            print(_COLOR_INFO + f'Probe found {len(new_ips)} additional host(s) at {half_rate} pps — switching to reduced rate for all batches.' + _COLOR_RESET)
             effective_rate = half_rate
         else:
-            print('\x1b[33m' + f'Probe found no additional hosts — continuing at {max_rate} pps.' + '\x1b[0m')
+            print(_COLOR_INFO + f'Probe found no additional hosts — continuing at {max_rate} pps.' + _COLOR_RESET)
 
         # Merge probe results into port_ips and write live_hosts files now
         os.makedirs(output_path + '/live_hosts', exist_ok=True)
@@ -330,7 +365,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
                 host_count = len(combined)
                 status_update = f'\nHosts Found on Port {port_key}: {host_count}'
                 status_summary += status_update
-                print('\x1b[33m' + status_update + '\x1b[0m')
+                print(_COLOR_PROGRESS + status_update + _COLOR_RESET)
 
         ports_to_batch = remaining_ports
     else:
@@ -338,18 +373,19 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
 
     batches = [ports_to_batch[i:i + batch_size] for i in range(0, len(ports_to_batch), batch_size)]
     total_batches = len(batches)
+    scan_start_time = time.time()
 
     for batch_idx, batch in enumerate(batches):
         batch_label = ', '.join(batch)
-        print('\x1b[33m' + f'Scanning ports {batch_label}...' + '\x1b[0m')
+        print(_COLOR_INFO + f'Scanning ports {batch_label}...' + _COLOR_RESET)
 
         output_file = f'{output_path}/masscan_results/batch_{batch_idx}.xml'
 
         batch_results = _run_masscan_batch(batch, effective_rate, output_file, target_file, source_port, exclusions_file)
 
         if not batch_results:
-            print('\x1b[33m' + f'\nNo hosts found in batch {batch_idx + 1}/{total_batches} ({batch_label})')
-            print('Masscan Completion Status: ' + '{:.0%}'.format((batch_idx + 1) / total_batches) + '\x1b[0m')
+            print(_COLOR_INFO + f'\nNo hosts found in batch {batch_idx + 1}/{total_batches} ({batch_label})' + _COLOR_RESET)
+            _print_completion_status('Masscan', batch_idx + 1, total_batches, scan_start_time)
         else:
             # Initialize sets for all ports in this batch, loading existing data for resume
             for dest_port in batch:
@@ -375,9 +411,9 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
                     host_count = len(port_ips[dest_port])
                     status_update = f'\nHosts Found on Port {dest_port}: {host_count}'
                     status_summary += status_update
-                    print('\x1b[33m' + status_update + '\x1b[0m')
+                    print(_COLOR_PROGRESS + status_update + _COLOR_RESET)
 
-            print('\x1b[33m' + 'Masscan Completion Status: ' + '{:.0%}'.format((batch_idx + 1) / total_batches) + '\x1b[0m')
+            _print_completion_status('Masscan', batch_idx + 1, total_batches, scan_start_time)
 
     return status_summary
 
@@ -398,7 +434,8 @@ def create_hostname_target_file(ip_file, hostname_file, ip_to_hostname):
             outf.write(f'{hostname}\n')
 
 def nmap_worker(work_queue, completed_count, total_count, source_port, lock,
-                interrupt_event, ip_to_hostname, script_scan=False, target_scan='Internal'):
+                interrupt_event, ip_to_hostname, script_scan=False,
+                target_scan='Internal', start_time=None):
     """Worker thread function to process NMAP scans from queue"""
     while not interrupt_event.is_set():
         try:
@@ -455,9 +492,13 @@ def nmap_worker(work_queue, completed_count, total_count, source_port, lock,
 
             try:
                 with lock:
-                    print('\x1b[33m' + f'Grabbing service banners for port {dest_port}...\n' + '\x1b[0m')
+                    print(_COLOR_INFO + f'Grabbing service banners for port {dest_port}...\n' + _COLOR_RESET)
 
-                nmap_process = subprocess.Popen(nmap_cmd)
+                nmap_process = subprocess.Popen(
+                    nmap_cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
 
                 # Poll process to allow interrupt checking
                 while nmap_process.poll() is None and not interrupt_event.is_set():
@@ -471,16 +512,17 @@ def nmap_worker(work_queue, completed_count, total_count, source_port, lock,
 
                     with lock:
                         completed_count[0] += 1
-                        print('\x1b[33m' + '\nNMAP Completion Status: ' + \
-                            '{:.0%}'.format(completed_count[0] / total_count) + \
-                            '\x1b[0m')
+                        _print_completion_status(
+                            'NMAP', completed_count[0], total_count,
+                            start_time if start_time is not None else time.time()
+                        )
 
             except FileNotFoundError:
                 with lock:
-                    print('\x1b[31m' + 'Error: nmap not found. Please install nmap.' + '\x1b[0m')
+                    print(_COLOR_ERROR + 'Error: nmap not found. Please install nmap.' + _COLOR_RESET)
             except Exception as e:
                 with lock:
-                    print('\x1b[31m' + f'Error running nmap for port {dest_port}: {e}' + '\x1b[0m')
+                    print(_COLOR_ERROR + f'Error running nmap for port {dest_port}: {e}' + _COLOR_RESET)
             finally:
                 # Always restore terminal state after process completes
                 restore_terminal_state(term_state)
@@ -488,7 +530,7 @@ def nmap_worker(work_queue, completed_count, total_count, source_port, lock,
 
         except Exception as e:
             with lock:
-                print('\x1b[31m' + f'Worker thread error: {e}' + '\x1b[0m')
+                print(_COLOR_ERROR + f'Worker thread error: {e}' + _COLOR_RESET)
             work_queue.task_done()
 
 def nmap_scan(source_port, max_threads=5, ip_to_hostname=None,
@@ -519,10 +561,10 @@ def nmap_scan(source_port, max_threads=5, ip_to_hostname=None,
                 files_to_scan.append(host_file)
 
         if not files_to_scan:
-            print('\x1b[33m' + 'All ports have already been scanned.' + '\x1b[0m')
+            print(_COLOR_INFO + 'All ports have already been scanned.' + _COLOR_RESET)
             return
 
-        print('\x1b[33m' + f'Starting NMAP scans with {max_threads} concurrent threads...' + '\x1b[0m')
+        print(_COLOR_INFO + f'Starting NMAP scans with {max_threads} concurrent threads...' + _COLOR_RESET)
 
         # Create work queue and synchronization objects
         work_queue = Queue()
@@ -530,6 +572,7 @@ def nmap_scan(source_port, max_threads=5, ip_to_hostname=None,
         total_count = len(files_to_scan)
         lock = threading.Lock()
         interrupt_event = threading.Event()
+        start_time = time.time()
 
         # Add work items to queue
         for host_file in files_to_scan:
@@ -541,7 +584,8 @@ def nmap_scan(source_port, max_threads=5, ip_to_hostname=None,
             thread = threading.Thread(
                 target=nmap_worker,
                 args=(work_queue, completed_count, total_count, source_port, lock,
-                      interrupt_event, ip_to_hostname, script_scan, target_scan)
+                      interrupt_event, ip_to_hostname, script_scan, target_scan,
+                      start_time)
             )
             thread.daemon = True
             thread.start()
@@ -560,7 +604,7 @@ def nmap_scan(source_port, max_threads=5, ip_to_hostname=None,
                 thread.join(timeout=2)
 
         except KeyboardInterrupt:
-            print('\x1b[31m' + '\nInterrupt received, stopping NMAP scans...' + '\x1b[0m')
+            print(_COLOR_ERROR + '\nInterrupt received, stopping NMAP scans...' + _COLOR_RESET)
             interrupt_event.set()
 
             # Wait for threads to finish with timeout
@@ -570,9 +614,9 @@ def nmap_scan(source_port, max_threads=5, ip_to_hostname=None,
             raise
 
     except FileNotFoundError:
-        print('\x1b[31m' + f'Error: live_hosts directory not found at {output_path}/live_hosts' + '\x1b[0m')
+        print(_COLOR_ERROR + f'Error: live_hosts directory not found at {output_path}/live_hosts' + _COLOR_RESET)
     except Exception as e:
-        print('\x1b[31m' + f'Error during nmap scan: {e}' + '\x1b[0m')
+        print(_COLOR_ERROR + f'Error during nmap scan: {e}' + _COLOR_RESET)
 
 # Counts the number of lines in a file
 def lineCount(file):
@@ -580,10 +624,10 @@ def lineCount(file):
         with open(file) as outFile:
             return sum(1 for line in outFile)
     except FileNotFoundError:
-        print('\x1b[31m' + f'Warning: File not found: {file}' + '\x1b[0m')
+        print(_COLOR_ERROR + f'Warning: File not found: {file}' + _COLOR_RESET)
         return 0
     except Exception as e:
-        print('\x1b[31m' + f'Warning: Error reading file {file}: {e}' + '\x1b[0m')
+        print(_COLOR_ERROR + f'Warning: Error reading file {file}: {e}' + _COLOR_RESET)
         return 0
 
 
@@ -732,14 +776,14 @@ def _scan_extra_sql_ports(output_path, source_port):
                         if tcp_elem is not None and tcp_elem.text not in ('1433', None):
                             discovered.setdefault(ip, []).append(tcp_elem.text)
         except Exception as e:
-            print('\x1b[31m' + f'Warning: could not parse {fname} for SQL instances: {e}' + '\x1b[0m')
+            print(_COLOR_ERROR + f'Warning: could not parse {fname} for SQL instances: {e}' + _COLOR_RESET)
 
     for ip, ports in discovered.items():
         for port in ports:
             out_file = f'{output_path}/nmap_results/port{port}_sql.xml'
             if os.path.exists(out_file):
                 continue
-            print('\x1b[33m' + f'Discovered SQL Server instance on {ip}:{port} — running nmap -sV...' + '\x1b[0m')
+            print(_COLOR_INFO + f'Discovered SQL Server instance on {ip}:{port} — running nmap -sV...' + _COLOR_RESET)
             term_state = save_terminal_state()
             try:
                 proc = subprocess.Popen([
@@ -749,7 +793,7 @@ def _scan_extra_sql_ports(output_path, source_port):
                 ])
                 proc.wait()
             except Exception as e:
-                print('\x1b[31m' + f'Error scanning SQL port {port}: {e}' + '\x1b[0m')
+                print(_COLOR_ERROR + f'Error scanning SQL port {port}: {e}' + _COLOR_RESET)
             finally:
                 restore_terminal_state(term_state)
 
@@ -1034,7 +1078,7 @@ def generate_findings(output_path, target_scan):
     _write_findings_txt(output_path, target_scan, findings)
     _write_findings_md(output_path, target_scan, findings)
     _write_findings_json(output_path, findings)
-    print('\x1b[33m' + f'\nFindings written to {output_path}/findings.txt, findings.md, and findings.json' + '\x1b[0m')
+    print(_COLOR_RESULT + f'\nFindings written to {output_path}/findings.txt, findings.md, and findings.json' + _COLOR_RESET)
 
 
 # ── Reproduce commands and sample output for each finding type ────────────────
@@ -1733,7 +1777,7 @@ def main():
                     if os.path.exists(exclusions_file):
                         break
                     else:
-                        print('\x1b[31m' + f'Error: File not found: {exclusions_file}' + '\x1b[0m')
+                        print(_COLOR_ERROR + f'Error: File not found: {exclusions_file}' + _COLOR_RESET)
             else:
                 exclusions_file = None
     
@@ -1750,7 +1794,7 @@ def main():
 
         # Detect previous scan results and ask whether to delete or append
         if _previous_results_exist(output_path):
-            print('\x1b[33m' + '\nPrevious scan results detected in output directory.' + '\x1b[0m')
+            print(_COLOR_INFO + '\nPrevious scan results detected in output directory.' + _COLOR_RESET)
             while True:
                 choice = input('Delete previous results or append to them? '
                                '[d]elete / [a]ppend (default: append): ').strip().lower() or 'a'
@@ -1758,9 +1802,9 @@ def main():
                     break
             if choice[0] == 'd':
                 _delete_previous_results(output_path)
-                print('\x1b[33m' + 'Previous results deleted.' + '\x1b[0m')
+                print(_COLOR_INFO + 'Previous results deleted.' + _COLOR_RESET)
             else:
-                print('\x1b[33m' + 'Appending to previous results.' + '\x1b[0m')
+                print(_COLOR_INFO + 'Appending to previous results.' + _COLOR_RESET)
 
         # Preprocess targets to handle hostnames
         masscan_target_file, ip_to_hostname = preprocess_targets(target_file, output_path)
@@ -1812,7 +1856,7 @@ def main():
                 spoonmap_output.write(xml_result)
             with open(f'{output_path}/spoonmap_output.json', 'w') as f:
                 json.dump(hosts_json, f, indent=2)
-            print('\x1b[33m' + f'\nResults written to {output_path}/spoonmap_output.xml / .json' + '\x1b[0m')
+            print(_COLOR_RESULT + f'\nResults written to {output_path}/spoonmap_output.xml / .json' + _COLOR_RESET)
 
             if script_scan:
                 generate_findings(output_path, target_scan)
@@ -1821,7 +1865,7 @@ def main():
             status_summary += '\nNo hosts found.'
 
         # Print Summary
-        print('\x1b[33m' + status_summary + '\x1b[0m')
+        print(_COLOR_RESULT + status_summary + _COLOR_RESET)
 
 
     finally:

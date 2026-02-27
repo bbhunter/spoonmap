@@ -169,7 +169,6 @@ After scanning, `generate_findings()` parses all nmap XML results and produces s
 | CRITICAL | MS08-067 NetAPI / Conficker (CVE-2008-4250) |
 | CRITICAL | DoublePulsar backdoor active |
 | CRITICAL | SambaCry (CVE-2017-7494) |
-| CRITICAL | MS12-020 RDP RCE/DoS (CVE-2012-0002) |
 | CRITICAL | Unauthenticated Docker API (2375/4243) |
 | CRITICAL | Service Exposed Externally (Docker ports) |
 | HIGH | Anonymous FTP login |
@@ -194,43 +193,26 @@ On Internal scans, if `ms-sql-info` discovers SQL Server named instances on non-
 
 ## Potential Hacks to Look For
 
-1090
-Java RMI (auto-detected by script_scan on port 1090)
-https://www.rapid7.com/db/modules/exploit/multi/misc/java_rmi_server
-https://medium.com/@afinepl/java-rmi-for-pentesters-structure-recon-and-communication-non-jmx-registries-a10d5c996a79
+| Port(s) | Service | Notes |
+|---------|---------|-------|
+| 1090 | Java RMI | Auto-detected by `script_scan` |
+| 2375, 4243 | Docker API | Unauthenticated access auto-detected by `script_scan` |
+| 3300 | SAP Gateway | Auto-detected by `script_scan` |
+| 4786 | Cisco Smart Install | Auto-detected by `script_scan` |
+| 6129 | Dameware Remote Control | Auto-detected by `script_scan` |
+| 6379 | Redis | Unauthenticated access |
+| 6970 | Cisco CUCM TFTP | Auto-detected by `script_scan`; browse `http://<IP>:6970/ConfigFileCacheList.txt` |
+| 7001, 7002 | Oracle WebLogic Server | Deserialization RCE |
+| 8080 | Adobe ColdFusion BlazeDS | Deserialization RCE |
 
-4786
-Cisco Smart Install (auto-detected by script_scan)
-https://www.rapid7.com/db/modules/auxiliary/scanner/misc/cisco_smart_install
-https://github.com/Sab0tag3d/SIET
+### References
 
-3300
-SAP Gateway (auto-detected by script_scan)
-https://github.com/chipik/SAP_GW_RCE_exploit
-
-6129
-Dameware (auto-detected by script_scan)
-https://www.tenable.com/security/research/tra-2019-43
-https://github.com/tenable/poc/blob/master/Solarwinds/Dameware/dwrcs_dwDrvInst_rce.py
-
-6379
-Redis
-https://www.rapid7.com/db/modules/exploit/linux/redis/redis_replication_cmd_exec
-
-6970
-Cisco Unified Communications Manager TFTP (auto-detected by script_scan)
-https://github.com/trustedsec/SeeYouCM-Thief
-http://[CUCM IP Address]:6970/ConfigFileCacheList.txt
-
-2375, 4243
-Docker API (unauthenticated access auto-detected by script_scan)
-https://www.rapid7.com/db/modules/exploit/linux/http/docker_daemon_tcp
-
-7001, 7002
-Oracle WebLogic Server
-https://www.rapid7.com/db/modules/exploit/multi/http/oracle_weblogic_wsat_deserialization_rce
-https://www.rapid7.com/db/modules/exploit/multi/http/oracle_weblogic_deserialize_asyncresponseservice
-
-8080
-Adobe ColdFusion BlazeDS
-https://www.tenable.com/plugins/nessus/99731
+- **Java RMI (1090)** — [Rapid7 module](https://www.rapid7.com/db/modules/exploit/multi/misc/java_rmi_server) · [Pentester's guide](https://medium.com/@afinepl/java-rmi-for-pentesters-structure-recon-and-communication-non-jmx-registries-a10d5c996a79)
+- **Docker API (2375/4243)** — [Rapid7 module](https://www.rapid7.com/db/modules/exploit/linux/http/docker_daemon_tcp)
+- **SAP Gateway (3300)** — [SAP GW RCE exploit](https://github.com/chipik/SAP_GW_RCE_exploit)
+- **Cisco Smart Install (4786)** — [Rapid7 module](https://www.rapid7.com/db/modules/auxiliary/scanner/misc/cisco_smart_install) · [SIET tool](https://github.com/Sab0tag3d/SIET)
+- **Dameware (6129)** — [Tenable advisory](https://www.tenable.com/security/research/tra-2019-43) · [PoC](https://github.com/tenable/poc/blob/master/Solarwinds/Dameware/dwrcs_dwDrvInst_rce.py)
+- **Redis (6379)** — [Rapid7 module](https://www.rapid7.com/db/modules/exploit/linux/redis/redis_replication_cmd_exec)
+- **Cisco CUCM TFTP (6970)** — [SeeYouCM-Thief](https://github.com/trustedsec/SeeYouCM-Thief)
+- **Oracle WebLogic (7001/7002)** — [WSAT RCE](https://www.rapid7.com/db/modules/exploit/multi/http/oracle_weblogic_wsat_deserialization_rce) · [AsyncResponseService RCE](https://www.rapid7.com/db/modules/exploit/multi/http/oracle_weblogic_deserialize_asyncresponseservice)
+- **ColdFusion BlazeDS (8080)** — [Tenable plugin](https://www.tenable.com/plugins/nessus/99731)
