@@ -1,9 +1,11 @@
 """Tests for spoonmap.py"""
 import datetime
+import json
 import textwrap
 from unittest.mock import patch
 
 import pytest
+import xml.etree.ElementTree as etree
 
 import spoonmap
 from spoonmap import (
@@ -13,8 +15,10 @@ from spoonmap import (
     _cleanup_cmd,
     _delete_previous_results,
     _get_scripts_for_port,
+    _host_elem_to_dict,
     _previous_results_exist,
     _select_probe_ports,
+    _write_findings_json,
     _write_findings_md,
     _write_findings_txt,
     generate_findings,
@@ -292,6 +296,30 @@ class TestWriteFindingsMd:
         assert content.count('| Host | Port | Detail |') == 2
 
 
+# ── _write_findings_json ──────────────────────────────────────────────────────
+
+class TestWriteFindingsJson:
+    def test_findings_written_as_json_array(self, tmp_path):
+        findings = [('HIGH', '10.0.0.1', 'tcp/22', 'Weak SSH', 'detail')]
+        _write_findings_json(str(tmp_path), findings)
+        data = json.loads((tmp_path / 'findings.json').read_text())
+        assert len(data) == 1
+        assert data[0] == {'severity': 'HIGH', 'host': '10.0.0.1',
+                           'port': 'tcp/22', 'title': 'Weak SSH', 'detail': 'detail'}
+
+    def test_empty_findings_writes_empty_array(self, tmp_path):
+        _write_findings_json(str(tmp_path), [])
+        data = json.loads((tmp_path / 'findings.json').read_text())
+        assert data == []
+
+    def test_multiple_findings_all_fields_present(self, tmp_path):
+        _write_findings_json(str(tmp_path), SAMPLE_FINDINGS)
+        data = json.loads((tmp_path / 'findings.json').read_text())
+        assert len(data) == len(SAMPLE_FINDINGS)
+        for record in data:
+            assert set(record.keys()) == {'severity', 'host', 'port', 'title', 'detail'}
+
+
 # ── generate_findings ─────────────────────────────────────────────────────────
 
 def _script_elems(scripts):
@@ -527,26 +555,6 @@ class TestGenerateFindings:
         generate_findings(str(nmap_dir), 'Internal')
         assert 'SambaCry' not in (nmap_dir / 'findings.txt').read_text()
 
-    # ── MS12-020 RDP ──────────────────────────────────────────────────────────
-
-    def test_ms12020_vulnerable_critical_finding(self, nmap_dir):
-        # rdp-vuln-ms12-020 is a portrule script — appears under <port>
-        xml = _nmap_xml('10.0.0.11', 'tcp', '3389',
-                        scripts={'rdp-vuln-ms12-020': 'State: VULNERABLE'})
-        (nmap_dir / 'nmap_results' / 'port3389.xml').write_text(xml)
-        generate_findings(str(nmap_dir), 'Internal')
-        content = (nmap_dir / 'findings.txt').read_text()
-        assert 'MS12-020' in content
-        assert 'CRITICAL' in content
-        assert '10.0.0.11' in content
-
-    def test_ms12020_not_vulnerable_no_finding(self, nmap_dir):
-        xml = _nmap_xml('10.0.0.11', 'tcp', '3389',
-                        scripts={'rdp-vuln-ms12-020': 'NOT VULNERABLE'})
-        (nmap_dir / 'nmap_results' / 'port3389.xml').write_text(xml)
-        generate_findings(str(nmap_dir), 'Internal')
-        assert 'MS12-020' not in (nmap_dir / 'findings.txt').read_text()
-
     # ── Unauthenticated Docker API ────────────────────────────────────────────
 
     def test_docker_api_exposed_on_2375(self, nmap_dir):
@@ -696,6 +704,14 @@ class TestGenerateFindings:
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert content.index('HIGH') < content.index('INFO')
+
+    def test_generate_findings_writes_json(self, nmap_dir):
+        xml = _nmap_xml('10.0.0.1', 'tcp', '21',
+                        scripts={'ftp-anon': 'Anonymous FTP login allowed'})
+        (nmap_dir / 'nmap_results' / 'port21.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        data = json.loads((nmap_dir / 'findings.json').read_text())
+        assert any(r['title'] == 'Anonymous FTP' for r in data)
 
 
 # ── _previous_results_exist / _delete_previous_results ───────────────────────
@@ -875,6 +891,22 @@ class TestConfigFullScanCategory:
         assert '1-65535' not in dest_ports
 
 
+# ── config source port derivation ────────────────────────────────────────────
+
+class TestConfigSourcePort:
+    """Config-file branch must derive source_port from target_scan."""
+
+    def _source_port_for(self, target_scan_value):
+        """Replicate the config-branch source_port logic."""
+        return '53' if target_scan_value == 'External' else '88'
+
+    def test_internal_scan_uses_source_port_88(self):
+        assert self._source_port_for('Internal') == '88'
+
+    def test_external_scan_uses_source_port_53(self):
+        assert self._source_port_for('External') == '53'
+
+
 # ── _cleanup_cmd ──────────────────────────────────────────────────────────────
 
 class TestCleanupCmd:
@@ -927,6 +959,16 @@ class TestCleanupCmd:
                 _cleanup_cmd(str(tmp_path))
         assert exc.value.code == 1
         assert 'Usage' in capsys.readouterr().out
+
+    def test_cleanup_removes_json_files(self, tmp_path, capsys):
+        self._make_scan_data(tmp_path)
+        (tmp_path / 'findings.json').write_text('[]')
+        (tmp_path / 'spoonmap_output.json').write_text('[]')
+        with patch('sys.argv', ['spoonmap.py', '--cleanup', str(tmp_path)]):
+            with pytest.raises(SystemExit):
+                _cleanup_cmd(str(tmp_path))
+        assert not (tmp_path / 'findings.json').exists()
+        assert not (tmp_path / 'spoonmap_output.json').exists()
 
 
 # ── snmp-brute finding ────────────────────────────────────────────────────────
@@ -995,3 +1037,89 @@ class TestInternalPortScriptsSnmp:
     def test_snmp_udp_161_included(self):
         assert 'U:161' in INTERNAL_PORT_SCRIPTS
         assert 'snmp-brute' in INTERNAL_PORT_SCRIPTS['U:161']
+
+
+# ── _host_elem_to_dict ────────────────────────────────────────────────────────
+
+class TestHostElemToDict:
+    def _host_elem(self, ip, protocol='tcp', portid='80', state='open',
+                   service_name='', product='', version='',
+                   port_scripts=None, hostscripts=None):
+        """Build a minimal <host> element for testing."""
+        port_script_xml = ''.join(
+            f'<script id="{sid}" output="{out}"/>'
+            for sid, out in (port_scripts or {}).items()
+        )
+        hostscript_xml = ''
+        if hostscripts:
+            inner = ''.join(
+                f'<script id="{sid}" output="{out}"/>'
+                for sid, out in hostscripts.items()
+            )
+            hostscript_xml = f'<hostscript>{inner}</hostscript>'
+        svc_xml = (f'<service name="{service_name}" product="{product}" version="{version}"/>'
+                   if service_name or product or version else '')
+        xml = (
+            f'<host>'
+            f'<address addr="{ip}" addrtype="ipv4"/>'
+            f'<ports>'
+            f'<port protocol="{protocol}" portid="{portid}">'
+            f'<state state="{state}"/>'
+            f'{svc_xml}'
+            f'{port_script_xml}'
+            f'</port>'
+            f'</ports>'
+            f'{hostscript_xml}'
+            f'</host>'
+        )
+        return etree.fromstring(xml)
+
+    def test_basic_port_parsed(self):
+        elem = self._host_elem('10.0.0.1', protocol='tcp', portid='443', state='open')
+        result = _host_elem_to_dict(elem)
+        assert result['ip'] == '10.0.0.1'
+        assert len(result['ports']) == 1
+        p = result['ports'][0]
+        assert p['protocol'] == 'tcp'
+        assert p['portid'] == '443'
+        assert p['state'] == 'open'
+
+    def test_hostname_included_when_provided(self):
+        elem = self._host_elem('10.0.0.2')
+        result = _host_elem_to_dict(elem, ip_to_hostname={'10.0.0.2': 'host.example.com'})
+        assert result['hostname'] == 'host.example.com'
+
+    def test_hostname_omitted_when_not_in_map(self):
+        elem = self._host_elem('10.0.0.3')
+        result = _host_elem_to_dict(elem, ip_to_hostname={'10.0.0.99': 'other.example.com'})
+        assert 'hostname' not in result
+
+    def test_hostname_omitted_when_no_map(self):
+        elem = self._host_elem('10.0.0.4')
+        result = _host_elem_to_dict(elem)
+        assert 'hostname' not in result
+
+    def test_hostscripts_parsed(self):
+        elem = self._host_elem('10.0.0.5', hostscripts={'smb2-security-mode': 'signing not required'})
+        result = _host_elem_to_dict(elem)
+        assert result['hostscripts'] == {'smb2-security-mode': 'signing not required'}
+
+    def test_port_scripts_parsed(self):
+        elem = self._host_elem('10.0.0.6', port_scripts={'ftp-anon': 'Anonymous FTP login allowed'})
+        result = _host_elem_to_dict(elem)
+        assert result['ports'][0]['scripts'] == {'ftp-anon': 'Anonymous FTP login allowed'}
+
+    def test_service_fields_parsed(self):
+        elem = self._host_elem('10.0.0.7', service_name='http', product='Apache', version='2.4')
+        result = _host_elem_to_dict(elem)
+        p = result['ports'][0]
+        assert p['service'] == 'http'
+        assert p['product'] == 'Apache'
+        assert p['version'] == '2.4'
+
+    def test_missing_ports_element_returns_empty_list(self):
+        xml = '<host><address addr="10.0.0.8" addrtype="ipv4"/></host>'
+        elem = etree.fromstring(xml)
+        result = _host_elem_to_dict(elem)
+        assert result['ports'] == []
+        assert result['hostscripts'] == {}

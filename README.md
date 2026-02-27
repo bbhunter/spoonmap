@@ -120,8 +120,35 @@ Rates that are too high can create a denial-of-service condition — use caution
   nmap_results/portN.xml      # nmap banner/script XML per port
   all_live_hosts.txt          # union of all live IPs
   spoonmap_output.xml         # merged nmap XML (or masscan if no banner scan)
+  spoonmap_output.json        # same data as JSON — list of host objects by IP
   findings.txt                # severity-sorted findings report (script_scan only)
   findings.md                 # same report in Markdown table format
+  findings.json               # same report as a JSON array (script_scan only)
+```
+
+`spoonmap_output.json` consolidates hosts across all per-port files, merging ports for the same IP:
+
+```json
+[
+  {
+    "ip": "10.0.0.1",
+    "hostname": "host.example.com",
+    "ports": [
+      {"protocol": "tcp", "portid": "445", "state": "open",
+       "service": "microsoft-ds", "product": "", "version": "", "scripts": {}}
+    ],
+    "hostscripts": {"smb2-security-mode": "Message signing enabled but not required"}
+  }
+]
+```
+
+`findings.json` is a flat array with one object per finding:
+
+```json
+[
+  {"severity": "HIGH", "host": "10.0.0.1", "port": "tcp/22",
+   "title": "Weak SSH Auth", "detail": "..."}
+]
 ```
 
 ## NSE Script Scanning and Findings
@@ -134,7 +161,7 @@ When `script_scan` is enabled, nmap runs targeted NSE scripts against relevant p
 
 Port 9100 (JetDirect raw printing protocol) is included in the Specialized category. Hosts with port 9100 open are identified as printers; SNMP default community string and anonymous FTP findings are suppressed for these hosts to reduce noise.
 
-After scanning, `generate_findings()` parses all nmap XML results and produces severity-sorted `findings.txt` and `findings.md` reports. Findings include:
+After scanning, `generate_findings()` parses all nmap XML results and produces severity-sorted `findings.txt`, `findings.md`, and `findings.json` reports. Findings include:
 
 | Severity | Finding |
 |----------|---------|

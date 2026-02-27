@@ -238,7 +238,8 @@ def _select_probe_ports(dest_ports, max_ports=5):
 _RESULT_DIRS  = ('masscan_results', 'live_hosts', 'nmap_results')
 _RESULT_FILES = ('all_live_hosts.txt', 'masscan_targets.txt',
                  'ip_hostname_map.json', 'spoonmap_output.xml',
-                 'findings.txt', 'findings.md')
+                 'spoonmap_output.json',
+                 'findings.txt', 'findings.md', 'findings.json')
 
 
 def _previous_results_exist(output_path):
@@ -638,7 +639,7 @@ INTERNAL_PORT_SCRIPTS = {
     '4243':  'docker-version',
     '1090':  'rmi-dumpregistry',
     '1433':  'ms-sql-info',
-    '3389':  'rdp-enum-encryption,rdp-vuln-ms12-020',
+    '3389':  'rdp-enum-encryption',
     '4786':  f'{_DIR}/nse/cisco-siet.nse',
     '161':   'snmp-brute',
     'U:161': 'snmp-brute',
@@ -890,14 +891,6 @@ def generate_findings(output_path, target_scan):
                         add('MEDIUM', ip, port_str, 'Weak RDP Encryption',
                             'Classic RDP encryption or NLA not enforced.')
 
-                # ── rdp-vuln-ms12-020 ─────────────────────────────────────
-                if 'rdp-vuln-ms12-020' in scripts and target_scan == 'Internal':
-                    out = scripts['rdp-vuln-ms12-020']
-                    if 'VULNERABLE' in out and 'NOT VULNERABLE' not in out:
-                        add('CRITICAL', ip, port_str, 'MS12-020 RDP (CVE-2012-0002)',
-                            'Host is vulnerable to unauthenticated RDP RCE/DoS (MS12-020). '
-                            'Apply MS12-020 patch immediately or disable RDP.')
-
                 # ── Dameware on port 6129 ─────────────────────────────────
                 if portid == '6129':
                     svc = port_elem.find('service')
@@ -1040,7 +1033,8 @@ def generate_findings(output_path, target_scan):
 
     _write_findings_txt(output_path, target_scan, findings)
     _write_findings_md(output_path, target_scan, findings)
-    print('\x1b[33m' + f'\nFindings written to {output_path}/findings.txt and findings.md' + '\x1b[0m')
+    _write_findings_json(output_path, findings)
+    print('\x1b[33m' + f'\nFindings written to {output_path}/findings.txt, findings.md, and findings.json' + '\x1b[0m')
 
 
 # ── Reproduce commands and sample output for each finding type ────────────────
@@ -1097,19 +1091,6 @@ _FINDING_REPRO = {
             '|     State: VULNERABLE\n'
             '|     IDs:  CVE:CVE-2017-7494\n'
             '|_  References: https://www.samba.org/samba/security/CVE-2017-7494.html'
-        ),
-    },
-    'MS12-020 RDP (CVE-2012-0002)': {
-        'flags': '--script rdp-vuln-ms12-020',
-        'sample': (
-            'PORT     STATE SERVICE\n'
-            '3389/tcp open  ms-wbt-server\n'
-            '| rdp-vuln-ms12-020:\n'
-            '|   VULNERABLE:\n'
-            '|   MS12-020 Remote Desktop Protocol Denial Of Service Vulnerability\n'
-            '|     State: VULNERABLE\n'
-            '|     IDs:  CVE:CVE-2012-0002\n'
-            '|_    Risk factor: HIGH'
         ),
     },
     'Unauthenticated Docker API': {
@@ -1413,6 +1394,46 @@ def _write_findings_md(output_path, target_scan, findings):
         fh.write('\n'.join(lines) + '\n')
 
 
+def _write_findings_json(output_path, findings):
+    """Write findings as a JSON array to findings.json."""
+    records = [
+        {'severity': sev, 'host': host, 'port': port, 'title': title, 'detail': detail}
+        for sev, host, port, title, detail in findings
+    ]
+    with open(f'{output_path}/findings.json', 'w') as fh:
+        json.dump(records, fh, indent=2)
+
+
+def _host_elem_to_dict(host_elem, ip_to_hostname=None):
+    """Convert a single <host> lxml element into a JSON-serialisable dict."""
+    addr_elem = host_elem.find('address[@addrtype="ipv4"]')
+    ip = addr_elem.attrib.get('addr', '') if addr_elem is not None else ''
+    result = {'ip': ip, 'ports': [], 'hostscripts': {}}
+    hostname = (ip_to_hostname or {}).get(ip)
+    if hostname:
+        result['hostname'] = hostname
+    ports_elem = host_elem.find('ports')
+    if ports_elem is not None:
+        for port_elem in ports_elem.findall('port'):
+            state_elem = port_elem.find('state')
+            svc_elem   = port_elem.find('service')
+            result['ports'].append({
+                'protocol': port_elem.attrib.get('protocol', ''),
+                'portid':   port_elem.attrib.get('portid', ''),
+                'state':    state_elem.attrib.get('state', '') if state_elem is not None else '',
+                'service':  svc_elem.attrib.get('name', '')    if svc_elem   is not None else '',
+                'product':  svc_elem.attrib.get('product', '') if svc_elem   is not None else '',
+                'version':  svc_elem.attrib.get('version', '') if svc_elem   is not None else '',
+                'scripts':  {s.attrib['id']: s.attrib.get('output', '')
+                             for s in port_elem.findall('script')},
+            })
+    hostscript_elem = host_elem.find('hostscript')
+    if hostscript_elem is not None:
+        result['hostscripts'] = {s.attrib['id']: s.attrib.get('output', '')
+                                 for s in hostscript_elem.findall('script')}
+    return result
+
+
 def _cleanup_cmd(dir_path):
     """Handle --cleanup: remove prior scan output from output_path and exit."""
     idx = sys.argv.index('--cleanup')
@@ -1538,6 +1559,7 @@ def main():
             else:
                 banner_scan = False
             target_scan = config_parser['target_scan']
+            source_port = '53' if target_scan == 'External' else '88'
             max_rate = config_parser['max_rate']
             target_file = config_parser['target_file']
             output_path = config_parser['output_path']
@@ -1770,16 +1792,27 @@ def main():
             else:
                 result_dir = f'{output_path}/masscan_results/'
             xml_result = '<?xml version="1.0"?>\n<!-- SpooNMAP -->\n<nmaprun>\n'
+            hosts_json = []
+            ip_index   = {}  # {ip: index into hosts_json}
             xml_files = os.listdir(result_dir)
             for xml_file in xml_files:
                 root = etree.parse(result_dir + xml_file)
-                hosts = root.findall('host')
-                for host in hosts:
+                for host in root.findall('host'):
                     xml_result += etree.tostring(host, encoding="unicode", method="xml")
+                    hd = _host_elem_to_dict(host, ip_to_hostname)
+                    if hd['ip'] in ip_index:
+                        existing = hosts_json[ip_index[hd['ip']]]
+                        existing['ports'].extend(hd['ports'])
+                        existing['hostscripts'].update(hd['hostscripts'])
+                    else:
+                        ip_index[hd['ip']] = len(hosts_json)
+                        hosts_json.append(hd)
             xml_result += '</nmaprun>'
             with open(f'{output_path}/spoonmap_output.xml', 'w+') as spoonmap_output:
                 spoonmap_output.write(xml_result)
-            print('\x1b[33m' + f'\nResults written to {output_path}/spoonmap_output.xml' + '\x1b[0m')
+            with open(f'{output_path}/spoonmap_output.json', 'w') as f:
+                json.dump(hosts_json, f, indent=2)
+            print('\x1b[33m' + f'\nResults written to {output_path}/spoonmap_output.xml / .json' + '\x1b[0m')
 
             if script_scan:
                 generate_findings(output_path, target_scan)
