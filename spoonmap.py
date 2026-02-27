@@ -582,17 +582,19 @@ def nmap_worker(work_queue, completed_count, total_count, source_port, lock,
                         '--host-timeout', '5m',
                     ])
 
-            # Save terminal state before running nmap
-            term_state = save_terminal_state()
-
             try:
                 with lock:
                     print(_COLOR_INFO + f'Grabbing service banners for port {dest_port}...\n' + _COLOR_RESET)
 
+                # start_new_session isolates nmap in its own session so it has
+                # no controlling terminal — terminal signals cannot propagate
+                # between nmap and spoonmap in either direction, making external
+                # `kill <nmap_pid>` safe without stopping the overall scan.
                 nmap_process = subprocess.Popen(
                     nmap_cmd,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
+                    start_new_session=True,
                 )
 
                 # Poll process to allow interrupt checking
@@ -619,8 +621,6 @@ def nmap_worker(work_queue, completed_count, total_count, source_port, lock,
                 with lock:
                     print(_COLOR_ERROR + f'Error running nmap for port {dest_port}: {e}' + _COLOR_RESET)
             finally:
-                # Always restore terminal state after process completes
-                restore_terminal_state(term_state)
                 work_queue.task_done()
 
         except Exception as e:
