@@ -6,6 +6,7 @@
 import contextlib
 import datetime
 import glob as _glob
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -80,6 +81,30 @@ def _print_completion_status(label, completed, total, start_time):
         eta = (elapsed / completed) * remaining
         msg += f' — ETA: {_format_eta(eta)}'
     print(_COLOR_PROGRESS + msg + _COLOR_RESET)
+
+
+def _count_hosts_in_file(filepath):
+    """Return total IP address count for all entries in a target/exclusions file.
+
+    Each line may be a bare IP, a CIDR, or a hostname.
+    CIDRs are expanded to their full address count via ipaddress.
+    Hostnames count as 1. Blank lines and # comments are skipped.
+    Returns None if the file cannot be opened.
+    """
+    count = 0
+    try:
+        with open(filepath, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                try:
+                    count += ipaddress.ip_network(line, strict=False).num_addresses
+                except ValueError:
+                    count += 1   # hostname — resolves to one IP
+    except OSError:
+        return None
+    return count
 
 
 def ascii_art():
@@ -1790,7 +1815,19 @@ def main():
         print(f'Target File: {target_file}')
         print(f'Exclusions File: {exclusions_file}')
         print(f'NMAP Concurrent Threads: {nmap_threads}')
-        print(f'Masscan Batch Size: {masscan_batch_size}\n')
+        print(f'Masscan Batch Size: {masscan_batch_size}')
+
+        target_count = _count_hosts_in_file(target_file)
+        if target_count is not None:
+            excl_count = _count_hosts_in_file(exclusions_file) if exclusions_file else 0
+            net_count = max(0, target_count - (excl_count or 0))
+            if excl_count:
+                host_line = (f'Target Hosts: {net_count:,}'
+                             f'  ({target_count:,} in target file \u2212 {excl_count:,} excluded)')
+            else:
+                host_line = f'Target Hosts: {target_count:,}'
+            print(_COLOR_RESULT + host_line + _COLOR_RESET)
+        print()
 
         # Detect previous scan results and ask whether to delete or append
         if _previous_results_exist(output_path):
