@@ -22,10 +22,10 @@ import time
 from queue import Queue
 import xml.etree.ElementTree as etree
 
-_COLOR_INFO     = '\x1b[36m'   # cyan    — "currently doing X"
-_COLOR_PROGRESS = '\x1b[32m'   # green   — completion status / results
-_COLOR_RESULT   = '\x1b[93m'   # bright yellow — output paths / final summary
-_COLOR_ERROR    = '\x1b[31m'   # red     — errors and warnings
+_COLOR_INFO     = '\x1b[38;5;51m'    # electric cyan   — "currently doing X"
+_COLOR_PROGRESS = '\x1b[38;5;118m'   # neon lime green — completion status / results
+_COLOR_RESULT   = '\x1b[38;5;226m'   # electric yellow — output paths / final summary
+_COLOR_ERROR    = '\x1b[38;5;198m'   # hot pink        — errors and warnings
 _COLOR_RESET    = '\x1b[0m'
 
 
@@ -228,7 +228,8 @@ def _run_masscan_batch(batch, rate, output_file, target_file, source_port, exclu
         '--max-rate', rate,
         '--source-port', source_port,
         '-iL', target_file,
-        '-oX', output_file
+        '-oX', output_file,
+        '--retries', '4'
     ]
 
     if exclusions_file:
