@@ -43,7 +43,7 @@ Target Scan
 
 Is this an internal or external scan (default: External)?
 
-How fast would you like to scan (default: 10000 packets/second)?
+How fast would you like to scan (default: 20000 packets/second)?
 
 Please enter the full path for the file containing target hosts (default: /opt/spoonmap/ranges.txt):
 
@@ -58,11 +58,12 @@ You can also create a `config.json` file (based on `config.json.sample`) to skip
     "banner_scan": "True",
     "script_scan": "False",
     "target_scan": "Internal",
-    "max_rate": "1000",
+    "max_rate": "2000",
     "target_file": "ranges.txt",
     "output_path": "./",
     "exclusions_file": "exclusions.txt",
-    "nmap_threads": 5
+    "nmap_threads": 5,
+    "masscan_batch_size": 5
 }
 ```
 
@@ -102,12 +103,36 @@ To remove scan data non-interactively, use the `--cleanup` flag:
 ### max_rate guidance
 Rates that are too high can create a denial-of-service condition — use caution.
 
-| Scan | Recommended rate |
-|------|-----------------|
-| External + category/custom scan | 10,000 pps |
-| External + full port scan | 10,000 pps |
-| Internal + category/custom scan | 1,000 pps |
-| Internal + full port scan | 1,000 pps |
+| Scan type | Default `max_rate` | Effective rate for multi-port batches |
+|-----------|-------------------|---------------------------------------|
+| External | 20,000 pps | capped at 10,000 pps |
+| Internal | 2,000 pps | capped at 1,000 pps |
+
+When `masscan_batch_size > 1` (the default is 5), SpooNMAP caps the scanning rate per batch to avoid pacing issues when sending packets across multiple ports simultaneously. The probe phase and full port scans use the full `max_rate`.
+
+### Inter-scan wait (automatic)
+When scanning small target ranges (e.g. a /24), each per-port masscan invocation completes in a fraction of a second, producing rapid back-to-back traffic bursts that can saturate the local network. SpooNMAP automatically passes `--wait N` to masscan so the process lingers after its last packet, acting as a natural cooldown between invocations.
+
+The wait is derived from the target host count and the configured `max_rate`:
+
+```
+scan_duration  = host_count / max_rate   # rough seconds per port
+wait_secs      = max(0, 30 - scan_duration)
+```
+
+| Target | Hosts | max_rate | wait_secs |
+|--------|-------|----------|-----------|
+| /24 | 256 | 2,000 pps (internal default) | 29 s |
+| /20 | 4,096 | 2,000 pps | 27 s |
+| /16 | 65,536 | 2,000 pps | 0 s (no wait needed) |
+| /24 | 256 | 20,000 pps (external default) | 29 s |
+| /16 | 65,536 | 20,000 pps | 26 s |
+
+A message is printed when a non-zero wait is applied:
+
+```
+Inter-scan wait: 29s (target ~256 hosts)
+```
 
 ## Output Structure
 

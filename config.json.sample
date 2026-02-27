@@ -9,9 +9,9 @@
     "script_scan" : "False",
     "__target_scan_choices__" : "External, Internal",
     "target_scan" : "Internal",
-    "__max_rate_external_recommedation__" : "Default = 10000",
-    "__max_rate_internal_recommedation__" : "Default = 1000",
-    "max_rate" : "1000",
+    "__max_rate_external_recommedation__" : "Default = 20000",
+    "__max_rate_internal_recommedation__" : "Default = 2000",
+    "max_rate" : "2000",
     "target_file" : "ranges.txt",
     "output_path" : "./",
     "exclusions_file" : "exclusions.txt"

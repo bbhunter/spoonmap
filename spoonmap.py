@@ -219,7 +219,7 @@ def _get_scripts_for_port(dest_port, target_scan):
     return table.get(dest_port)
 
 
-def _run_masscan_batch(batch, rate, output_file, target_file, source_port, exclusions_file):
+def _run_masscan_batch(batch, rate, output_file, target_file, source_port, exclusions_file, wait_secs=2):
     """Run masscan for one batch and return {port_key: set_of_ips}."""
     masscan_cmd = [
         'masscan',
@@ -229,7 +229,8 @@ def _run_masscan_batch(batch, rate, output_file, target_file, source_port, exclu
         '--source-port', source_port,
         '-iL', target_file,
         '-oX', output_file,
-        '--retries', '4'
+        '--retries', '4',
+        '--wait', str(wait_secs),
     ]
 
     if exclusions_file:
@@ -297,6 +298,21 @@ def _select_probe_ports(dest_ports, max_ports=5, priority=None):
     return probe
 
 
+def _calc_scan_wait(host_count, rate):
+    """Return --wait seconds for masscan to prevent inter-scan saturation.
+
+    Small target ranges (e.g. /24) complete each port scan in a fraction of a
+    second, creating a sharp traffic burst that saturates the network for ~30 s.
+    Larger ranges take longer to scan, spreading the load so no cooldown is
+    needed.  Returns 0 when scan_duration >= recovery_window.
+    """
+    if not host_count or host_count <= 0:
+        return 2   # safe default when count is unknown
+    scan_duration = host_count / max(1, int(rate))
+    recovery_window = 30   # seconds observed for a /24 at typical rates
+    return max(0, int(recovery_window - scan_duration))
+
+
 # Result dirs and files written during a scan run.
 _RESULT_DIRS  = ('masscan_results', 'live_hosts', 'nmap_results')
 _RESULT_FILES = ('all_live_hosts.txt', 'masscan_targets.txt',
@@ -347,12 +363,19 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
         else:                      # Internal
             effective_rate = str(min(int(max_rate), 1000))
 
+    # Calculate --wait to prevent inter-scan saturation on small target ranges
+    target_host_count = _count_hosts_in_file(target_file)
+    wait_secs = _calc_scan_wait(target_host_count, max_rate)
+    if wait_secs > 0 and target_host_count is not None:
+        print(_COLOR_INFO + f'Inter-scan wait: {wait_secs}s (target ~{target_host_count:,} hosts)' + _COLOR_RESET)
+
     # Full port scan: skip adaptive probe, run single masscan over 1-65535
     if scan_type == 'Full':
         print(_COLOR_INFO + 'Full port scan: running masscan 1-65535 (no probe)...' + _COLOR_RESET)
         output_file = f'{output_path}/masscan_results/portFull.xml'
         full_results = _run_masscan_batch(['1-65535'], max_rate, output_file,
-                                          target_file, source_port, exclusions_file)
+                                          target_file, source_port, exclusions_file,
+                                          wait_secs=wait_secs)
         os.makedirs(output_path + '/live_hosts', exist_ok=True)
         for port_key, ips in full_results.items():
             with open(f'{output_path}/live_hosts/port{port_key}.txt', 'w') as f:
@@ -382,7 +405,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
                 print(_COLOR_INFO + f'Probe: scanning port {port} at {max_rate} pps...' + _COLOR_RESET)
                 port_fast = _run_masscan_batch([port], max_rate,
                     f'{output_path}/masscan_results/probe_fast_{pb_idx}.xml',
-                    target_file, source_port, exclusions_file)
+                    target_file, source_port, exclusions_file, wait_secs=wait_secs)
                 for k, v in port_fast.items():
                     fast_results.setdefault(k, set()).update(v)
                 fast_ips = {ip for s in port_fast.values() for ip in s}
@@ -392,7 +415,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
                 print(_COLOR_INFO + f'Probe found 0 hosts at {max_rate} pps — checking {half_rate} pps...' + _COLOR_RESET)
                 port_slow = _run_masscan_batch([port], half_rate,
                     f'{output_path}/masscan_results/probe_slow_{pb_idx}.xml',
-                    target_file, source_port, exclusions_file)
+                    target_file, source_port, exclusions_file, wait_secs=wait_secs)
                 for k, v in port_slow.items():
                     slow_results.setdefault(k, set()).update(v)
                 slow_ips = {ip for s in port_slow.values() for ip in s}
@@ -409,9 +432,11 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
             probe_label = ', '.join(probe_ports)
             print(_COLOR_INFO + f'Probe: scanning {probe_label} at {max_rate} pps then {half_rate} pps to check for packet loss...' + _COLOR_RESET)
             fast_results = _run_masscan_batch(probe_ports, max_rate,
-                f'{output_path}/masscan_results/probe_fast.xml', target_file, source_port, exclusions_file)
+                f'{output_path}/masscan_results/probe_fast.xml', target_file, source_port, exclusions_file,
+                wait_secs=wait_secs)
             slow_results = _run_masscan_batch(probe_ports, half_rate,
-                f'{output_path}/masscan_results/probe_slow.xml', target_file, source_port, exclusions_file)
+                f'{output_path}/masscan_results/probe_slow.xml', target_file, source_port, exclusions_file,
+                wait_secs=wait_secs)
             fast_ips = {ip for s in fast_results.values() for ip in s}
             slow_ips = {ip for s in slow_results.values() for ip in s}
             new_ips = slow_ips - fast_ips
@@ -449,7 +474,8 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
 
         output_file = f'{output_path}/masscan_results/batch_{batch_idx}.xml'
 
-        batch_results = _run_masscan_batch(batch, effective_rate, output_file, target_file, source_port, exclusions_file)
+        batch_results = _run_masscan_batch(batch, effective_rate, output_file, target_file, source_port, exclusions_file,
+                                           wait_secs=wait_secs)
 
         if not batch_results:
             print(_COLOR_INFO + f'\nNo hosts found in batch {batch_idx + 1}/{total_batches} ({batch_label})' + _COLOR_RESET)
@@ -1642,7 +1668,7 @@ def main():
         status_summary = ''
         output_path = ''
         nmap_threads = 5  # Default number of concurrent NMAP threads
-        masscan_batch_size = 1  # Default number of ports per masscan invocation
+        masscan_batch_size = 5  # Default number of ports per masscan invocation
 
 
         # Get options from configuration file if it exists
@@ -1686,7 +1712,7 @@ def main():
             output_path = config_parser['output_path']
             exclusions_file = config_parser['exclusions_file']
             nmap_threads = config_parser.get('nmap_threads', 5)
-            masscan_batch_size = int(config_parser.get('masscan_batch_size', 1))
+            masscan_batch_size = int(config_parser.get('masscan_batch_size', 5))
             script_scan = config_parser.get('script_scan', 'False') == 'True'
 
             # Resolve relative paths in config relative to the script directory

@@ -14,6 +14,7 @@ from spoonmap import (
     INTERNAL_PORT_SCRIPTS,
     PROBE_PORT_PRIORITY,
     SERVICE_CATEGORIES,
+    _calc_scan_wait,
     _cleanup_cmd,
     _delete_previous_results,
     _get_scripts_for_port,
@@ -105,6 +106,42 @@ class TestSelectProbePorts:
         # Only two priority ports available; should return both, not pad with fallback
         result = _select_probe_ports(['22', '443'], max_ports=5)
         assert set(result) == {'22', '443'}
+
+
+# ── _calc_scan_wait ────────────────────────────────────────────────────────────
+
+class TestCalcScanWait:
+    def test_small_network_gets_full_wait(self):
+        # /24 = 256 hosts at 1000 pps → scan_duration ≈ 0.25s → wait ≈ 29s
+        result = _calc_scan_wait(256, '1000')
+        assert result == 29
+
+    def test_large_network_gets_zero_wait(self):
+        # /16 = 65536 hosts at 1000 pps → scan_duration ≈ 65s > 30s → wait = 0
+        result = _calc_scan_wait(65536, '1000')
+        assert result == 0
+
+    def test_medium_network_partial_wait(self):
+        # 1000 hosts at 1000 pps → scan_duration = 1s → wait = 29s
+        result = _calc_scan_wait(1000, '1000')
+        assert result == 29
+
+    def test_none_host_count_returns_default(self):
+        assert _calc_scan_wait(None, '1000') == 2
+
+    def test_zero_host_count_returns_default(self):
+        assert _calc_scan_wait(0, '1000') == 2
+
+    def test_higher_rate_reduces_wait_threshold(self):
+        # 10000 pps: 30000 hosts needed for scan_duration = 3s
+        # 1000 hosts / 10000 pps = 0.1s → wait = 29s
+        result = _calc_scan_wait(1000, '10000')
+        assert result == 29
+
+    def test_threshold_boundary(self):
+        # 30000 hosts / 1000 pps = 30s = recovery_window → wait = 0
+        result = _calc_scan_wait(30000, '1000')
+        assert result == 0
 
 
 # ── _get_scripts_for_port ─────────────────────────────────────────────────────
@@ -841,6 +878,7 @@ class TestFullPortScan:
             ['1-65535'], '10000',
             str(tmp_path) + '/masscan_results/portFull.xml',
             '/fake/targets.txt', '53', '',
+            wait_secs=2,
         )
         assert 'Hosts Found on Port 80' in result
         assert 'Hosts Found on Port 443' in result
@@ -1289,3 +1327,22 @@ class TestMassScanProbe:
         assert '443' in probed_ports
         # 445 is in PROBE_PORT_PRIORITY but not EXTERNAL_PROBE_PORT_PRIORITY
         assert '445' in probed_ports
+
+    # ── wait_secs forwarding ──────────────────────────────────────────────────
+
+    def test_wait_secs_forwarded_to_all_batch_calls(self, tmp_path):
+        """_calc_scan_wait result is passed as wait_secs= to every _run_masscan_batch call."""
+        spoonmap.output_path = str(tmp_path)
+        # Write a real target file so _count_hosts_in_file returns a known count.
+        # 256 hosts (/24) at 1000 pps → _calc_scan_wait returns 29.
+        target_file = str(tmp_path / 'targets.txt')
+        with open(target_file, 'w') as f:
+            f.write('10.0.0.0/24\n')
+
+        with patch('spoonmap._run_masscan_batch', return_value={}) as mock_b:
+            mass_scan('All', ['443', '3306'], '88', '1000',
+                      target_file, '', batch_size=1)
+
+        # Every call must carry wait_secs=29
+        for call in mock_b.call_args_list:
+            assert call[1].get('wait_secs') == 29
