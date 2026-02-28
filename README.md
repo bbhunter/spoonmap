@@ -28,8 +28,11 @@ Service Categories (comma-separated numbers, default: All)
 	(6) Network Infrastructure  [53, 179, 500, U:500, 161, U:161]
 	(7) File Transfer      [21, 111]
 	(8) Specialized  [1090, 3300, 4786, 6970, 2375, 4243, 9100]
-	(9) Full Port Scan  [1-65535]
+	(9) Containers & Debuggers  [2377, 10250, 8001, 9229, 2345, 5005, 61616, 8009, 6000]
+	(10) Full Port Scan  [1-65535]
 	(c) Custom Port Scan  [enter your own comma-separated ports]
+
+(The Full Port Scan number increments automatically with the number of categories.)
 
 Which categories would you like to scan (e.g. 1,3 — default: All)?
 
@@ -181,9 +184,9 @@ Inter-scan wait: 29s (target ~256 hosts)
 
 When `script_scan` is enabled, nmap runs targeted NSE scripts against relevant ports. Scripts are chosen based on scan type (External vs Internal):
 
-**External scans** run: `ftp-anon`, `ssh-auth-methods`, `ssh2-enum-algos`, `*-ntlm-info`, `ssl-cert`, `ms-sql-ntlm-info`, `rdp-ntlm-info`, `docker-version`, `snmp-brute`
+**External scans** run: `ftp-anon`, `ssh-auth-methods`, `ssh2-enum-algos`, `*-ntlm-info`, `ssl-cert`, `ms-sql-ntlm-info`, `rdp-ntlm-info`, `docker-version`, `snmp-brute`, `ajp-headers`, `x11-access`
 
-**Internal scans** run: `ftp-anon`, `rpcinfo`, `nfs-showmount`, `nfs-ls`, `smb-security-mode`, `smb2-security-mode`, `smb-vuln-ms17-010`, `smb-vuln-ms08-067`, `smb-double-pulsar-backdoor`, `smb-vuln-cve-2017-7494`, `rmi-dumpregistry`, `ms-sql-info`, `docker-version`, `snmp-brute`
+**Internal scans** run: `ftp-anon`, `rpcinfo`, `nfs-showmount`, `nfs-ls`, `smb-security-mode`, `smb2-security-mode`, `smb-vuln-ms17-010`, `smb-vuln-ms08-067`, `smb-double-pulsar-backdoor`, `smb-vuln-cve-2017-7494`, `rmi-dumpregistry`, `ms-sql-info`, `docker-version`, `snmp-brute`, `ajp-headers`, `x11-access`
 
 Port 9100 (JetDirect raw printing protocol) is included in the Specialized category. Hosts with port 9100 open are identified as printers; SNMP default community string and anonymous FTP findings are suppressed for these hosts to reduce noise.
 
@@ -197,6 +200,8 @@ After scanning, `generate_findings()` parses all nmap XML results and produces s
 | CRITICAL | SambaCry (CVE-2017-7494) |
 | CRITICAL | Unauthenticated Docker API (2375/4243) |
 | CRITICAL | Service Exposed Externally (Docker ports) |
+| CRITICAL | Service Exposed Externally (debugger/container ports: 9229, 2345, 5005, 2377, 10250, 8001) |
+| CRITICAL | High-Risk Service Detected (debugger/container ports on internal scans) |
 | HIGH | Anonymous FTP login |
 | HIGH | Weak SSH authentication (password/keyboard-interactive externally) |
 | HIGH | NTLM information disclosure (external) |
@@ -206,6 +211,9 @@ After scanning, `generate_findings()` parses all nmap XML results and produces s
 | HIGH | SAP Gateway detected (3300) |
 | HIGH | Cisco Smart Install detected (4786) |
 | HIGH | Cisco CUCM TFTP detected (6970) |
+| HIGH | AJP Connector exposed (8009, Ghostcat CVE-2020-1938) |
+| HIGH | X11 Display accessible (6000) |
+| HIGH | ActiveMQ accessible (61616, CVE-2023-46604) |
 | HIGH | SNMP default community string accepted (non-printer hosts only) |
 | HIGH | Service Exposed Externally (databases, RDP, SMB, SNMP, WebLogic, etc.) |
 | MEDIUM | SMBv1 protocol enabled |
@@ -221,23 +229,40 @@ On Internal scans, if `ms-sql-info` discovers SQL Server named instances on non-
 | Port(s) | Service | Notes |
 |---------|---------|-------|
 | 1090 | Java RMI | Auto-detected by `script_scan` |
+| 2345 | Delve Go Debugger | Auto-detected by `script_scan`; arbitrary code execution |
 | 2375, 4243 | Docker API | Unauthenticated access auto-detected by `script_scan` |
+| 2377 | Docker Swarm | Cluster management; auto-detected by `script_scan` |
 | 3300 | SAP Gateway | Auto-detected by `script_scan` |
 | 4786 | Cisco Smart Install | Auto-detected by `script_scan` |
+| 5005 | JDWP Java Debugger | Auto-detected by `script_scan`; arbitrary code execution on the JVM |
+| 6000 | X11 Display | Auto-detected by `script_scan`; keystroke/screen capture |
 | 6129 | Dameware Remote Control | Auto-detected by `script_scan` |
 | 6379 | Redis | Unauthenticated access |
 | 6970 | Cisco CUCM TFTP | Auto-detected by `script_scan`; browse `http://<IP>:6970/ConfigFileCacheList.txt` |
 | 7001, 7002 | Oracle WebLogic Server | Deserialization RCE |
+| 8001 | Kubernetes Dashboard | Auto-detected by `script_scan`; cluster takeover |
+| 8009 | AJP Connector (Ghostcat) | Auto-detected by `script_scan`; LFI/RCE if Tomcat <= 9.0.30 (CVE-2020-1938) |
 | 8080 | Adobe ColdFusion BlazeDS | Deserialization RCE |
+| 9229 | Node.js Inspector | Auto-detected by `script_scan`; arbitrary code execution via CDP |
+| 10250 | Kubernetes Kubelet API | Auto-detected by `script_scan`; arbitrary pod exec |
+| 61616 | Apache ActiveMQ | Auto-detected by `script_scan`; RCE via CVE-2023-46604 |
 
 ### References
 
 - **Java RMI (1090)** — [Rapid7 module](https://www.rapid7.com/db/modules/exploit/multi/misc/java_rmi_server) · [Pentester's guide](https://medium.com/@afinepl/java-rmi-for-pentesters-structure-recon-and-communication-non-jmx-registries-a10d5c996a79)
+- **Delve Go Debugger (2345)** — Arbitrary code execution; connect with `dlv connect <IP>:2345`
 - **Docker API (2375/4243)** — [Rapid7 module](https://www.rapid7.com/db/modules/exploit/linux/http/docker_daemon_tcp)
+- **Docker Swarm (2377)** — Cluster management; joining the swarm grants node-level access
 - **SAP Gateway (3300)** — [SAP GW RCE exploit](https://github.com/chipik/SAP_GW_RCE_exploit)
-- **Cisco Smart Install (4786)** — [Rapid7 module](https://www.rapid7.com/db/modules/auxiliary/scanner/misc/cisco_smart_install) · [SIET tool](https://github.com/Sab0tag3d/SIET)
+- **JDWP (5005)** — Arbitrary code execution on the JVM; `jdb -attach <IP>:5005`
+- **X11 (6000)** — [xspy](https://github.com/mnp/xspy) keystroke logger · `xterm -display <IP>:0`
 - **Dameware (6129)** — [Tenable advisory](https://www.tenable.com/security/research/tra-2019-43) · [PoC](https://github.com/tenable/poc/blob/master/Solarwinds/Dameware/dwrcs_dwDrvInst_rce.py)
 - **Redis (6379)** — [Rapid7 module](https://www.rapid7.com/db/modules/exploit/linux/redis/redis_replication_cmd_exec)
 - **Cisco CUCM TFTP (6970)** — [SeeYouCM-Thief](https://github.com/trustedsec/SeeYouCM-Thief)
 - **Oracle WebLogic (7001/7002)** — [WSAT RCE](https://www.rapid7.com/db/modules/exploit/multi/http/oracle_weblogic_wsat_deserialization_rce) · [AsyncResponseService RCE](https://www.rapid7.com/db/modules/exploit/multi/http/oracle_weblogic_deserialize_asyncresponseservice)
+- **Kubernetes Dashboard (8001)** — Unauthenticated cluster takeover via `kubectl proxy`
+- **AJP / Ghostcat (8009)** — [CVE-2020-1938 PoC](https://github.com/YDHCUI/CNVD-2020-10487-Tomcat-Ajp-lfi)
 - **ColdFusion BlazeDS (8080)** — [Tenable plugin](https://www.tenable.com/plugins/nessus/99731)
+- **Node.js Inspector (9229)** — Arbitrary code execution via Chrome DevTools Protocol; `node --inspect` · [PoC](https://github.com/nicowillis/node-inspector-rce)
+- **Kubernetes Kubelet (10250)** — [Rapid7 module](https://www.rapid7.com/db/modules/exploit/multi/http/kubelet_exec_endpoint) · arbitrary pod exec
+- **ActiveMQ (61616)** — [CVE-2023-46604 PoC](https://github.com/X1r0z/ActiveMQ-RCE) · [Rapid7 module](https://www.rapid7.com/db/modules/exploit/multi/misc/apache_activemq_rce_cve_2023_46604)

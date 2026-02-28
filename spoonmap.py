@@ -773,6 +773,8 @@ EXTERNAL_PORT_SCRIPTS = {
     '2375':  'docker-version',
     '4243':  'docker-version',
     '4786':  f'{_DIR}/nse/cisco-siet.nse',
+    '8009':  'ajp-headers',
+    '6000':  'x11-access',
     '8443':  'ssl-cert',
     '10443': 'ssl-cert',
 }
@@ -788,6 +790,8 @@ INTERNAL_PORT_SCRIPTS = {
     '1090':  'rmi-dumpregistry',
     '1433':  'ms-sql-info',
     '4786':  f'{_DIR}/nse/cisco-siet.nse',
+    '8009':  'ajp-headers',
+    '6000':  'x11-access',
     '161':   'snmp-brute',
     'U:161': 'snmp-brute',
     'U:1434': 'ms-sql-info',
@@ -828,6 +832,26 @@ EXTERNAL_SENSITIVE_PORTS = [
     ('7002',  'HIGH', 'WebLogic — admin/app server SSL port should not be internet-facing'),
     ('2375',  'CRITICAL', 'Docker API — unauthenticated remote access should never be internet-facing'),
     ('4243',  'CRITICAL', 'Docker API — unauthenticated remote access should never be internet-facing'),
+    ('2377',  'CRITICAL', 'Docker Swarm — cluster management port should never be internet-facing'),
+    ('10250', 'CRITICAL', 'Kubernetes Kubelet API — allows arbitrary pod exec/log access'),
+    ('8001',  'CRITICAL', 'Kubernetes Dashboard — unauthenticated access allows cluster takeover'),
+    ('9229',  'CRITICAL', 'Node.js Inspector — debugger allows arbitrary code execution'),
+    ('2345',  'CRITICAL', 'Delve Go Debugger — allows arbitrary code execution'),
+    ('5005',  'CRITICAL', 'JDWP Java Debugger — allows arbitrary code execution'),
+    ('61616', 'HIGH',     'ActiveMQ — message broker should not be internet-facing'),
+    ('8009',  'HIGH',     'AJP Connector — Tomcat AJP should never be internet-facing (CVE-2020-1938)'),
+    ('6000',  'HIGH',     'X11 Display — remote X11 access allows keystroke/screen capture'),
+]
+
+# High-risk ports flagged on Internal scans (port presence alone is sufficient)
+INTERNAL_RISK_PORTS = [
+    ('9229',  'CRITICAL', 'Node.js Inspector — debugger port allows arbitrary code execution via CDP'),
+    ('2345',  'CRITICAL', 'Delve Go Debugger — allows arbitrary code execution'),
+    ('5005',  'CRITICAL', 'JDWP Java Debugger — allows arbitrary code execution on the JVM'),
+    ('2377',  'CRITICAL', 'Docker Swarm — cluster management port is accessible from this network segment'),
+    ('10250', 'CRITICAL', 'Kubernetes Kubelet API — allows arbitrary pod exec/log access (CVE-2018-1002105)'),
+    ('8001',  'CRITICAL', 'Kubernetes Dashboard — unauthenticated access allows cluster takeover'),
+    ('61616', 'HIGH',     'ActiveMQ — message broker is accessible; check for CVE-2023-46604 (RCE)'),
 ]
 
 SERVICE_CATEGORIES = {
@@ -854,6 +878,9 @@ SERVICE_CATEGORIES = {
     ],
     'Specialized': [
         '1090', '3300', '4786', '6970', '2375', '4243', '9100'
+    ],
+    'Containers & Debuggers': [
+        '2377', '10250', '8001', '9229', '2345', '5005', '61616', '8009', '6000'
     ],
 }
 
@@ -1069,6 +1096,25 @@ def generate_findings(output_path, target_scan):
                         'May be vulnerable to credential theft via SeeYouCM-Thief. '
                         'Ref: https://github.com/trustedsec/SeeYouCM-Thief')
 
+                # ── AJP Connector on port 8009 (Ghostcat CVE-2020-1938) ──
+                if portid == '8009' and protocol == 'tcp':
+                    ajp_out = scripts.get('ajp-headers', '')
+                    if ajp_out:
+                        add('HIGH', ip, port_str, 'AJP Connector Exposed',
+                            'Tomcat AJP connector is accessible. If Tomcat <= 9.0.30/8.5.50/7.0.99, '
+                            'this is vulnerable to Ghostcat (CVE-2020-1938): unauthenticated LFI/RCE. '
+                            'Disable AJP or restrict to localhost. '
+                            'Ref: https://www.rapid7.com/db/modules/auxiliary/admin/http/tomcat_ghostcat')
+
+                # ── X11 Display on port 6000 ─────────────────────────────
+                if portid == '6000' and protocol == 'tcp':
+                    x11_out = scripts.get('x11-access', '')
+                    if 'X server access is granted' in x11_out:
+                        add('HIGH', ip, port_str, 'X11 Display Accessible',
+                            'Unauthenticated access to X11 display server. Allows keystroke '
+                            'logging, screen capture, and arbitrary command execution via '
+                            'xterm. Restrict with xhost or firewall immediately.')
+
                 # ── ssl-cert — expired (External only) ───────────────────
                 if 'ssl-cert' in scripts and target_scan == 'External':
                     out = scripts['ssl-cert']
@@ -1164,6 +1210,13 @@ def generate_findings(output_path, target_scan):
                     pnum  = port_key[2:] if port_key.startswith('U:') else port_key
                     add(severity, ip, f'{proto}/{pnum}',
                         'Service Exposed Externally', label)
+
+    # ── internal high-risk port findings ──────────────────────────────────────
+    if target_scan == 'Internal':
+        for ip, open_keys in open_ports_by_host.items():
+            for port_key, severity, label in INTERNAL_RISK_PORTS:
+                if port_key in open_keys:
+                    add(severity, ip, f'tcp/{port_key}', 'High-Risk Service Detected', label)
 
     # ── sort and write ────────────────────────────────────────────────────────
     findings.sort(key=lambda f: (SEVERITY_ORDER.index(f[0]), f[1], f[2]))
@@ -1420,6 +1473,33 @@ _FINDING_REPRO = {
             '| snmp-brute:\n'
             '|   public - Valid credentials\n'
             '|_  private - Valid credentials'
+        ),
+    },
+    'AJP Connector Exposed': {
+        'flags': '--script ajp-headers',
+        'sample': (
+            'PORT     STATE SERVICE\n'
+            '8009/tcp open  ajp13\n'
+            '| ajp-headers:\n'
+            '|   HTTP/1.1 200\n'
+            '|   Content-Type: text/html\n'
+            '|_  Server: Apache-Coyote/1.1'
+        ),
+    },
+    'X11 Display Accessible': {
+        'flags': '--script x11-access',
+        'sample': (
+            'PORT     STATE SERVICE\n'
+            '6000/tcp open  X11\n'
+            '| x11-access:\n'
+            '|_  X server access is granted'
+        ),
+    },
+    'High-Risk Service Detected': {
+        'flags': '-sV',
+        'sample': (
+            'PORT      STATE SERVICE\n'
+            '10250/tcp open  ssl/kubernetes-kubelet'
         ),
     },
 }
@@ -1708,14 +1788,15 @@ def main():
                 for i, name in enumerate(category_names, 1):
                     ports = SERVICE_CATEGORIES[name]
                     print(f'\t({i}) {name}  [{", ".join(ports)}]')
-                print(f'\t(9) Full Port Scan  [1-65535]')
+                full_n = len(category_names) + 1
+                print(f'\t({full_n}) Full Port Scan  [1-65535]')
                 print(f'\t(c) Custom Port Scan  [enter your own comma-separated ports]')
 
                 selection = input(
                     f'\nWhich categories would you like to scan (e.g. 1,3 — default: All)? '
                 ).strip()
 
-                if selection in ('9', 'full', 'f'):
+                if selection in (str(full_n), 'full', 'f'):
                     scan_type = 'Full'
                     dest_ports = ['1-65535']
                     break
