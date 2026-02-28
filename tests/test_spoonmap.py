@@ -13,6 +13,7 @@ from spoonmap import (
     EXTERNAL_SENSITIVE_PORTS,
     INTERNAL_PORT_SCRIPTS,
     PROBE_PORT_PRIORITY,
+    _merge_host_xml,
     SERVICE_CATEGORIES,
     _calc_scan_wait,
     _cleanup_cmd,
@@ -1358,3 +1359,74 @@ class TestMassScanProbe:
         # Every call must carry wait_secs=29
         for call in mock_b.call_args_list:
             assert call[1].get('wait_secs') == 29
+
+
+# ── _merge_host_xml ───────────────────────────────────────────────────────────
+
+def _make_host(ip, ports, hostscripts=None):
+    """Build a minimal nmap <host> element for testing."""
+    host = etree.Element('host')
+    addr = etree.SubElement(host, 'address')
+    addr.set('addr', ip)
+    addr.set('addrtype', 'ipv4')
+    ports_elem = etree.SubElement(host, 'ports')
+    for proto, portid in ports:
+        p = etree.SubElement(ports_elem, 'port')
+        p.set('protocol', proto)
+        p.set('portid', portid)
+    if hostscripts:
+        hs = etree.SubElement(host, 'hostscript')
+        for sid, output in hostscripts.items():
+            s = etree.SubElement(hs, 'script')
+            s.set('id', sid)
+            s.set('output', output)
+    return host
+
+
+class TestMergeHostXml:
+    def test_new_ports_appended(self):
+        base = _make_host('10.0.0.1', [('tcp', '80')])
+        other = _make_host('10.0.0.1', [('tcp', '443')])
+        _merge_host_xml(base, other)
+        portids = [p.get('portid') for p in base.find('ports').findall('port')]
+        assert set(portids) == {'80', '443'}
+
+    def test_duplicate_port_not_added_twice(self):
+        base = _make_host('10.0.0.1', [('tcp', '80')])
+        other = _make_host('10.0.0.1', [('tcp', '80')])
+        _merge_host_xml(base, other)
+        assert len(base.find('ports').findall('port')) == 1
+
+    def test_hostscripts_merged(self):
+        base = _make_host('10.0.0.1', [], {'smb-security-mode': 'disabled'})
+        other = _make_host('10.0.0.1', [], {'smb2-security-mode': 'enabled'})
+        _merge_host_xml(base, other)
+        script_ids = {s.get('id') for s in base.find('hostscript').findall('script')}
+        assert script_ids == {'smb-security-mode', 'smb2-security-mode'}
+
+    def test_duplicate_hostscript_not_added_twice(self):
+        base = _make_host('10.0.0.1', [], {'smb-security-mode': 'v1'})
+        other = _make_host('10.0.0.1', [], {'smb-security-mode': 'v2'})
+        _merge_host_xml(base, other)
+        scripts = base.find('hostscript').findall('script')
+        assert len(scripts) == 1
+        assert scripts[0].get('output') == 'v1'
+
+    def test_base_without_ports_elem(self):
+        """base has no <ports> at all — _merge_host_xml creates one."""
+        base = etree.Element('host')
+        addr = etree.SubElement(base, 'address')
+        addr.set('addr', '10.0.0.1')
+        addr.set('addrtype', 'ipv4')
+        other = _make_host('10.0.0.1', [('tcp', '22')])
+        _merge_host_xml(base, other)
+        portids = [p.get('portid') for p in base.find('ports').findall('port')]
+        assert portids == ['22']
+
+    def test_other_without_hostscript_noop(self):
+        """other has no <hostscript> — base is unchanged."""
+        base = _make_host('10.0.0.1', [('tcp', '80')], {'smb-security-mode': 'ok'})
+        other = _make_host('10.0.0.1', [('tcp', '443')])
+        _merge_host_xml(base, other)
+        scripts = base.find('hostscript').findall('script')
+        assert len(scripts) == 1

@@ -1639,6 +1639,32 @@ def _host_elem_to_dict(host_elem, ip_to_hostname=None):
     return result
 
 
+def _merge_host_xml(base, other):
+    """Merge ports and hostscripts from *other* <host> element into *base* in-place."""
+    base_ports = base.find('ports')
+    if base_ports is None:
+        base_ports = etree.SubElement(base, 'ports')
+    seen_ports = {(p.get('protocol'), p.get('portid')) for p in base_ports.findall('port')}
+    other_ports = other.find('ports')
+    if other_ports is not None:
+        for port in list(other_ports.findall('port')):
+            key = (port.get('protocol'), port.get('portid'))
+            if key not in seen_ports:
+                base_ports.append(port)
+                seen_ports.add(key)
+
+    other_hs = other.find('hostscript')
+    if other_hs is not None:
+        base_hs = base.find('hostscript')
+        if base_hs is None:
+            base_hs = etree.SubElement(base, 'hostscript')
+        seen_scripts = {s.get('id') for s in base_hs.findall('script')}
+        for script in list(other_hs.findall('script')):
+            if script.get('id') not in seen_scripts:
+                base_hs.append(script)
+                seen_scripts.add(script.get('id'))
+
+
 def _cleanup_cmd(dir_path):
     """Handle --cleanup: remove prior scan output from output_path and exit."""
     idx = sys.argv.index('--cleanup')
@@ -2009,22 +2035,26 @@ def main():
                 result_dir = f'{output_path}/nmap_results/'
             else:
                 result_dir = f'{output_path}/masscan_results/'
-            xml_result = '<?xml version="1.0"?>\n<!-- SpooNMAP -->\n<nmaprun>\n'
             hosts_json = []
             ip_index   = {}  # {ip: index into hosts_json}
-            xml_files = os.listdir(result_dir)
-            for xml_file in xml_files:
+            xml_hosts  = {}  # {ip: merged <host> Element}
+            for xml_file in sorted(os.listdir(result_dir)):
                 root = etree.parse(result_dir + xml_file)
                 for host in root.findall('host'):
-                    xml_result += etree.tostring(host, encoding="unicode", method="xml")
                     hd = _host_elem_to_dict(host, ip_to_hostname)
-                    if hd['ip'] in ip_index:
-                        existing = hosts_json[ip_index[hd['ip']]]
+                    ip = hd['ip']
+                    if ip in xml_hosts:
+                        _merge_host_xml(xml_hosts[ip], host)
+                        existing = hosts_json[ip_index[ip]]
                         existing['ports'].extend(hd['ports'])
                         existing['hostscripts'].update(hd['hostscripts'])
                     else:
-                        ip_index[hd['ip']] = len(hosts_json)
+                        xml_hosts[ip] = host
+                        ip_index[ip] = len(hosts_json)
                         hosts_json.append(hd)
+            xml_result = '<?xml version="1.0"?>\n<!-- SpooNMAP -->\n<nmaprun>\n'
+            for host_elem in xml_hosts.values():
+                xml_result += etree.tostring(host_elem, encoding="unicode", method="xml")
             xml_result += '</nmaprun>'
             with open(f'{output_path}/spoonmap_output.xml', 'w+') as spoonmap_output:
                 spoonmap_output.write(xml_result)
