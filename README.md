@@ -24,12 +24,13 @@ Service Categories (comma-separated numbers, default: All)
 	(2) Database     [1433, U:1434, 1521, 3306, 5432, 6379, 9200, 27017]
 	(3) Remote Management  [22, 23, 3389, 5900, 5901, 6129, 1723, 5985, 5986]
 	(4) Email        [25, 110, 143, 465, 587, 993, 995]
-	(5) Authentication     [389, 636, 445, 135, 139, U:137]
-	(6) Network Infrastructure  [53, 179, 500, U:500, 161, U:161]
+	(5) LDAP         [389, 636]
+	(6) Network Infrastructure  [53, 179, U:500, U:161]
 	(7) File Transfer      [21, 111]
-	(8) Specialized  [1090, 3300, 4786, 6970, 2375, 4243, 9100]
-	(9) Containers & Debuggers  [2377, 10250, 8001, 9229, 2345, 5005, 61616, 8009, 6000]
-	(10) Full Port Scan  [1-65535]
+	(8) SMB          [445, 135, 139, U:137]
+	(9) Specialized  [1090, 3300, 4786, 6970, 2375, 4243, 9100]
+	(10) Containers & Debuggers  [2377, 10250, 8001, 9229, 2345, 5005, 61616, 8009, 6000]
+	(11) Full Port Scan  [1-65535]
 	(c) Custom Port Scan  [enter your own comma-separated ports]
 
 (The Full Port Scan number increments automatically with the number of categories.)

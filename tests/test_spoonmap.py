@@ -866,6 +866,33 @@ class TestServiceCategoriesDockerPorts:
         assert '7002' in sensitive_ports
 
 
+# ── LDAP / SMB category split ─────────────────────────────────────────────────
+
+class TestLdapSmbCategorySplit:
+    def test_authentication_key_removed(self):
+        assert 'Authentication' not in SERVICE_CATEGORIES
+
+    def test_ldap_key_contains_correct_ports(self):
+        assert SERVICE_CATEGORIES['LDAP'] == ['389', '636']
+
+    def test_smb_key_contains_correct_ports(self):
+        assert SERVICE_CATEGORIES['SMB'] == ['445', '135', '139', 'U:137']
+
+    def test_ldap_appears_before_smb(self):
+        keys = list(SERVICE_CATEGORIES.keys())
+        assert keys.index('LDAP') < keys.index('SMB')
+
+    def test_ldap_and_smb_in_different_batches_with_batch_size_5(self):
+        all_ports = [p for cat in SERVICE_CATEGORIES.values() for p in cat]
+        tcp_ports = [p for p in all_ports if not p.startswith('U:')]
+        idx_389 = tcp_ports.index('389')
+        idx_445 = tcp_ports.index('445')
+        assert idx_389 // 5 != idx_445 // 5, (
+            f'389 (batch {idx_389 // 5}) and 445 (batch {idx_445 // 5}) '
+            'must be in different batches'
+        )
+
+
 # ── Full Port Scan in mass_scan() ─────────────────────────────────────────────
 
 class TestFullPortScan:
