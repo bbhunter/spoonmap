@@ -11,6 +11,7 @@ import spoonmap
 from spoonmap import (
     EXTERNAL_PROBE_PORT_PRIORITY,
     EXTERNAL_SENSITIVE_PORTS,
+    SLOW_PORTS,
     INTERNAL_PORT_SCRIPTS,
     PROBE_PORT_PRIORITY,
     _merge_host_xml,
@@ -259,6 +260,23 @@ class TestWriteFindingsTxt:
     def test_empty_findings(self, tmp_path):
         _write_findings_txt(str(tmp_path), 'Internal', [])
         assert 'Total findings: 0' in (tmp_path / 'findings.txt').read_text()
+
+    def test_total_count_uses_group_count_not_instance_count(self, tmp_path):
+        # Three instances of the same finding on different hosts → 1 group
+        findings = [
+            ('HIGH', '10.0.0.1', 'tcp/445', 'Service Exposed Externally', 'SMB'),
+            ('HIGH', '10.0.0.2', 'tcp/445', 'Service Exposed Externally', 'SMB'),
+            ('HIGH', '10.0.0.3', 'tcp/445', 'Service Exposed Externally', 'SMB'),
+        ]
+        _write_findings_txt(str(tmp_path), 'External', findings)
+        content = (tmp_path / 'findings.txt').read_text()
+        assert 'Total findings: 1' in content
+
+    def test_service_exposed_externally_has_no_sample_output_block(self, tmp_path):
+        findings = [('HIGH', '1.2.3.4', 'tcp/135', 'Service Exposed Externally', 'RPC')]
+        _write_findings_txt(str(tmp_path), 'External', findings)
+        content = (tmp_path / 'findings.txt').read_text()
+        assert 'Sample output:' not in content
 
     def test_severity_ordering_in_output(self, tmp_path):
         _write_findings_txt(str(tmp_path), 'Internal', SAMPLE_FINDINGS)
@@ -1386,6 +1404,57 @@ class TestMassScanProbe:
         # Every call must carry wait_secs=29
         for call in mock_b.call_args_list:
             assert call[1].get('wait_secs') == 29
+
+    # ── slow-port solo batching ───────────────────────────────────────────────
+
+    def test_slow_port_scanned_solo_at_large_batch_size(self, tmp_path):
+        """SLOW_PORTS are always scanned in solo batches, even when batch_size > 1."""
+        spoonmap.output_path = str(tmp_path)
+        # 389 is in SLOW_PORTS; 80 and 443 are normal ports.
+        # With batch_size=5 all three would normally share one batch.
+        dest_ports = ['80', '389', '443']
+        with patch('spoonmap._run_masscan_batch', return_value={}) as mock_b:
+            mass_scan('All', dest_ports, '88', '1000',
+                      '/fake/targets.txt', '', batch_size=5)
+
+        # Collect ports from every main batch (non-probe) call
+        main_batches = [
+            call[0][0] for call in mock_b.call_args_list
+            if 'probe_fast' not in call[0][2] and 'probe_slow' not in call[0][2]
+        ]
+        solo_batches = [b for b in main_batches if b == ['389']]
+        assert solo_batches, "Expected a solo batch for port 389"
+
+    def test_non_slow_ports_batched_together(self, tmp_path):
+        """Normal ports are still grouped into the same batch (not split unnecessarily)."""
+        spoonmap.output_path = str(tmp_path)
+        dest_ports = ['80', '443', '8080']
+        with patch('spoonmap._run_masscan_batch', return_value={}) as mock_b:
+            mass_scan('All', dest_ports, '88', '1000',
+                      '/fake/targets.txt', '', batch_size=5)
+
+        main_batches = [
+            call[0][0] for call in mock_b.call_args_list
+            if 'probe_fast' not in call[0][2] and 'probe_slow' not in call[0][2]
+        ]
+        # All three normal ports must share one batch (batch_size=5 fits them all)
+        combined = [p for batch in main_batches for p in batch]
+        assert '80' in combined and '443' in combined and '8080' in combined
+        assert any(len(b) > 1 for b in main_batches), "Normal ports should be grouped together"
+
+    def test_absent_slow_port_has_no_solo_batch(self, tmp_path):
+        """When a SLOW_PORT is not in dest_ports, no solo batch is created for it."""
+        spoonmap.output_path = str(tmp_path)
+        # 389 intentionally omitted from dest_ports
+        dest_ports = ['80', '443']
+        with patch('spoonmap._run_masscan_batch', return_value={}) as mock_b:
+            mass_scan('All', dest_ports, '88', '1000',
+                      '/fake/targets.txt', '', batch_size=5)
+
+        all_ports_scanned = [
+            p for call in mock_b.call_args_list for p in call[0][0]
+        ]
+        assert '389' not in all_ports_scanned
 
 
 # ── _merge_host_xml ───────────────────────────────────────────────────────────

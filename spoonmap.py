@@ -461,7 +461,10 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
     else:
         ports_to_batch = dest_ports  # no probe: batch all ports normally
 
-    batches = [ports_to_batch[i:i + batch_size] for i in range(0, len(ports_to_batch), batch_size)]
+    normal = [p for p in ports_to_batch if p not in SLOW_PORTS]
+    slow   = [p for p in ports_to_batch if p in SLOW_PORTS]
+    batches = [normal[i:i + batch_size] for i in range(0, len(normal), batch_size)]
+    batches += [[p] for p in slow]
     total_batches = len(batches)
     scan_start_time = time.time()
 
@@ -751,6 +754,11 @@ EXTERNAL_PROBE_PORT_PRIORITY = [
     '8080',
     '8443',
 ]
+
+# Ports scanned solo (one per masscan invocation) regardless of batch_size.
+# These services have low traffic density and responses are easily crowded out
+# in multi-port batches at high scan rates.
+SLOW_PORTS = frozenset({'389', '636', '3268', '3269'})  # LDAP / Global Catalog family
 
 # Scripts run on EXTERNAL scans only
 EXTERNAL_PORT_SCRIPTS = {
@@ -1302,10 +1310,6 @@ _FINDING_REPRO = {
     },
     'Service Exposed Externally': {
         'flags': '-sV',
-        'sample': (
-            'PORT     STATE SERVICE VERSION\n'
-            '3306/tcp open  mysql   MySQL 8.0.32'
-        ),
     },
     'Anonymous FTP': {
         'flags': '--script ftp-anon',
@@ -1560,14 +1564,15 @@ def _write_findings_txt(output_path, target_scan, findings):
                 lines.append('  Reproduce:')
                 lines.append(f'    {cmd}')
                 lines.append('')
-                lines.append('  Sample output:')
-                for sample_line in repro['sample'].splitlines():
-                    lines.append(f'    {sample_line}')
-                lines.append('')
+                if repro.get('sample'):
+                    lines.append('  Sample output:')
+                    for sample_line in repro['sample'].splitlines():
+                        lines.append(f'    {sample_line}')
+                    lines.append('')
             lines.append('  ' + '-' * 56)
             lines.append('')
 
-    lines.append(f'Total findings: {len(findings)}')
+    lines.append(f'Total findings: {len(groups)}')
     with open(f'{output_path}/findings.txt', 'w') as fh:
         fh.write('\n'.join(lines) + '\n')
 
