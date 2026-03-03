@@ -8,6 +8,8 @@
     "banner_scan" : "True",
     "__script_scan_choices__" : "True, False",
     "script_scan" : "False",
+    "__resume_choices__" : "True, False",
+    "resume" : "False",
     "__target_scan_choices__" : "External, Internal",
     "target_scan" : "Internal",
     "__max_rate_external_recommedation__" : "Default = 20000",
