@@ -76,7 +76,15 @@ To scan all 65535 ports, set `"scan_categories": "Full"`.
 For a fully custom port list, omit `scan_categories` and use `"dest_ports": ["80","443","U:53"]` instead.
 UDP ports are specified with a `U:` prefix (e.g. `"U:53"`).
 
-If a previous scan's output is detected in `output_path`, the tool offers to delete it or resume where it left off.
+If a previous scan's output is detected in `output_path`, the tool offers to delete it or append to it.
+
+To resume an interrupted scan without any prompts, use the `--resume` flag:
+
+```
+./spoonmap.py --resume
+```
+
+`--resume` skips completed masscan batches whose output XML is newer than `masscan_targets.txt`, loads the pre-existing live host lists, and continues from where it left off. If `ranges.txt` was changed since the last run, any batch whose XML pre-dates the new target file is automatically re-run. nmap banner/script results are always resumed (existing `nmap_results/portN.xml` files are skipped unconditionally). Resume can also be enabled via `config.json` with `"resume": "True"`.
 
 To remove scan data non-interactively, use the `--cleanup` flag:
 
@@ -103,6 +111,7 @@ To remove scan data non-interactively, use the `--cleanup` flag:
 | `exclusions_file` | Path | IPs/CIDRs passed to masscan `--excludefile` |
 | `nmap_threads` | Integer | Concurrent nmap processes (default: 5) |
 | `masscan_batch_size` | Integer | Ports per masscan invocation (default: 5) |
+| `resume` | `"True"` / `"False"` | Skip completed masscan batches on restart (default: False) |
 
 ### max_rate guidance
 Rates that are too high can create a denial-of-service condition — use caution.
