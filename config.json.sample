@@ -2,6 +2,7 @@
     "__scan_categories_choices__": "All, Web, Database, Remote Management, Email, Authentication, Network Infrastructure, File Transfer, Specialized",
     "scan_categories": ["Web", "Database"],
     "__dest_ports_note__": "Optional: overrides scan_categories with an explicit port list. Use U: prefix for UDP (e.g. U:53).",
+    "dest_ports": [],
     "masscan_batch_size": 5,
     "__banner_scan_choices__" : "True, False",
     "banner_scan" : "True",

@@ -345,7 +345,7 @@ def _delete_previous_results(output_path):
             os.remove(p)
 
 
-def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusions_file, batch_size=1):
+def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusions_file, batch_size=1, resume=False):
     status_summary = '\nSummary'
 
     if not os.path.exists(f'{output_path}/masscan_results'):
@@ -368,8 +368,29 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
 
     # Full port scan: skip adaptive probe, run single masscan over 1-65535
     if scan_type == 'Full':
-        print(_COLOR_INFO + 'Full port scan: running masscan 1-65535 (no probe)...' + _COLOR_RESET)
         output_file = f'{output_path}/masscan_results/portFull.xml'
+        full_targets_file = f'{output_path}/masscan_targets.txt'
+        full_targets_mtime = os.path.getmtime(full_targets_file) if os.path.exists(full_targets_file) else 0
+        if (resume
+                and os.path.exists(output_file)
+                and os.path.getmtime(output_file) >= full_targets_mtime):
+            print(_COLOR_INFO + 'Resume: skipping completed Full port scan' + _COLOR_RESET)
+            live_hosts_dir = f'{output_path}/live_hosts'
+            if os.path.exists(live_hosts_dir):
+                for fname in sorted(os.listdir(live_hosts_dir)):
+                    if not (fname.startswith('port') and fname.endswith('.txt')
+                            and not fname.endswith('_hostnames.txt')):
+                        continue
+                    port_key = fname[4:-4]
+                    with open(os.path.join(live_hosts_dir, fname)) as fh:
+                        ips = {line.strip() for line in fh if line.strip()}
+                    if ips:
+                        host_count = len(ips)
+                        status_update = f'\nHosts Found on Port {port_key}: {host_count}'
+                        status_summary += status_update
+                        print(_COLOR_PROGRESS + status_update + _COLOR_RESET)
+            return status_summary
+        print(_COLOR_INFO + 'Full port scan: running masscan 1-65535 (no probe)...' + _COLOR_RESET)
         full_results = _run_masscan_batch(['1-65535'], full_scan_rate, output_file,
                                           target_file, source_port, exclusions_file,
                                           wait_secs=wait_secs)
@@ -468,11 +489,35 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
     total_batches = len(batches)
     scan_start_time = time.time()
 
+    targets_file = f'{output_path}/masscan_targets.txt'
+    targets_mtime = os.path.getmtime(targets_file) if os.path.exists(targets_file) else 0
+
     for batch_idx, batch in enumerate(batches):
         batch_label = ', '.join(batch)
-        print(_COLOR_INFO + f'Scanning ports {batch_label}...' + _COLOR_RESET)
-
         output_file = f'{output_path}/masscan_results/batch_{batch_idx}.xml'
+
+        if (resume
+                and os.path.exists(output_file)
+                and os.path.getmtime(output_file) >= targets_mtime):
+            print(_COLOR_INFO +
+                  f'Resume: skipping completed batch {batch_idx + 1}/{total_batches} '
+                  f'({batch_label})' + _COLOR_RESET)
+            for dest_port in batch:
+                port_ips.setdefault(dest_port, set())
+                live_file = f'{output_path}/live_hosts/port{dest_port}.txt'
+                if os.path.exists(live_file):
+                    with open(live_file) as fh:
+                        port_ips[dest_port].update(
+                            line.strip() for line in fh if line.strip()
+                        )
+                if port_ips[dest_port]:
+                    host_count = len(port_ips[dest_port])
+                    status_update = f'\nHosts Found on Port {dest_port}: {host_count}'
+                    status_summary += status_update
+                    print(_COLOR_PROGRESS + status_update + _COLOR_RESET)
+            continue
+
+        print(_COLOR_INFO + f'Scanning ports {batch_label}...' + _COLOR_RESET)
 
         batch_results = _run_masscan_batch(batch, effective_rate, output_file, target_file, source_port, exclusions_file,
                                            wait_secs=wait_secs)
@@ -1768,6 +1813,7 @@ def main():
 
         if '--cleanup' in sys.argv:
             _cleanup_cmd(dir_path)  # prints result and exits
+        resume = '--resume' in sys.argv
         if os.path.exists(f'{dir_path}/config.json'):
             with open(f'{dir_path}/config.json') as config:
                 config_parser = json.load(config)
@@ -1806,6 +1852,7 @@ def main():
             nmap_threads = config_parser.get('nmap_threads', 5)
             masscan_batch_size = int(config_parser.get('masscan_batch_size', 5))
             script_scan = config_parser.get('script_scan', 'False') == 'True'
+            resume = resume or config_parser.get('resume', 'False').strip().lower() == 'true'
 
             # Resolve relative paths in config relative to the script directory
             if target_file and not os.path.isabs(target_file):
@@ -2002,22 +2049,25 @@ def main():
 
         # Detect previous scan results and ask whether to delete or append
         if _previous_results_exist(output_path):
-            print(_COLOR_INFO + '\nPrevious scan results detected in output directory.' + _COLOR_RESET)
-            while True:
-                choice = input('Delete previous results or append to them? '
-                               '[d]elete / [a]ppend (default: append): ').strip().lower() or 'a'
-                if choice and choice[0] in ('d', 'a'):
-                    break
-            if choice[0] == 'd':
-                _delete_previous_results(output_path)
-                print(_COLOR_INFO + 'Previous results deleted.' + _COLOR_RESET)
+            if resume:
+                print(_COLOR_INFO + 'Resuming previous scan...' + _COLOR_RESET)
             else:
-                print(_COLOR_INFO + 'Appending to previous results.' + _COLOR_RESET)
+                print(_COLOR_INFO + '\nPrevious scan results detected in output directory.' + _COLOR_RESET)
+                while True:
+                    choice = input('Delete previous results or append to them? '
+                                   '[d]elete / [a]ppend (default: append): ').strip().lower() or 'a'
+                    if choice and choice[0] in ('d', 'a'):
+                        break
+                if choice[0] == 'd':
+                    _delete_previous_results(output_path)
+                    print(_COLOR_INFO + 'Previous results deleted.' + _COLOR_RESET)
+                else:
+                    print(_COLOR_INFO + 'Appending to previous results.' + _COLOR_RESET)
 
         # Preprocess targets to handle hostnames
         masscan_target_file, ip_to_hostname = preprocess_targets(target_file, output_path)
 
-        status_summary = mass_scan(scan_type, dest_ports, source_port, max_rate, masscan_target_file, exclusions_file, masscan_batch_size)
+        status_summary = mass_scan(scan_type, dest_ports, source_port, max_rate, masscan_target_file, exclusions_file, masscan_batch_size, resume=resume)
 
         # If service banners requested, send to nmap
         if banner_scan or script_scan:

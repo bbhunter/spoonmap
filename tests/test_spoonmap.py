@@ -1457,6 +1457,144 @@ class TestMassScanProbe:
         assert '389' not in all_ports_scanned
 
 
+# ── TestMassScanResume ────────────────────────────────────────────────────────
+
+class TestMassScanResume:
+    """Tests for --resume batch-skipping in mass_scan()."""
+
+    def _write_batch_xml(self, path):
+        """Write a minimal XML file to simulate a completed masscan batch."""
+        path.write_text('<?xml version="1.0"?><nmaprun></nmaprun>')
+
+    def test_completed_batch_skipped_when_resume_true(self, tmp_path):
+        """A batch whose XML is newer than masscan_targets.txt is skipped when resume=True."""
+        spoonmap.output_path = str(tmp_path)
+        batch_xml = tmp_path / 'masscan_results' / 'batch_0.xml'
+        batch_xml.parent.mkdir(parents=True)
+        self._write_batch_xml(batch_xml)
+
+        targets_file = tmp_path / 'masscan_targets.txt'
+        targets_file.write_text('10.0.0.1\n')
+        # Make batch XML newer than targets file
+        import os, time as _time
+        os.utime(str(targets_file), (0, 0))
+        os.utime(str(batch_xml), (_time.time(), _time.time()))
+
+        with patch('spoonmap._run_masscan_batch', return_value={}) as mock_b:
+            mass_scan('All', ['80', '443'], '53', '10000',
+                      '/fake/targets.txt', '', batch_size=10, resume=True)
+
+        # Only probe calls should fire; the one main batch must be skipped
+        main_calls = [
+            c for c in mock_b.call_args_list
+            if 'probe_fast' not in c[0][2] and 'probe_slow' not in c[0][2]
+        ]
+        assert main_calls == [], 'Main batch should have been skipped under resume=True'
+
+    def test_completed_batch_not_skipped_when_resume_false(self, tmp_path):
+        """A pre-existing batch XML is NOT skipped when resume=False."""
+        spoonmap.output_path = str(tmp_path)
+        batch_xml = tmp_path / 'masscan_results' / 'batch_0.xml'
+        batch_xml.parent.mkdir(parents=True)
+        self._write_batch_xml(batch_xml)
+
+        targets_file = tmp_path / 'masscan_targets.txt'
+        targets_file.write_text('10.0.0.1\n')
+        import os
+        os.utime(str(targets_file), (0, 0))
+
+        with patch('spoonmap._run_masscan_batch', return_value={}) as mock_b:
+            mass_scan('All', ['80', '443'], '53', '10000',
+                      '/fake/targets.txt', '', batch_size=10, resume=False)
+
+        main_calls = [
+            c for c in mock_b.call_args_list
+            if 'probe_fast' not in c[0][2] and 'probe_slow' not in c[0][2]
+        ]
+        assert len(main_calls) >= 1, 'Main batch should run when resume=False'
+
+    def test_live_hosts_loaded_from_file_when_batch_skipped(self, tmp_path):
+        """When a batch is skipped, IPs from live_hosts/portN.txt are loaded into port_ips."""
+        spoonmap.output_path = str(tmp_path)
+        batch_xml = tmp_path / 'masscan_results' / 'batch_0.xml'
+        batch_xml.parent.mkdir(parents=True)
+        self._write_batch_xml(batch_xml)
+
+        live_dir = tmp_path / 'live_hosts'
+        live_dir.mkdir()
+        (live_dir / 'port80.txt').write_text('10.0.0.1\n10.0.0.2\n')
+
+        targets_file = tmp_path / 'masscan_targets.txt'
+        targets_file.write_text('10.0.0.1\n')
+        import os, time as _time
+        os.utime(str(targets_file), (0, 0))
+        os.utime(str(batch_xml), (_time.time(), _time.time()))
+
+        with patch('spoonmap._run_masscan_batch', return_value={}):
+            result = mass_scan('All', ['80'], '53', '10000',
+                               '/fake/targets.txt', '', batch_size=10, resume=True)
+
+        # The summary should reflect the 2 pre-existing hosts on port 80
+        assert 'Hosts Found on Port 80: 2' in result
+
+    def test_partial_resume_only_skips_completed_batches(self, tmp_path):
+        """Only batches with existing XML are skipped; missing ones run normally."""
+        spoonmap.output_path = str(tmp_path)
+        results_dir = tmp_path / 'masscan_results'
+        results_dir.mkdir()
+        # batch_0 exists (ports 80, 443); batch_1 does NOT exist
+        batch0_xml = results_dir / 'batch_0.xml'
+        self._write_batch_xml(batch0_xml)
+
+        targets_file = tmp_path / 'masscan_targets.txt'
+        targets_file.write_text('10.0.0.1\n')
+        import os, time as _time
+        os.utime(str(targets_file), (0, 0))
+        os.utime(str(batch0_xml), (_time.time(), _time.time()))
+
+        # 4 ports split into 2 batches of 2 (batch_size=2); none are SLOW_PORTS
+        # External probe priority: ['443','80','8080','8443'] → probe=['443','80'],
+        # remaining=['8080','8443'] → 1 batch of 2
+        dest_ports = ['443', '80', '8080', '8443']
+        with patch('spoonmap._run_masscan_batch', return_value={}) as mock_b:
+            mass_scan('All', dest_ports, '53', '10000',
+                      '/fake/targets.txt', '', batch_size=2, resume=True)
+
+        main_calls = [
+            c for c in mock_b.call_args_list
+            if 'probe_fast' not in c[0][2] and 'probe_slow' not in c[0][2]
+        ]
+        # batch_0 is skipped; the remaining batch (8080, 8443) must run
+        assert len(main_calls) == 1, (
+            f'Expected exactly 1 main-batch call (batch_1), got {len(main_calls)}'
+        )
+
+    def test_batch_not_skipped_when_targets_file_is_newer(self, tmp_path):
+        """If masscan_targets.txt is newer than batch XML, the batch re-runs."""
+        spoonmap.output_path = str(tmp_path)
+        batch_xml = tmp_path / 'masscan_results' / 'batch_0.xml'
+        batch_xml.parent.mkdir(parents=True)
+        self._write_batch_xml(batch_xml)
+
+        targets_file = tmp_path / 'masscan_targets.txt'
+        targets_file.write_text('10.0.0.1\n')
+
+        import os, time as _time
+        # Make batch XML *older* than targets (simulates ranges.txt change)
+        os.utime(str(batch_xml), (0, 0))
+        os.utime(str(targets_file), (_time.time(), _time.time()))
+
+        with patch('spoonmap._run_masscan_batch', return_value={}) as mock_b:
+            mass_scan('All', ['80', '443'], '53', '10000',
+                      '/fake/targets.txt', '', batch_size=10, resume=True)
+
+        main_calls = [
+            c for c in mock_b.call_args_list
+            if 'probe_fast' not in c[0][2] and 'probe_slow' not in c[0][2]
+        ]
+        assert len(main_calls) >= 1, 'Batch must re-run when targets file is newer'
+
+
 # ── _merge_host_xml ───────────────────────────────────────────────────────────
 
 def _make_host(ip, ports, hostscripts=None):
