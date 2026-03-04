@@ -847,7 +847,12 @@ INTERNAL_PORT_SCRIPTS = {
     '6000':  'x11-access',
     '161':   'snmp-brute',
     'U:161': 'snmp-brute',
-    'U:1434': 'ms-sql-info',
+    # Use bundled pre-redesign script: nmap's ms-sql-info was rewritten in
+    # commit c3d54f1 (Jan 2022) to be hostrule-only via GetTargetInstances,
+    # which requires --script-args mssql.instance-* to fire.  The older
+    # version (02c0354) fires whenever UDP 1434 is open|filtered and calls
+    # mssql.Helper.Discover() directly — no extra args needed.
+    'U:1434': f'{_DIR}/nse/ms-sql-info.nse',
 }
 
 # Deprecated/weak SSH algorithms used by the ssh2-enum-algos finding check
@@ -956,8 +961,9 @@ def _scan_extra_sql_ports(output_path, source_port):
                 for script in host.iter('script'):
                     if script.attrib.get('id') != 'ms-sql-info':
                         continue
-                    # Each <table> under the script represents one instance
-                    for instance_table in script.findall('table/table'):
+                    # Each <table> directly under the script is one instance.
+                    # (table/table would navigate into the version sub-table.)
+                    for instance_table in script.findall('table'):
                         tcp_elem = instance_table.find("elem[@key='tcp']")
                         if tcp_elem is not None and tcp_elem.text not in ('1433', None):
                             discovered.setdefault(ip, []).append(tcp_elem.text)
@@ -1192,6 +1198,17 @@ def generate_findings(output_path, target_scan):
                         else:
                             detail = 'Default SNMP community string accepted.'
                         add('HIGH', ip, port_str, 'SNMP Default Community String', detail)
+
+                # ── ms-sql-info (portscript on UDP 1434) ──────────────────
+                # When nmap fires ms-sql-info via its portrule the output lands
+                # under <port>, not <hostscript>.  The hostrule path below handles
+                # the case where the script fires via hostrule instead.
+                if portid == '1434' and protocol == 'udp':
+                    if 'ms-sql-info' in scripts and target_scan == 'Internal':
+                        out = scripts['ms-sql-info'].strip()
+                        if out:
+                            add('INFO', ip, port_str, 'SQL Server Instance Discovered',
+                                out[:300])
 
             # ── host-level scripts (smb-security-mode, ms-sql-info, etc.) ────
             # These NSE scripts use hostrule and appear under <hostscript>,

@@ -2,7 +2,7 @@
 import datetime
 import json
 import textwrap
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import xml.etree.ElementTree as etree
@@ -15,6 +15,7 @@ from spoonmap import (
     INTERNAL_PORT_SCRIPTS,
     PROBE_PORT_PRIORITY,
     _merge_host_xml,
+    _scan_extra_sql_ports,
     SERVICE_CATEGORIES,
     _calc_scan_wait,
     _cleanup_cmd,
@@ -175,7 +176,9 @@ class TestGetScriptsForPort:
         assert _get_scripts_for_port('1433', 'Internal') == 'ms-sql-info'
 
     def test_internal_udp_mssql(self):
-        assert _get_scripts_for_port('U:1434', 'Internal') == 'ms-sql-info'
+        # Bundled pre-redesign script is referenced by absolute path
+        result = _get_scripts_for_port('U:1434', 'Internal')
+        assert result.endswith('nse/ms-sql-info.nse')
 
     def test_mssql_differs_by_scan_type(self):
         assert _get_scripts_for_port('1433', 'External') != _get_scripts_for_port('1433', 'Internal')
@@ -1664,3 +1667,137 @@ class TestMergeHostXml:
         _merge_host_xml(base, other)
         scripts = base.find('hostscript').findall('script')
         assert len(scripts) == 1
+
+
+# ── ms-sql-info UDP 1434 ───────────────────────────────────────────────────────
+# Real nmap XML for ms-sql-info when it fires as a *portscript* on UDP 1434.
+# Structure: <table key="INSTANCE"> (instance table, direct child of <script>)
+#              └── <table key="Version"> (version sub-table)
+#              └── <elem key="tcp">PORT</elem>
+#              └── <elem key="Named pipe">...</elem>
+_MS_SQL_INFO_UDP_XML = textwrap.dedent("""\
+    <?xml version="1.0"?>
+    <nmaprun>
+      <host>
+        <address addr="192.168.1.10" addrtype="ipv4"/>
+        <ports>
+          <port protocol="udp" portid="1434">
+            <state state="open" reason="udp-response"/>
+            <script id="ms-sql-info" output="SQL Server 2019 on 192.168.1.10">
+              <table key="192.168.1.10\\MSSQLSERVER">
+                <table key="Version">
+                  <elem key="name">Microsoft SQL Server 2019</elem>
+                  <elem key="number">15.00.2000.00</elem>
+                </table>
+                <elem key="tcp">1433</elem>
+                <elem key="Named pipe">\\\\192.168.1.10\\pipe\\sql\\query</elem>
+              </table>
+            </script>
+          </port>
+        </ports>
+      </host>
+    </nmaprun>
+""")
+
+# Same structure but with a named instance on a non-standard TCP port (51234)
+_MS_SQL_INFO_NAMED_INSTANCE_XML = textwrap.dedent("""\
+    <?xml version="1.0"?>
+    <nmaprun>
+      <host>
+        <address addr="192.168.1.10" addrtype="ipv4"/>
+        <ports>
+          <port protocol="udp" portid="1434">
+            <state state="open" reason="udp-response"/>
+            <script id="ms-sql-info" output="SQL Server Express on 192.168.1.10">
+              <table key="192.168.1.10\\SQLEXPRESS">
+                <table key="Version">
+                  <elem key="name">Microsoft SQL Server 2019 Express</elem>
+                </table>
+                <elem key="tcp">51234</elem>
+                <elem key="Named pipe">\\\\192.168.1.10\\pipe\\MSSQL$SQLEXPRESS\\sql\\query</elem>
+              </table>
+            </script>
+          </port>
+        </ports>
+      </host>
+    </nmaprun>
+""")
+
+
+class TestMsSqlInfoUdp1434:
+    """ms-sql-info parsing from UDP 1434 nmap output via portscript and hostscript."""
+
+    def test_portscript_produces_finding(self, nmap_dir):
+        """ms-sql-info as a port-level script in portU:1434.xml must generate a finding.
+
+        When nmap runs ms-sql-info via its portrule against UDP 1434, the script
+        output lands under <port>, not <hostscript>.  generate_findings() must
+        check both locations.
+        """
+        (nmap_dir / 'nmap_results' / 'portU:1434.xml').write_text(_MS_SQL_INFO_UDP_XML)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'SQL Server Instance Discovered' in content
+        assert '192.168.1.10' in content
+
+    def test_hostscript_produces_finding(self, nmap_dir):
+        """ms-sql-info under <hostscript> in portU:1434.xml (regression: existing path)."""
+        xml = _nmap_xml_hostscript('192.168.1.10', 'udp', '1434',
+                                   hostscripts={'ms-sql-info': 'SQL Server 2019'})
+        (nmap_dir / 'nmap_results' / 'portU:1434.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'SQL Server Instance Discovered' in content
+        assert '192.168.1.10' in content
+
+    def test_no_finding_for_external_scan(self, nmap_dir):
+        """ms-sql-info should not generate a finding for External scans."""
+        (nmap_dir / 'nmap_results' / 'portU:1434.xml').write_text(_MS_SQL_INFO_UDP_XML)
+        generate_findings(str(nmap_dir), 'External')
+        findings_file = nmap_dir / 'findings.txt'
+        if findings_file.exists():
+            assert 'SQL Server Instance Discovered' not in findings_file.read_text()
+
+
+# ── _scan_extra_sql_ports ─────────────────────────────────────────────────────
+
+class TestScanExtraSqlPorts:
+    """_scan_extra_sql_ports() parsing of ms-sql-info XML output."""
+
+    def test_finds_named_instance_on_non_standard_port(self, tmp_path):
+        """Named instance on port 51234 triggers an extra nmap scan.
+
+        The ms-sql-info XML has <table key="Version"> as a direct child of the
+        instance table.  <elem key="tcp"> is a *sibling* of that version table
+        (also a direct child of the instance table), not inside the version
+        sub-table.  The correct XPath to reach instance tables is 'table', not
+        'table/table' (which would navigate into the version sub-table).
+        """
+        nmap_dir = tmp_path / 'nmap_results'
+        nmap_dir.mkdir()
+        (nmap_dir / 'portU:1434.xml').write_text(_MS_SQL_INFO_NAMED_INSTANCE_XML)
+
+        with patch('spoonmap.subprocess.Popen') as mock_popen, \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            mock_proc = MagicMock()
+            mock_proc.wait.return_value = 0
+            mock_popen.return_value = mock_proc
+            _scan_extra_sql_ports(str(tmp_path), '88')
+
+        assert mock_popen.called, 'nmap should be called for the non-standard port 51234'
+        cmd = mock_popen.call_args[0][0]
+        assert '51234' in cmd, f'Expected port 51234 in nmap command, got: {cmd}'
+
+    def test_standard_1433_instance_not_rescanned(self, tmp_path):
+        """An instance on the default port 1433 must not trigger an extra scan."""
+        nmap_dir = tmp_path / 'nmap_results'
+        nmap_dir.mkdir()
+        (nmap_dir / 'portU:1434.xml').write_text(_MS_SQL_INFO_UDP_XML)
+
+        with patch('spoonmap.subprocess.Popen') as mock_popen, \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            _scan_extra_sql_ports(str(tmp_path), '88')
+
+        assert not mock_popen.called, 'nmap must NOT be called for a standard 1433 instance'
