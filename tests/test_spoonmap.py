@@ -2047,3 +2047,35 @@ class TestBuildNmapCmd:
         cmd = _build_nmap_cmd('445', '/in.txt', '/out.xml', '53',
                                script_scan=True, target_scan='External')
         assert '--source-port' not in cmd
+
+
+# ── cucm-detect finding ───────────────────────────────────────────────────────
+
+class TestCucmDetectFinding:
+    def test_confirmed_cucm_generates_high_finding(self, nmap_dir):
+        """cucm-detect script output → HIGH 'Cisco CUCM TFTP Server Confirmed'."""
+        xml = _nmap_xml('10.0.0.1', 'tcp', '6970',
+                        scripts={'cucm-detect': 'Product: Cisco UCM\nConfigFileCacheList: Accessible \u2014 100 entries'})
+        (nmap_dir / 'nmap_results' / 'port6970.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        txt = (nmap_dir / 'findings.txt').read_text()
+        assert 'CUCM TFTP Server Confirmed' in txt
+        assert 'HIGH' in txt
+
+    def test_port_open_no_script_generates_medium_finding(self, nmap_dir):
+        """Port 6970 open, no cucm-detect output → MEDIUM 'Possible Cisco CUCM'."""
+        xml = _nmap_xml('10.0.0.2', 'tcp', '6970')
+        (nmap_dir / 'nmap_results' / 'port6970.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        txt = (nmap_dir / 'findings.txt').read_text()
+        assert 'Possible Cisco CUCM' in txt
+        assert 'MEDIUM' in txt
+
+    def test_confirmed_cucm_not_medium(self, nmap_dir):
+        """Confirmed CUCM does not also emit the MEDIUM unconfirmed finding."""
+        xml = _nmap_xml('10.0.0.3', 'tcp', '6970',
+                        scripts={'cucm-detect': 'Product: Cisco UCM\nConfigFileCacheList: Accessible \u2014 50 entries'})
+        (nmap_dir / 'nmap_results' / 'port6970.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        txt = (nmap_dir / 'findings.txt').read_text()
+        assert 'Possible Cisco CUCM' not in txt

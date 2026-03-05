@@ -838,6 +838,7 @@ EXTERNAL_PORT_SCRIPTS = {
     '4243':  'docker-version',
     '4786':  f'{_DIR}/nse/cisco-siet.nse',
     '6129':  f'{_DIR}/nse/dameware-detect.nse',
+    '6970':  f'{_DIR}/nse/cucm-detect.nse',
     '8009':  'ajp-headers',
     '6000':  'x11-access',
     '8443':  'ssl-cert',
@@ -856,6 +857,7 @@ INTERNAL_PORT_SCRIPTS = {
     '1433':  'ms-sql-info',
     '4786':  f'{_DIR}/nse/cisco-siet.nse',
     '6129':  f'{_DIR}/nse/dameware-detect.nse',
+    '6970':  f'{_DIR}/nse/cucm-detect.nse',
     '8009':  'ajp-headers',
     '6000':  'x11-access',
     '161':   'snmp-brute,snmp-sysdescr',
@@ -1220,10 +1222,19 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
 
                 # ── Cisco CUCM TFTP on port 6970 ─────────────────────────
                 if portid == '6970' and protocol == 'tcp':
-                    add('HIGH', ip, port_str, 'Cisco CUCM TFTP Detected',
-                        'Port 6970 is used by Cisco Unified Communications Manager TFTP. '
-                        'May be vulnerable to credential theft via SeeYouCM-Thief. '
-                        'Ref: https://github.com/trustedsec/SeeYouCM-Thief')
+                    cucm_out = scripts.get('cucm-detect', '')
+                    if cucm_out:
+                        add('HIGH', ip, port_str, 'Cisco CUCM TFTP Server Confirmed',
+                            'Cisco Unified Communications Manager TFTP is accessible. '
+                            'Phone configuration files are available for unauthenticated download '
+                            'and often contain plaintext SIP/SCCP credentials. '
+                            'Use SeeYouCM-Thief to enumerate exposed configs. '
+                            'Ref: https://github.com/trustedsec/SeeYouCM-Thief')
+                    else:
+                        add('MEDIUM', ip, port_str, 'Possible Cisco CUCM TFTP (Unconfirmed)',
+                            'Port 6970/tcp is open. CUCM TFTP probe did not confirm the service '
+                            '(script timed out or port is in use by another application). '
+                            'Manually verify: curl http://<host>:6970/ConfigFileCacheList.txt')
 
                 # ── AJP Connector on port 8009 (Ghostcat CVE-2020-1938) ──
                 if portid == '8009' and protocol == 'tcp':
@@ -1624,11 +1635,22 @@ _FINDING_REPRO = {
             '4786/tcp open  smart-install  Cisco Smart Install (VULNERABLE)'
         ),
     },
-    'Cisco CUCM TFTP Detected': {
+    'Cisco CUCM TFTP Server Confirmed': {
+        'flags': f'--script {_DIR}/nse/cucm-detect.nse',
+        'sample': (
+            'PORT     STATE SERVICE    VERSION\n'
+            '6970/tcp open  cucm-tftp  Cisco Unified Communications Manager TFTP\n'
+            '| cucm-detect:\n'
+            '|   Product: Cisco Unified Communications Manager (CUCM) TFTP\n'
+            '|   ConfigFileCacheList: Accessible \u2014 842 entries (phone configs exposed)\n'
+            '|_  Reference: https://github.com/trustedsec/SeeYouCM-Thief'
+        ),
+    },
+    'Possible Cisco CUCM TFTP (Unconfirmed)': {
         'flags': '-sV',
         'sample': (
             'PORT     STATE SERVICE  VERSION\n'
-            '6970/tcp open  tftp     Cisco Unified Communications Manager TFTP'
+            '6970/tcp open  unknown'
         ),
     },
     'Weak SSH Algorithms': {
