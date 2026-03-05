@@ -8,6 +8,14 @@ Python 3.6+ is required (uses f-strings).
 ## Usage
 Simply executing the script will prompt you for all required options.
 
+If you use [uv](https://docs.astral.sh/uv/), you can run without a separate virtual environment:
+
+```bash
+uv run spoonmap.py
+```
+
+Or invoke directly if the script is executable:
+
 ```
 # ./spoonmap.py
 
@@ -82,6 +90,8 @@ To resume an interrupted scan without any prompts, use the `--resume` flag:
 
 ```
 ./spoonmap.py --resume
+# or
+uv run spoonmap.py --resume
 ```
 
 `--resume` skips completed masscan batches whose output XML is newer than `masscan_targets.txt`, loads the pre-existing live host lists, and continues from where it left off. If `ranges.txt` was changed since the last run, any batch whose XML pre-dates the new target file is automatically re-run. nmap banner/script results are always resumed (existing `nmap_results/portN.xml` files are skipped unconditionally). Resume can also be enabled via `config.json` with `"resume": "True"`.
@@ -91,6 +101,8 @@ To remove scan data non-interactively, use the `--cleanup` flag:
 ```
 # Path taken from output_path in config.json
 ./spoonmap.py --cleanup
+# or
+uv run spoonmap.py --cleanup
 
 # Or specify the directory explicitly
 ./spoonmap.py --cleanup /path/to/output
