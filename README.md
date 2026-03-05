@@ -206,9 +206,9 @@ Inter-scan wait: 29s (target ~256 hosts)
 
 When `script_scan` is enabled, nmap runs targeted NSE scripts against relevant ports. Scripts are chosen based on scan type (External vs Internal):
 
-**External scans** run: `ftp-anon`, `ssh-auth-methods`, `ssh2-enum-algos`, `*-ntlm-info`, `ssl-cert`, `ms-sql-ntlm-info`, `rdp-ntlm-info`, `docker-version`, `snmp-brute`, `ajp-headers`, `x11-access`
+**External scans** run: `ftp-anon`, `ssh-auth-methods`, `ssh2-enum-algos`, `*-ntlm-info`, `ssl-cert`, `ms-sql-ntlm-info`, `rdp-ntlm-info`, `docker-version`, `snmp-brute`, `snmp-sysdescr`, `ajp-headers`, `x11-access`, `dameware-detect` (custom, 6129), `cucm-detect` (custom, 6970)
 
-**Internal scans** run: `ftp-anon`, `rpcinfo`, `nfs-showmount`, `nfs-ls`, `smb-security-mode`, `smb2-security-mode`, `smb-vuln-ms17-010`, `smb-vuln-ms08-067`, `smb-double-pulsar-backdoor`, `smb-vuln-cve-2017-7494`, `rmi-dumpregistry`, `ms-sql-info`, `docker-version`, `snmp-brute`, `ajp-headers`, `x11-access`
+**Internal scans** run: `ftp-anon`, `rpcinfo`, `nfs-showmount`, `nfs-ls`, `smb-security-mode`, `smb2-security-mode`, `smb-vuln-ms17-010`, `smb-vuln-ms08-067`, `smb-double-pulsar-backdoor`, `smb-vuln-cve-2017-7494`, `rmi-dumpregistry`, `ms-sql-info`, `docker-version`, `snmp-brute`, `snmp-sysdescr`, `ajp-headers`, `x11-access`, `jdwp-info` (5005), `http-title` (8001), `banner` (61616), `dameware-detect` (custom, 6129), `cucm-detect` (custom, 6970), `nodejs-inspector` (custom, 9229), `kubelet-anon-check` (custom, 10250), `delve-debugger` (custom, 2345)
 
 Port 9100 (JetDirect raw printing protocol) is included in the Specialized category. Hosts with port 9100 open are identified as printers; SNMP default community string and anonymous FTP findings are suppressed for these hosts to reduce noise.
 
@@ -220,28 +220,36 @@ After scanning, `generate_findings()` parses all nmap XML results and produces s
 | CRITICAL | MS08-067 NetAPI / Conficker (CVE-2008-4250) |
 | CRITICAL | DoublePulsar backdoor active |
 | CRITICAL | SambaCry (CVE-2017-7494) |
-| CRITICAL | Unauthenticated Docker API (2375/4243) |
-| CRITICAL | Service Exposed Externally (Docker ports) |
-| CRITICAL | Service Exposed Externally (debugger/container ports: 9229, 2345, 5005, 2377, 10250, 8001) |
-| CRITICAL | High-Risk Service Detected (debugger/container ports on internal scans) |
+| CRITICAL | Unauthenticated Docker API (2375/4243, confirmed by `docker-version`) |
+| CRITICAL | DameWare Mini Remote Control Detected (6129, confirmed by custom NSE — CVE-2019-3980) |
+| CRITICAL | JDWP Java Debugger Exposed (5005, confirmed by `jdwp-info`) |
+| CRITICAL | Node.js Inspector Port Exposed (9229, confirmed by custom NSE) |
+| CRITICAL | Delve Go Debugger Exposed (2345, confirmed by custom NSE) |
+| CRITICAL | Kubernetes Kubelet Anonymous Access (10250, confirmed by custom NSE) |
+| CRITICAL | SNMP Accepts Any Community String (community-string auth effectively disabled) |
+| CRITICAL | SNMP Default Community String — read-write on network device (router/switch/firewall) |
+| CRITICAL | Service Exposed Externally (Docker API, Swarm, debugger/container ports — external scan only) |
 | HIGH | Anonymous FTP login |
-| HIGH | Weak SSH authentication (password/keyboard-interactive externally) |
-| HIGH | NTLM information disclosure (external) |
-| HIGH | SMB/SMBv2 signing not required |
+| HIGH | Weak SSH authentication (password/keyboard-interactive — external scan only) |
+| HIGH | NTLM information disclosure (external scan only) |
+| HIGH | SMBv1/SMBv2 signing not required |
 | HIGH | NFS shares exposed |
-| HIGH | Dameware Remote Control detected |
+| HIGH | DameWare Remote Control Detected (6129, banner fallback — NSE not conclusive) |
 | HIGH | SAP Gateway detected (3300) |
-| HIGH | Cisco Smart Install detected (4786) |
-| HIGH | Cisco CUCM TFTP detected (6970) |
+| HIGH | Cisco Smart Install Vulnerable (4786, confirmed by custom NSE — CVE-2018-0171) |
+| HIGH | Cisco CUCM TFTP Server Confirmed (6970, confirmed by custom NSE) |
 | HIGH | AJP Connector exposed (8009, Ghostcat CVE-2020-1938) |
-| HIGH | X11 Display accessible (6000) |
-| HIGH | ActiveMQ accessible (61616, CVE-2023-46604) |
-| HIGH | SNMP default community string accepted (non-printer hosts only) |
-| HIGH | Service Exposed Externally (databases, RDP, SMB, SNMP, WebLogic, etc.) |
+| HIGH | X11 Display accessible (6000, confirmed by `x11-access`) |
+| HIGH | ActiveMQ broker exposed (61616, CVE-2023-46604) |
+| HIGH | SNMP Default Community String — read-write, non-network device (non-printer hosts only) |
+| HIGH | Kubernetes Dashboard Accessible (8001, confirmed by `http-title`) |
+| HIGH | Service Exposed Externally (databases, RDP, SMB, SNMP, WebLogic, etc. — external scan only) |
 | MEDIUM | SMBv1 protocol enabled |
 | MEDIUM | Weak SSH algorithms (deprecated ciphers/MACs/KEX) |
 | MEDIUM | Java RMI registry exposed |
-| MEDIUM | Expired TLS certificate |
+| MEDIUM | Expired TLS certificate (external scan only) |
+| MEDIUM | Possible Cisco CUCM TFTP (Unconfirmed) (6970 open, NSE did not confirm) |
+| LOW | SNMP Default Community String — read-only, non-network device (non-printer hosts only) |
 | INFO | SQL Server instance discovered |
 
 On Internal scans, if `ms-sql-info` discovers SQL Server named instances on non-standard ports, nmap is automatically re-run against those ports.
@@ -258,9 +266,9 @@ On Internal scans, if `ms-sql-info` discovers SQL Server named instances on non-
 | 4786 | Cisco Smart Install | Auto-detected by `script_scan` |
 | 5005 | JDWP Java Debugger | Auto-detected by `script_scan`; arbitrary code execution on the JVM |
 | 6000 | X11 Display | Auto-detected by `script_scan`; keystroke/screen capture |
-| 6129 | Dameware Remote Control | Auto-detected by `script_scan` |
+| 6129 | Dameware Remote Control | Custom NSE confirms protocol handshake; CVE-2019-3980 unauthenticated RCE (CVSS 9.8) in versions ≤ 12.1.0.89 |
 | 6379 | Redis | Unauthenticated access |
-| 6970 | Cisco CUCM TFTP | Auto-detected by `script_scan`; browse `http://<IP>:6970/ConfigFileCacheList.txt` |
+| 6970 | Cisco CUCM TFTP | Custom NSE probes `/ConfigFileCacheList.txt` and `/XMLDefault.cnf.xml` to confirm; phone configs often contain plaintext SIP/SCCP credentials |
 | 7001, 7002 | Oracle WebLogic Server | Deserialization RCE |
 | 8001 | Kubernetes Dashboard | Auto-detected by `script_scan`; cluster takeover |
 | 8009 | AJP Connector (Ghostcat) | Auto-detected by `script_scan`; LFI/RCE if Tomcat <= 9.0.30 (CVE-2020-1938) |
