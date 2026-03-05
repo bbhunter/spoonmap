@@ -14,8 +14,10 @@ from spoonmap import (
     SLOW_PORTS,
     INTERNAL_PORT_SCRIPTS,
     PROBE_PORT_PRIORITY,
+    _build_nmap_cmd,
     _merge_host_xml,
     _scan_extra_sql_ports,
+    _SMB_PORTS,
     SERVICE_CATEGORIES,
     _calc_scan_wait,
     _cleanup_cmd,
@@ -1999,3 +2001,49 @@ class TestInternalNseFindings:
         findings_file = nmap_dir / 'findings.txt'
         if findings_file.exists():
             assert 'High-Risk Service Detected' not in findings_file.read_text()
+
+
+# ── _build_nmap_cmd ───────────────────────────────────────────────────────────
+
+class TestBuildNmapCmd:
+    """Unit tests for _build_nmap_cmd source-port behaviour."""
+
+    def test_smb_port_with_scripts_omits_source_port(self):
+        """Port 445 + script_scan=True → no --source-port in command."""
+        cmd = _build_nmap_cmd('445', '/in.txt', '/out.xml', '88',
+                               script_scan=True, target_scan='Internal')
+        assert '--source-port' not in cmd
+
+    def test_smb_port_139_with_scripts_omits_source_port(self):
+        """Port 139 + script_scan=True → no --source-port in command."""
+        cmd = _build_nmap_cmd('139', '/in.txt', '/out.xml', '88',
+                               script_scan=True, target_scan='Internal')
+        assert '--source-port' not in cmd
+
+    def test_smb_port_banner_only_keeps_source_port(self):
+        """Port 445 + script_scan=False (banner only) → --source-port 88 present."""
+        cmd = _build_nmap_cmd('445', '/in.txt', '/out.xml', '88',
+                               script_scan=False, target_scan='Internal')
+        assert '--source-port' in cmd
+        assert '88' in cmd
+
+    def test_non_smb_port_with_scripts_keeps_source_port(self):
+        """Port 22 + script_scan=True → --source-port 88 present."""
+        cmd = _build_nmap_cmd('22', '/in.txt', '/out.xml', '88',
+                               script_scan=True, target_scan='Internal')
+        assert '--source-port' in cmd
+        assert '88' in cmd
+
+    def test_udp_port_keeps_source_port(self):
+        """UDP port always uses -sU and keeps --source-port."""
+        cmd = _build_nmap_cmd('U:161', '/in.txt', '/out.xml', '88',
+                               script_scan=True, target_scan='Internal')
+        assert '--source-port' in cmd
+        assert '-sU' in cmd
+        assert '-sS' not in cmd
+
+    def test_smb_port_external_scan_with_scripts_omits_source_port(self):
+        """Port 445 + External scan → --source-port 53 also omitted."""
+        cmd = _build_nmap_cmd('445', '/in.txt', '/out.xml', '53',
+                               script_scan=True, target_scan='External')
+        assert '--source-port' not in cmd

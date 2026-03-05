@@ -572,6 +572,43 @@ def create_hostname_target_file(ip_file, hostname_file, ip_to_hostname):
             hostname = ip_to_hostname.get(ip, ip)
             outf.write(f'{hostname}\n')
 
+def _build_nmap_cmd(dest_port, input_file, output_file, source_port,
+                    script_scan=False, target_scan='Internal'):
+    """Return the nmap command list for a single port scan.
+
+    --source-port is omitted for SMB ports when scripts are active: nmap runs all
+    NSE scripts concurrently; with a fixed source port every script tries to connect
+    from the same (src:88, dst:445) 4-tuple and all but one fail silently.
+    """
+    if 'U:' in dest_port:
+        cmd = [
+            'nmap', '-T4', '-sU', '-sV',
+            '--version-intensity', '0',
+            '-Pn', '-p', dest_port[2:],
+            '--open', '--randomize-hosts',
+            '--source-port', source_port,
+        ]
+    else:
+        cmd = [
+            'nmap', '-T4', '-sS', '-sV',
+            '--version-intensity', '0',
+            '-Pn', '-p', dest_port,
+            '--open', '--randomize-hosts',
+        ]
+        # Skip --source-port for SMB when scripts run to avoid 4-tuple collision
+        if not (script_scan and dest_port in _SMB_PORTS):
+            cmd += ['--source-port', source_port]
+
+    cmd += ['-iL', input_file, '-oX', output_file]
+
+    if script_scan:
+        scripts = _get_scripts_for_port(dest_port, target_scan)
+        if scripts:
+            cmd += ['--script', scripts, '--script-timeout', '30s', '--host-timeout', '5m']
+
+    return cmd
+
+
 def nmap_worker(work_queue, completed_count, total_count, source_port, lock,
                 interrupt_event, ip_to_hostname, script_scan=False,
                 target_scan='Internal', start_time=None):
@@ -599,36 +636,10 @@ def nmap_worker(work_queue, completed_count, total_count, source_port, lock,
                 create_hostname_target_file(input_file, hostname_file, ip_to_hostname)
                 input_file = hostname_file
 
-            # Build command as list to prevent shell injection
-            if 'U:' in dest_port:
-                nmap_cmd = [
-                    'nmap', '-T4', '-sU', '-sV',
-                    '--version-intensity', '0',
-                    '-Pn', '-p', dest_port[2:],
-                    '--open', '--randomize-hosts',
-                    '--source-port', source_port,
-                    '-iL', input_file,
-                    '-oX', output_file
-                ]
-            else:
-                nmap_cmd = [
-                    'nmap', '-T4', '-sS', '-sV',
-                    '--version-intensity', '0',
-                    '-Pn', '-p', dest_port,
-                    '--open', '--randomize-hosts',
-                    '--source-port', source_port,
-                    '-iL', input_file,
-                    '-oX', output_file
-                ]
-
-            if script_scan:
-                scripts = _get_scripts_for_port(dest_port, target_scan)
-                if scripts:
-                    nmap_cmd.extend([
-                        '--script', scripts,
-                        '--script-timeout', '30s',
-                        '--host-timeout', '5m',
-                    ])
+            nmap_cmd = _build_nmap_cmd(
+                dest_port, input_file, output_file, source_port,
+                script_scan=script_scan, target_scan=target_scan,
+            )
 
             try:
                 with lock:
@@ -862,6 +873,10 @@ INTERNAL_PORT_SCRIPTS = {
     '10250': f'{_DIR}/nse/kubelet-anon-check.nse',
     '2345':  f'{_DIR}/nse/delve-debugger.nse',
 }
+
+# Ports that use multiple concurrent NSE scripts; omit --source-port to prevent
+# TCP 4-tuple collision when nsock opens parallel connections to the same target.
+_SMB_PORTS = frozenset({'139', '445'})
 
 # Deprecated/weak SSH algorithms used by the ssh2-enum-algos finding check
 WEAK_SSH_ALGOS = {
