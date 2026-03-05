@@ -855,6 +855,12 @@ INTERNAL_PORT_SCRIPTS = {
     # version (02c0354) fires whenever UDP 1434 is open|filtered and calls
     # mssql.Helper.Discover() directly — no extra args needed.
     'U:1434': f'{_DIR}/nse/ms-sql-info.nse',
+    '5005':  'jdwp-info,jdwp-version',
+    '8001':  'http-title',
+    '61616': 'banner',
+    '9229':  f'{_DIR}/nse/nodejs-inspector.nse',
+    '10250': f'{_DIR}/nse/kubelet-anon-check.nse',
+    '2345':  f'{_DIR}/nse/delve-debugger.nse',
 }
 
 # Deprecated/weak SSH algorithms used by the ssh2-enum-algos finding check
@@ -901,17 +907,6 @@ EXTERNAL_SENSITIVE_PORTS = [
     ('61616', 'HIGH',     'ActiveMQ — message broker should not be internet-facing'),
     ('8009',  'HIGH',     'AJP Connector — Tomcat AJP should never be internet-facing (CVE-2020-1938)'),
     ('6000',  'HIGH',     'X11 Display — remote X11 access allows keystroke/screen capture'),
-]
-
-# High-risk ports flagged on Internal scans (port presence alone is sufficient)
-INTERNAL_RISK_PORTS = [
-    ('9229',  'CRITICAL', 'Node.js Inspector — debugger port allows arbitrary code execution via CDP'),
-    ('2345',  'CRITICAL', 'Delve Go Debugger — allows arbitrary code execution'),
-    ('5005',  'CRITICAL', 'JDWP Java Debugger — allows arbitrary code execution on the JVM'),
-    ('2377',  'CRITICAL', 'Docker Swarm — cluster management port is accessible from this network segment'),
-    ('10250', 'CRITICAL', 'Kubernetes Kubelet API — allows arbitrary pod exec/log access (CVE-2018-1002105)'),
-    ('8001',  'CRITICAL', 'Kubernetes Dashboard — unauthenticated access allows cluster takeover'),
-    ('61616', 'HIGH',     'ActiveMQ — message broker is accessible; check for CVE-2023-46604 (RCE)'),
 ]
 
 SERVICE_CATEGORIES = {
@@ -1313,6 +1308,48 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
                             add('INFO', ip, port_str, 'SQL Server Instance Discovered',
                                 out[:300])
 
+                # ── jdwp-info (JDWP Java debugger — any output confirms live) ──
+                if 'jdwp-info' in scripts and scripts['jdwp-info'].strip():
+                    add('CRITICAL', ip, port_str, 'JDWP Java Debugger Exposed',
+                        'The Java Debug Wire Protocol (JDWP) debugger is network-accessible. '
+                        'JDWP has no authentication; any host that can reach this port can '
+                        'execute arbitrary code in the JVM process.')
+
+                # ── nodejs-inspector (custom NSE) ─────────────────────────────
+                if 'nodejs-inspector' in scripts and scripts['nodejs-inspector'].strip():
+                    add('CRITICAL', ip, port_str, 'Node.js Inspector Port Exposed',
+                        'The Node.js Inspector (Chrome DevTools Protocol) is network-accessible. '
+                        'Any host that can reach this port can execute arbitrary JavaScript in '
+                        'the Node.js process. ' + scripts['nodejs-inspector'].strip())
+
+                # ── delve-debugger (custom NSE) ───────────────────────────────
+                if 'delve-debugger' in scripts and scripts['delve-debugger'].strip():
+                    add('CRITICAL', ip, port_str, 'Delve Go Debugger Exposed',
+                        'The Delve Go debugger (Debug Adapter Protocol) is network-accessible. '
+                        'Any host that can reach this port can execute arbitrary code in the '
+                        'target Go process.')
+
+                # ── kubelet-anon-check (custom NSE) ───────────────────────────
+                if 'kubelet-anon-check' in scripts and scripts['kubelet-anon-check'].strip():
+                    add('CRITICAL', ip, port_str, 'Kubernetes Kubelet Anonymous Access',
+                        'The Kubernetes Kubelet API is accessible without authentication. '
+                        'An attacker can list pods, exec into containers, and read secrets. '
+                        '(CVE-2018-1002105 context: enable --anonymous-auth=false on kubelet.)')
+
+                # ── http-title (Kubernetes Dashboard check) ───────────────────
+                if 'http-title' in scripts and 'Kubernetes Dashboard' in scripts['http-title']:
+                    add('HIGH', ip, port_str, 'Kubernetes Dashboard Accessible',
+                        'The Kubernetes Dashboard web UI is accessible from this network segment. '
+                        'Verify authentication is enforced; unauthenticated access allows cluster '
+                        'takeover.')
+
+                # ── banner (ActiveMQ check) ───────────────────────────────────
+                if 'banner' in scripts and 'ActiveMQ' in scripts['banner']:
+                    add('HIGH', ip, port_str, 'ActiveMQ Broker Exposed',
+                        'An ActiveMQ message broker is accessible from this network segment. '
+                        'Verify the version is patched against CVE-2023-46604 (RCE, CVSS 10.0). '
+                        'Broker should not be reachable from general workstations.')
+
             # ── host-level scripts (smb-security-mode, ms-sql-info, etc.) ────
             # These NSE scripts use hostrule and appear under <hostscript>,
             # not inside a <port> element.
@@ -1386,13 +1423,6 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
                     pnum  = port_key[2:] if port_key.startswith('U:') else port_key
                     add(severity, ip, f'{proto}/{pnum}',
                         'Service Exposed Externally', label)
-
-    # ── internal high-risk port findings ──────────────────────────────────────
-    if target_scan == 'Internal':
-        for ip, open_keys in open_ports_by_host.items():
-            for port_key, severity, label in INTERNAL_RISK_PORTS:
-                if port_key in open_keys:
-                    add(severity, ip, f'tcp/{port_key}', 'High-Risk Service Detected', label)
 
     # ── sort and write ────────────────────────────────────────────────────────
     findings.sort(key=lambda f: (SEVERITY_ORDER.index(f[0]), f[1], f[2]))
@@ -1680,11 +1710,60 @@ _FINDING_REPRO = {
             '|_  X server access is granted'
         ),
     },
-    'High-Risk Service Detected': {
-        'flags': '-sV',
+    'JDWP Java Debugger Exposed': {
+        'flags': '--script jdwp-info,jdwp-version',
+        'sample': (
+            'PORT     STATE SERVICE\n'
+            '5005/tcp open  jdwp\n'
+            '| jdwp-info:\n'
+            '|   Protocol version: 1.1\n'
+            '|   VM name: Java HotSpot(TM) 64-Bit Server VM\n'
+            '|_  VM version: 1.8.0_292'
+        ),
+    },
+    'Node.js Inspector Port Exposed': {
+        'flags': f'--script {_DIR}/nse/nodejs-inspector.nse',
+        'sample': (
+            'PORT     STATE SERVICE\n'
+            '9229/tcp open  cdp\n'
+            '| nodejs-inspector:\n'
+            '|_  Node.js Inspector accessible — version: node.js/v18.17.0'
+        ),
+    },
+    'Delve Go Debugger Exposed': {
+        'flags': f'--script {_DIR}/nse/delve-debugger.nse',
+        'sample': (
+            'PORT     STATE SERVICE\n'
+            '2345/tcp open  unknown\n'
+            '| delve-debugger:\n'
+            '|_  Delve debugger responding to DAP requests'
+        ),
+    },
+    'Kubernetes Kubelet Anonymous Access': {
+        'flags': f'--script {_DIR}/nse/kubelet-anon-check.nse',
         'sample': (
             'PORT      STATE SERVICE\n'
-            '10250/tcp open  ssl/kubernetes-kubelet'
+            '10250/tcp open  ssl/kubernetes-kubelet\n'
+            '| kubelet-anon-check:\n'
+            '|_  Anonymous access enabled — /pods returned HTTP 200 without credentials'
+        ),
+    },
+    'Kubernetes Dashboard Accessible': {
+        'flags': '--script http-title',
+        'sample': (
+            'PORT     STATE SERVICE\n'
+            '8001/tcp open  http\n'
+            '| http-title:\n'
+            '|_  Kubernetes Dashboard'
+        ),
+    },
+    'ActiveMQ Broker Exposed': {
+        'flags': '--script banner',
+        'sample': (
+            'PORT      STATE SERVICE\n'
+            '61616/tcp open  activemq\n'
+            '| banner:\n'
+            '|_  ...ActiveMQ...'
         ),
     },
 }

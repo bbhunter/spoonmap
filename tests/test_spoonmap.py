@@ -1912,3 +1912,90 @@ class TestScanExtraSqlPorts:
             _scan_extra_sql_ports(str(tmp_path), '88')
 
         assert not mock_popen.called, 'nmap must NOT be called for a standard 1433 instance'
+
+
+# ── TestInternalNseFindings ───────────────────────────────────────────────────
+
+class TestInternalNseFindings:
+    """Per-port NSE-validated findings that replaced INTERNAL_RISK_PORTS."""
+
+    def test_jdwp_finding(self, nmap_dir):
+        """jdwp-info output with content triggers JDWP finding."""
+        xml = _nmap_xml('10.0.1.1', 'tcp', '5005',
+                        scripts={'jdwp-info': 'Protocol version: 1.1\nVM name: Java HotSpot'})
+        (nmap_dir / 'nmap_results' / 'port5005.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'JDWP Java Debugger Exposed' in content
+        assert '10.0.1.1' in content
+
+    def test_nodejs_inspector_finding(self, nmap_dir):
+        """nodejs-inspector output triggers Node.js Inspector finding."""
+        xml = _nmap_xml('10.0.1.2', 'tcp', '9229',
+                        scripts={'nodejs-inspector': 'Node.js Inspector accessible — version: node.js/v18.17.0'})
+        (nmap_dir / 'nmap_results' / 'port9229.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'Node.js Inspector Port Exposed' in content
+        assert '10.0.1.2' in content
+
+    def test_delve_finding(self, nmap_dir):
+        """delve-debugger output triggers Delve finding."""
+        xml = _nmap_xml('10.0.1.3', 'tcp', '2345',
+                        scripts={'delve-debugger': 'Delve debugger responding to DAP requests'})
+        (nmap_dir / 'nmap_results' / 'port2345.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'Delve Go Debugger Exposed' in content
+        assert '10.0.1.3' in content
+
+    def test_kubelet_anon_finding(self, nmap_dir):
+        """kubelet-anon-check output triggers Kubelet Anonymous Access finding."""
+        xml = _nmap_xml('10.0.1.4', 'tcp', '10250',
+                        scripts={'kubelet-anon-check': 'Anonymous access enabled — /pods returned HTTP 200 without credentials'})
+        (nmap_dir / 'nmap_results' / 'port10250.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'Kubernetes Kubelet Anonymous Access' in content
+        assert '10.0.1.4' in content
+
+    def test_k8s_dashboard_finding(self, nmap_dir):
+        """http-title containing 'Kubernetes Dashboard' triggers k8s dashboard finding."""
+        xml = _nmap_xml('10.0.1.5', 'tcp', '8001',
+                        scripts={'http-title': 'Kubernetes Dashboard'})
+        (nmap_dir / 'nmap_results' / 'port8001.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'Kubernetes Dashboard Accessible' in content
+        assert '10.0.1.5' in content
+
+    def test_activemq_banner_finding(self, nmap_dir):
+        """banner containing 'ActiveMQ' triggers ActiveMQ Broker Exposed finding."""
+        xml = _nmap_xml('10.0.1.6', 'tcp', '61616',
+                        scripts={'banner': 'STOMP\nActiveMQ/5.15.9'})
+        (nmap_dir / 'nmap_results' / 'port61616.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'ActiveMQ Broker Exposed' in content
+        assert '10.0.1.6' in content
+
+    def test_no_finding_without_script_output(self, nmap_dir):
+        """Port 5005 open but jdwp-info returns empty string — no JDWP finding."""
+        xml = _nmap_xml('10.0.1.7', 'tcp', '5005',
+                        scripts={'jdwp-info': ''})
+        (nmap_dir / 'nmap_results' / 'port5005.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        findings_file = nmap_dir / 'findings.txt'
+        if findings_file.exists():
+            assert 'JDWP Java Debugger Exposed' not in findings_file.read_text()
+
+    def test_high_risk_service_detected_never_fires(self, nmap_dir):
+        """The old 'High-Risk Service Detected' title must never appear in output."""
+        # Write XML for all ports that used to trigger INTERNAL_RISK_PORTS
+        for port in ('9229', '2345', '5005', '10250', '8001', '61616'):
+            xml = _nmap_xml(f'10.0.2.{port[-1]}', 'tcp', port)
+            (nmap_dir / 'nmap_results' / f'port{port}.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        findings_file = nmap_dir / 'findings.txt'
+        if findings_file.exists():
+            assert 'High-Risk Service Detected' not in findings_file.read_text()
