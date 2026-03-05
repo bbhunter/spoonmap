@@ -405,21 +405,24 @@ def _nmap_xml(host_ip, protocol, portid, scripts=None, service_attrs=None):
     service_elem = ''
     if service_attrs:
         attrs = ' '.join(f'{k}="{v}"' for k, v in service_attrs.items())
-        service_elem = f'<service {attrs}/>'
-    return textwrap.dedent(f"""\
-        <?xml version="1.0"?>
-        <nmaprun>
-          <host>
-            <address addr="{host_ip}" addrtype="ipv4"/>
-            <ports>
-              <port protocol="{protocol}" portid="{portid}">
-                {service_elem}
-                {_script_elems(scripts)}
-              </port>
-            </ports>
-          </host>
-        </nmaprun>
-    """)
+        service_elem = f'\n        <service {attrs}/>'
+    # Indent every script line consistently so the XML declaration stays at col 0
+    raw = _script_elems(scripts).rstrip('\n')
+    indented_scripts = '\n'.join('        ' + ln for ln in raw.split('\n')) if raw else ''
+    return (
+        f'<?xml version="1.0"?>\n'
+        f'<nmaprun>\n'
+        f'  <host>\n'
+        f'    <address addr="{host_ip}" addrtype="ipv4"/>\n'
+        f'    <ports>\n'
+        f'      <port protocol="{protocol}" portid="{portid}">'
+        f'{service_elem}\n'
+        f'{indented_scripts}\n'
+        f'      </port>\n'
+        f'    </ports>\n'
+        f'  </host>\n'
+        f'</nmaprun>\n'
+    )
 
 
 def _nmap_xml_hostscript(host_ip, protocol, portid, hostscripts):
@@ -1156,16 +1159,96 @@ class TestSnmpBruteFinding:
         assert 'SNMP Default Community String' in content
 
 
+# ── SNMP severity and detail tests ───────────────────────────────────────────
+
+class TestSnmpSeverityAndDetail:
+    def test_snmp_rw_on_network_device_is_critical(self, nmap_dir):
+        xml = _nmap_xml(
+            '10.0.0.5', 'udp', '161',
+            scripts={
+                'snmp-brute': 'public - Valid credentials   (Access level: read-write)',
+                'snmp-sysdescr': 'Cisco IOS Software, Version 15.7',
+            },
+        )
+        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'CRITICAL' in content
+        assert 'SNMP Default Community String' in content
+
+    def test_snmp_rw_on_non_network_device_is_high(self, nmap_dir):
+        xml = _nmap_xml(
+            '10.0.0.5', 'udp', '161',
+            scripts={
+                'snmp-brute': 'public - Valid credentials   (Access level: read-write)',
+                'snmp-sysdescr': 'Linux Ubuntu 20.04 x86_64',
+            },
+        )
+        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'HIGH' in content
+        assert 'SNMP Default Community String' in content
+
+    def test_snmp_ro_only_is_low(self, nmap_dir):
+        xml = _nmap_xml(
+            '10.0.0.5', 'udp', '161',
+            scripts={'snmp-brute': 'public - Valid credentials   (Access level: read-only)'},
+        )
+        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'LOW' in content
+        assert 'SNMP Default Community String' in content
+
+    def test_snmp_accepts_any_validated(self, nmap_dir):
+        xml = _nmap_xml(
+            '10.0.0.5', 'udp', '161',
+            scripts={'snmp-brute': 'public - Valid credentials'},
+        )
+        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal',
+                          snmp_any_validated={'10.0.0.5': True})
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'SNMP Accepts Any Community String' in content
+        assert 'CRITICAL' in content
+
+    def test_snmp_printer_exclusion_note_in_detail(self, nmap_dir):
+        xml = _nmap_xml(
+            '10.0.0.5', 'udp', '161',
+            scripts={'snmp-brute': 'public - Valid credentials'},
+        )
+        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.md').read_text()
+        assert 'printer' in content.lower()
+
+    def test_snmp_sysdescr_in_detail(self, nmap_dir):
+        xml = _nmap_xml(
+            '10.0.0.5', 'udp', '161',
+            scripts={
+                'snmp-brute': 'public - Valid credentials',
+                'snmp-sysdescr': 'Linux host 5.4.0 #1 SMP x86_64',
+            },
+        )
+        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.md').read_text()
+        assert 'Linux host 5.4.0' in content
+
+
 # ── INTERNAL_PORT_SCRIPTS includes snmp-brute ─────────────────────────────────
 
 class TestInternalPortScriptsSnmp:
     def test_snmp_tcp_161_included(self):
         assert '161' in INTERNAL_PORT_SCRIPTS
         assert 'snmp-brute' in INTERNAL_PORT_SCRIPTS['161']
+        assert 'snmp-sysdescr' in INTERNAL_PORT_SCRIPTS['161']
 
     def test_snmp_udp_161_included(self):
         assert 'U:161' in INTERNAL_PORT_SCRIPTS
         assert 'snmp-brute' in INTERNAL_PORT_SCRIPTS['U:161']
+        assert 'snmp-sysdescr' in INTERNAL_PORT_SCRIPTS['U:161']
 
 
 # ── _host_elem_to_dict ────────────────────────────────────────────────────────

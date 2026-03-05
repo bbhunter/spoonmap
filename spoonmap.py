@@ -813,8 +813,8 @@ EXTERNAL_PORT_SCRIPTS = {
     '25':    'smtp-ntlm-info',
     '110':   'pop3-ntlm-info',
     '143':   'imap-ntlm-info',
-    '161':   'snmp-brute',
-    'U:161': 'snmp-brute',
+    '161':   'snmp-brute,snmp-sysdescr',
+    'U:161': 'snmp-brute,snmp-sysdescr',
     '443':   'ssl-cert',
     '465':   'smtp-ntlm-info,ssl-cert',
     '587':   'smtp-ntlm-info',
@@ -847,8 +847,8 @@ INTERNAL_PORT_SCRIPTS = {
     '6129':  f'{_DIR}/nse/dameware-detect.nse',
     '8009':  'ajp-headers',
     '6000':  'x11-access',
-    '161':   'snmp-brute',
-    'U:161': 'snmp-brute',
+    '161':   'snmp-brute,snmp-sysdescr',
+    'U:161': 'snmp-brute,snmp-sysdescr',
     # Use bundled pre-redesign script: nmap's ms-sql-info was rewritten in
     # commit c3d54f1 (Jan 2022) to be hostrule-only via GetTargetInstances,
     # which requires --script-args mssql.instance-* to fire.  The older
@@ -992,10 +992,54 @@ def _scan_extra_sql_ports(output_path, source_port):
                 restore_terminal_state(term_state)
 
 
-SEVERITY_ORDER = ['CRITICAL', 'HIGH', 'MEDIUM', 'INFO']
+def _validate_snmp_any_community(nmap_dir, scan_type):
+    """Return dict {ip: True} for hosts confirmed to accept any SNMP community string."""
+    import uuid as _uuid
+    _ACCEPTS_ANY_THRESHOLD = 5
+
+    validated = {}
+    for xml_file in Path(nmap_dir).glob('nmap_results/port*161*.xml'):
+        try:
+            tree = etree.parse(xml_file)
+        except Exception:
+            continue
+        for host_elem in tree.findall('.//host'):
+            addr = host_elem.find('address')
+            if addr is None:
+                continue
+            ip = addr.attrib.get('addr', '')
+            for script_elem in host_elem.findall('.//script[@id="snmp-brute"]'):
+                out = script_elem.attrib.get('output', '')
+                count = len(re.findall(r'Valid credentials', out))
+                if count < _ACCEPTS_ANY_THRESHOLD:
+                    continue
+                # Validate with a random community string
+                random_community = str(_uuid.uuid4())
+                with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as f:
+                    f.write(random_community + '\n')
+                    tmp_path = f.name
+                try:
+                    src_port = '88' if scan_type == 'Internal' else '53'
+                    cmd = [
+                        'nmap', '-sU', '-p', '161',
+                        '--source-port', src_port,
+                        '--script', 'snmp-brute',
+                        '--script-args', f'snmp-brute.communitiesdb={tmp_path}',
+                        '--script-timeout', '30s',
+                        ip,
+                    ]
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                    if 'Valid credentials' in result.stdout:
+                        validated[ip] = True
+                finally:
+                    Path(tmp_path).unlink(missing_ok=True)
+    return validated
 
 
-def generate_findings(output_path, target_scan):
+SEVERITY_ORDER = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO']
+
+
+def generate_findings(output_path, target_scan, snmp_any_validated=None):
     """Parse nmap script output and write findings.txt and findings.md."""
     nmap_dir = f'{output_path}/nmap_results'
     if not os.path.exists(nmap_dir):
@@ -1204,13 +1248,59 @@ def generate_findings(output_path, target_scan):
                 if 'snmp-brute' in scripts and ip not in printer_ips:
                     out = scripts['snmp-brute']
                     if 'Valid credentials' in out:
-                        communities = re.findall(r'(\S+)\s+-\s+Valid credentials', out)
-                        if communities:
-                            detail = (f'Default SNMP community string(s) accepted: '
-                                      f'{", ".join(communities)}.')
+                        # Parse community strings and access levels
+                        # snmp-brute line: "<community> - Valid credentials   (Access level: read-write)"
+                        community_details = []
+                        has_rw = False
+                        for line in out.splitlines():
+                            m = re.match(r'\s*(\S+)\s+-\s+Valid credentials', line)
+                            if not m:
+                                continue
+                            community = m.group(1)
+                            level_m = re.search(r'Access level:\s*([\w-]+)', line)
+                            level = level_m.group(1).lower() if level_m else 'unknown'
+                            community_details.append(f'{community} ({level})')
+                            if 'write' in level:
+                                has_rw = True
+
+                        # Detect network device via sysdescr
+                        _NETWORK_KEYWORDS = [
+                            'cisco', 'juniper', 'arista', 'switch', 'router',
+                            'firewall', 'fortinet', 'mikrotik', 'procurve',
+                            'nexus', 'catalyst',
+                        ]
+                        sysdescr = ''
+                        is_network_device = False
+                        if 'snmp-sysdescr' in scripts:
+                            sysdescr = scripts['snmp-sysdescr'].strip()[:200]
+                            if any(kw in sysdescr.lower() for kw in _NETWORK_KEYWORDS):
+                                is_network_device = True
+
+                        # Build shared detail
+                        communities_str = ', '.join(community_details) if community_details else 'community string'
+                        printer_note = ' (Hosts with TCP/9100 open are excluded as printers.)'
+                        detail_parts = [f'Community string(s): {communities_str}.']
+                        if sysdescr:
+                            detail_parts.append(f'System description: {sysdescr}.')
+                        detail_parts.append(printer_note)
+                        detail = ' '.join(detail_parts)
+
+                        # Accepts-any validated?
+                        if snmp_any_validated and ip in snmp_any_validated:
+                            add('CRITICAL', ip, port_str,
+                                'SNMP Accepts Any Community String',
+                                'Confirmed: device responds to a random UUID community string — '
+                                'SNMP community-string authentication is effectively disabled. '
+                                + detail)
                         else:
-                            detail = 'Default SNMP community string accepted.'
-                        add('HIGH', ip, port_str, 'SNMP Default Community String', detail)
+                            # Severity based on access level and device type
+                            if has_rw and is_network_device:
+                                sev = 'CRITICAL'
+                            elif has_rw:
+                                sev = 'HIGH'
+                            else:
+                                sev = 'LOW'
+                            add(sev, ip, port_str, 'SNMP Default Community String', detail)
 
                 # ── ms-sql-info (portscript on UDP 1434) ──────────────────
                 # When nmap fires ms-sql-info via its portrule the output lands
@@ -1548,13 +1638,26 @@ _FINDING_REPRO = {
         ),
     },
     'SNMP Default Community String': {
-        'flags': '-sU --script snmp-brute',
+        'flags': '-sU --script snmp-brute,snmp-sysdescr',
         'sample': (
             'PORT    STATE SERVICE\n'
             '161/udp open  snmp\n'
             '| snmp-brute:\n'
-            '|   public - Valid credentials\n'
-            '|_  private - Valid credentials'
+            '|   public - Valid credentials    (Access level: read-only)\n'
+            '|_  private - Valid credentials   (Access level: read-write)\n'
+            '| snmp-sysdescr:\n'
+            '|_  Linux host 5.4.0-generic #1 SMP x86_64'
+        ),
+    },
+    'SNMP Accepts Any Community String': {
+        'flags': '-sU --script snmp-brute,snmp-sysdescr',
+        'sample': (
+            'PORT    STATE SERVICE\n'
+            '161/udp open  snmp\n'
+            '| snmp-brute:\n'
+            '|   <uuid> - Valid credentials    (Access level: read-write)\n'
+            '| snmp-sysdescr:\n'
+            '|_  Cisco IOS Software, Version 15.7'
         ),
     },
     'AJP Connector Exposed': {
@@ -2106,6 +2209,10 @@ def main():
             if script_scan and target_scan == 'Internal':
                 _scan_extra_sql_ports(output_path, source_port)
 
+            snmp_any_validated = {}
+            if script_scan:
+                snmp_any_validated = _validate_snmp_any_community(output_path, target_scan)
+
         # Combine all live hosts into one file
         all_ips = set()
         if os.path.exists(f'{output_path}/live_hosts'):
@@ -2151,7 +2258,7 @@ def main():
             print(_COLOR_RESULT + f'\nResults written to {output_path}/spoonmap_output.xml / .json' + _COLOR_RESET)
 
             if script_scan:
-                generate_findings(output_path, target_scan)
+                generate_findings(output_path, target_scan, snmp_any_validated=snmp_any_validated)
 
         else:
             status_summary += '\nNo hosts found.'
