@@ -826,6 +826,7 @@ EXTERNAL_PORT_SCRIPTS = {
     '2375':  'docker-version',
     '4243':  'docker-version',
     '4786':  f'{_DIR}/nse/cisco-siet.nse',
+    '6129':  f'{_DIR}/nse/dameware-detect.nse',
     '8009':  'ajp-headers',
     '6000':  'x11-access',
     '8443':  'ssl-cert',
@@ -843,6 +844,7 @@ INTERNAL_PORT_SCRIPTS = {
     '1090':  'rmi-dumpregistry',
     '1433':  'ms-sql-info',
     '4786':  f'{_DIR}/nse/cisco-siet.nse',
+    '6129':  f'{_DIR}/nse/dameware-detect.nse',
     '8009':  'ajp-headers',
     '6000':  'x11-access',
     '161':   'snmp-brute',
@@ -1119,18 +1121,29 @@ def generate_findings(output_path, target_scan):
 
                 # ── Dameware on port 6129 ─────────────────────────────────
                 if portid == '6129':
-                    svc = port_elem.find('service')
-                    if svc is not None:
-                        svc_text = ' '.join([
-                            svc.attrib.get('name', ''),
-                            svc.attrib.get('product', ''),
-                            svc.attrib.get('version', ''),
-                        ]).lower()
-                        if 'dameware' in svc_text:
-                            add('HIGH', ip, port_str, 'Dameware Remote Control Detected',
-                                'Service banner identifies DameWare Mini Remote Control. '
-                                'Manual validation needed for CVE-2019-3980 (unauthenticated RCE). '
-                                'Ref: https://github.com/tenable/poc/blob/master/Solarwinds/Dameware/dwrcs_dwDrvInst_rce.py')
+                    # Custom NSE confirmed DameWare binary handshake — highest confidence
+                    if 'dameware-detect' in scripts:
+                        out = scripts['dameware-detect'].strip()
+                        add('CRITICAL', ip, port_str, 'DameWare Mini Remote Control Detected',
+                            'DameWare Remote Control Service (DWRCS) confirmed by protocol handshake. '
+                            'CVE-2019-3980 (CVSS 9.8): unauthenticated RCE via smart card auth abuse '
+                            'in versions <= 12.1.0.89. Upgrade to v12.1.2+ or restrict TCP/6129 to '
+                            f'authorised hosts. {out[:200]}')
+                    else:
+                        # Fall back: service banner identification only
+                        svc = port_elem.find('service')
+                        if svc is not None:
+                            svc_text = ' '.join([
+                                svc.attrib.get('name', ''),
+                                svc.attrib.get('product', ''),
+                                svc.attrib.get('version', ''),
+                            ]).lower()
+                            if 'dameware' in svc_text:
+                                add('HIGH', ip, port_str, 'DameWare Remote Control Detected',
+                                    'Service banner identifies DameWare Mini Remote Control. '
+                                    'Manual validation needed for CVE-2019-3980 (unauthenticated RCE, CVSS 9.8). '
+                                    'Ref: https://github.com/tenable/poc/blob/master/Solarwinds/Dameware/'
+                                    'dwrcs_dwDrvInst_rce.py')
 
                 # ── SAP Gateway on port 3300 ─────────────────────────────
                 if portid == '3300' and protocol == 'tcp':

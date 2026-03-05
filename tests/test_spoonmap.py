@@ -195,6 +195,14 @@ class TestGetScriptsForPort:
         result = _get_scripts_for_port('4786', 'Internal')
         assert result is not None and result.endswith('cisco-siet.nse')
 
+    def test_6129_external_uses_dameware_detect(self):
+        result = _get_scripts_for_port('6129', 'External')
+        assert result is not None and result.endswith('nse/dameware-detect.nse')
+
+    def test_6129_internal_uses_dameware_detect(self):
+        result = _get_scripts_for_port('6129', 'Internal')
+        assert result is not None and result.endswith('nse/dameware-detect.nse')
+
     def test_445_internal_includes_ms17010(self):
         result = _get_scripts_for_port('445', 'Internal')
         assert result is not None and 'smb-vuln-ms17-010' in result
@@ -706,7 +714,27 @@ class TestGenerateFindings:
                                        'product': 'DameWare Mini Remote Control'})
         (nmap_dir / 'nmap_results' / 'port6129.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
-        assert 'Dameware' in (nmap_dir / 'findings.txt').read_text()
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'DameWare' in content
+        assert 'HIGH' in content
+
+    def test_dameware_nse_confirmed_critical(self, nmap_dir):
+        """dameware-detect script output raises finding to CRITICAL."""
+        xml = _nmap_xml(
+            '10.0.0.2', 'tcp', '6129',
+            scripts={'dameware-detect':
+                     'Product: SolarWinds DameWare Mini Remote Control\n'
+                     'CVE: CVE-2019-3980 (CVSS 9.8) - Unauthenticated RCE v12.1.0.89 and earlier\n'
+                     'Remediation: Upgrade to v12.1.2+'},
+        )
+        (nmap_dir / 'nmap_results' / 'port6129.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'DameWare' in content
+        assert 'CRITICAL' in content
+        # CVE detail is written to findings.md (detail column) and findings.json
+        md_content = (nmap_dir / 'findings.md').read_text()
+        assert 'CVE-2019-3980' in md_content
 
     def test_cisco_smart_install_vulnerable(self, nmap_dir):
         # cisco-siet.nse confirms VULNERABLE → finding raised
