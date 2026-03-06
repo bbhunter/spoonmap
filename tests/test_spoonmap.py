@@ -433,6 +433,11 @@ def _nmap_xml_hostscript(host_ip, protocol, portid, hostscripts):
     SMB security-mode and ms-sql-info use hostrule and appear here in real
     nmap output, not inside <port>.
     """
+    # Re-indent so every script line aligns with the template's 14-space indent,
+    # preventing textwrap.dedent from computing a 0-space common indent when
+    # multiple scripts are present.
+    raw = _script_elems(hostscripts).rstrip('\n')
+    indented_scripts = ('\n' + ' ' * 14).join(raw.split('\n')) if raw else ''
     return textwrap.dedent(f"""\
         <?xml version="1.0"?>
         <nmaprun>
@@ -442,7 +447,7 @@ def _nmap_xml_hostscript(host_ip, protocol, portid, hostscripts):
               <port protocol="{protocol}" portid="{portid}"/>
             </ports>
             <hostscript>
-              {_script_elems(hostscripts)}
+              {indented_scripts}
             </hostscript>
           </host>
         </nmaprun>
@@ -545,6 +550,32 @@ class TestGenerateFindings:
         assert 'SMBv1 Enabled' in content
         assert 'SMBv1 Signing Not Required' in content
         assert '10.0.0.9' in content
+
+    def test_smb1_signing_suppressed_when_smb2_also_not_required(self, nmap_dir):
+        """Both SMBv1 and SMBv2 signing not required → only SMBv2 finding emitted."""
+        xml = _nmap_xml_hostscript('10.0.0.10', 'tcp', '445',
+                                   hostscripts={
+                                       'smb-security-mode': 'message_signing: disabled',
+                                       'smb2-security-mode': 'Message signing enabled but not required',
+                                   })
+        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'SMBv2 Signing Not Required' in content
+        assert 'SMBv1 Signing Not Required' not in content
+
+    def test_smb1_signing_fires_when_smb2_is_required(self, nmap_dir):
+        """SMBv1 signing not required but SMBv2 IS required → SMBv1 finding still emitted."""
+        xml = _nmap_xml_hostscript('10.0.0.11', 'tcp', '445',
+                                   hostscripts={
+                                       'smb-security-mode': 'message_signing: disabled',
+                                       'smb2-security-mode': 'Message signing enabled and required',
+                                   })
+        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'SMBv1 Signing Not Required' in content
+        assert 'SMBv2 Signing Not Required' not in content
 
     # ── EternalBlue (MS17-010) ────────────────────────────────────────────────
 
@@ -2079,3 +2110,93 @@ class TestCucmDetectFinding:
         generate_findings(str(nmap_dir), 'Internal')
         txt = (nmap_dir / 'findings.txt').read_text()
         assert 'Possible Cisco CUCM' not in txt
+
+
+class TestLdapSecurityFindings:
+    """Custom NSE-validated LDAP security findings."""
+
+    def test_ldap_signing_not_required_high(self, nmap_dir):
+        """ldap-signing-check returning 'Signing: NOT REQUIRED' -> HIGH finding."""
+        xml = _nmap_xml('10.10.0.1', 'tcp', '389',
+                        scripts={'ldap-signing-check': 'Signing: NOT REQUIRED'})
+        (nmap_dir / 'nmap_results' / 'port389.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'LDAP Signing Not Required' in content
+        assert 'HIGH' in content
+        assert '10.10.0.1' in content
+
+    def test_ldap_signing_required_no_finding(self, nmap_dir):
+        """ldap-signing-check absent (signing enforced, script returned nil) -> no finding."""
+        xml = _nmap_xml('10.10.0.2', 'tcp', '389')
+        (nmap_dir / 'nmap_results' / 'port389.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        findings_file = nmap_dir / 'findings.txt'
+        if findings_file.exists():
+            assert 'LDAP Signing Not Required' not in findings_file.read_text()
+
+    def test_ldap_channel_binding_not_required_high(self, nmap_dir):
+        """ldap-channel-binding-check returning 'NOT REQUIRED' -> HIGH finding."""
+        xml = _nmap_xml('10.10.0.3', 'tcp', '636',
+                        scripts={'ldap-channel-binding-check': 'Channel Binding: NOT REQUIRED'})
+        (nmap_dir / 'nmap_results' / 'port636.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'LDAPS Channel Binding Not Required' in content
+        assert 'HIGH' in content
+
+    def test_ldap_anon_enum_users_medium(self, nmap_dir):
+        """ldap-anon-enum with Users found -> MEDIUM finding."""
+        xml = _nmap_xml('10.10.0.4', 'tcp', '389',
+                        scripts={'ldap-anon-enum':
+                                 'Anonymous bind: success\n'
+                                 'Base DN: DC=pwnt,DC=lab\n'
+                                 'Sample Users Found: j.smith, k.jones'})
+        (nmap_dir / 'nmap_results' / 'port389.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'LDAP Anonymous Enumeration' in content
+        assert 'MEDIUM' in content
+
+    def test_ldap_anon_enum_computers_medium(self, nmap_dir):
+        """ldap-anon-enum with Computers found -> MEDIUM finding."""
+        xml = _nmap_xml('10.10.0.5', 'tcp', '389',
+                        scripts={'ldap-anon-enum':
+                                 'Anonymous bind: success\n'
+                                 'Base DN: DC=pwnt,DC=lab\n'
+                                 'Sample Computers Found: WS-SALES01$'})
+        (nmap_dir / 'nmap_results' / 'port389.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'LDAP Anonymous Enumeration' in content
+
+    def test_ldap_anon_enum_no_results_no_finding(self, nmap_dir):
+        """ldap-anon-enum script absent (bind ok but 0 results) -> no finding."""
+        xml = _nmap_xml('10.10.0.6', 'tcp', '389')
+        (nmap_dir / 'nmap_results' / 'port389.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        findings_file = nmap_dir / 'findings.txt'
+        if findings_file.exists():
+            assert 'LDAP Anonymous Enumeration' not in findings_file.read_text()
+
+    def test_ldap_findings_not_on_external(self, nmap_dir):
+        """LDAP signing finding must not fire for External scans."""
+        xml = _nmap_xml('1.2.3.4', 'tcp', '389',
+                        scripts={'ldap-signing-check': 'Signing: NOT REQUIRED',
+                                 'ldap-anon-enum': 'Users found: 5'})
+        (nmap_dir / 'nmap_results' / 'port389.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        # External scan only triggers the 'LDAP -- should not be internet-facing' finding
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'LDAP Signing Not Required' not in content
+        assert 'LDAP Anonymous Enumeration' not in content
+
+    def test_ldap_global_catalog_signing_port_3268(self, nmap_dir):
+        """Port 3268 with ldap-signing-check -> 'Global Catalog Signing Not Required'."""
+        xml = _nmap_xml('10.10.0.7', 'tcp', '3268',
+                        scripts={'ldap-signing-check': 'Signing: NOT REQUIRED'})
+        (nmap_dir / 'nmap_results' / 'port3268.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'Global Catalog Signing Not Required' in content
+        assert 'HIGH' in content

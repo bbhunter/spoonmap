@@ -874,6 +874,10 @@ INTERNAL_PORT_SCRIPTS = {
     '9229':  f'{_DIR}/nse/nodejs-inspector.nse',
     '10250': f'{_DIR}/nse/kubelet-anon-check.nse',
     '2345':  f'{_DIR}/nse/delve-debugger.nse',
+    '389':   f'{_DIR}/nse/ldap-signing-check.nse,{_DIR}/nse/ldap-anon-enum.nse',
+    '636':   f'{_DIR}/nse/ldap-channel-binding-check.nse',
+    '3268':  f'{_DIR}/nse/ldap-signing-check.nse',
+    '3269':  f'{_DIR}/nse/ldap-channel-binding-check.nse',
 }
 
 # Ports that use multiple concurrent NSE scripts; omit --source-port to prevent
@@ -1265,6 +1269,40 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
                             add('MEDIUM', ip, port_str, 'Expired TLS Certificate',
                                 f'Certificate expired on {expiry}.')
 
+                # ── ldap-signing-check (ports 389 / 3268) ────────────────────
+                if 'ldap-signing-check' in scripts and target_scan == 'Internal':
+                    if 'NOT REQUIRED' in scripts['ldap-signing-check'].upper():
+                        label = 'Global Catalog' if portid == '3268' else 'LDAP'
+                        add('HIGH', ip, port_str,
+                            f'{label} Signing Not Required',
+                            f'{label} signing (LDAPServerIntegrity) is not enforced on this '
+                            f'domain controller. An attacker can perform NTLM relay attacks '
+                            f'via {label} to add computer accounts, modify ACLs, or escalate '
+                            f'domain privileges. '
+                            f'Set LDAPServerIntegrity registry to 2 and enforce via GPO.')
+
+                # ── ldap-channel-binding-check (ports 636 / 3269) ────────────
+                if 'ldap-channel-binding-check' in scripts and target_scan == 'Internal':
+                    if 'NOT REQUIRED' in scripts['ldap-channel-binding-check'].upper():
+                        label = 'Global Catalog' if portid == '3269' else 'LDAPS'
+                        add('HIGH', ip, port_str,
+                            f'{label} Channel Binding Not Required',
+                            f'{label} channel binding (LdapEnforceChannelBinding) is not '
+                            f'enforced on this domain controller. Combined with unsigned LDAP, '
+                            f'this enables NTLM relay attacks over the TLS-protected channel. '
+                            f'Set LdapEnforceChannelBinding registry to 2 and enforce via GPO.')
+
+                # ── ldap-anon-enum (port 389) ─────────────────────────────────
+                if 'ldap-anon-enum' in scripts and target_scan == 'Internal':
+                    out = scripts['ldap-anon-enum']
+                    if any(s in out for s in ('Sample Users Found', 'Users Found:',
+                                              'Sample Computers Found', 'Computers Found:')):
+                        add('MEDIUM', ip, port_str,
+                            'LDAP Anonymous Enumeration',
+                            f'Anonymous LDAP bind succeeded and returned AD objects. '
+                            f'{out.strip()[:300]} '
+                            f'Restrict: set dsHeuristics bit 7 to disable anonymous enumeration.')
+
                 # ── snmp-brute (skip printers) ────────────────────────────
                 if 'snmp-brute' in scripts and ip not in printer_ips:
                     out = scripts['snmp-brute']
@@ -1384,13 +1422,18 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
                 hscripts = scripts_for_elem(hostscript_elem)
 
                 # ── smb-security-mode / smb2-security-mode ────────────────
-                for sid in ('smb-security-mode', 'smb2-security-mode'):
-                    if sid in hscripts and target_scan == 'Internal':
-                        out = hscripts[sid]
-                        if 'not required' in out.lower() or 'disabled' in out.lower():
-                            proto = 'SMBv1' if sid == 'smb-security-mode' else 'SMBv2'
-                            add('HIGH', ip, file_port_str, f'{proto} Signing Not Required',
-                                'SMB relay attacks are possible without signing enforcement.')
+                if target_scan == 'Internal':
+                    def _signing_not_req(key):
+                        out = hscripts.get(key, '')
+                        return bool(out) and ('not required' in out.lower() or 'disabled' in out.lower())
+                    smb2_not_req = _signing_not_req('smb2-security-mode')
+                    smb1_not_req = _signing_not_req('smb-security-mode')
+                    if smb2_not_req:
+                        add('HIGH', ip, file_port_str, 'SMBv2 Signing Not Required',
+                            'SMB relay attacks are possible without signing enforcement.')
+                    if smb1_not_req and not smb2_not_req:
+                        add('HIGH', ip, file_port_str, 'SMBv1 Signing Not Required',
+                            'SMB relay attacks are possible without signing enforcement.')
 
                 # ── smb-security-mode → SMBv1 enabled ────────────────────
                 if 'smb-security-mode' in hscripts and target_scan == 'Internal':
@@ -1803,6 +1846,54 @@ _FINDING_REPRO = {
             '|_  ...ActiveMQ...'
         ),
     },
+    # ── LDAP security (custom NSE scripts) ───────────────────────────────────
+    'LDAP Signing Not Required': {
+        'flags': '--script spoonmap/nse/ldap-signing-check.nse',
+        'sample': (
+            'PORT    STATE SERVICE\n'
+            '389/tcp open  ldap\n'
+            '|_ldap-signing-check: Signing: NOT REQUIRED'
+        ),
+    },
+    'Global Catalog Signing Not Required': {
+        'flags': '--script spoonmap/nse/ldap-signing-check.nse',
+        'sample': (
+            'PORT     STATE SERVICE\n'
+            '3268/tcp open  globalcatLDAP\n'
+            '|_ldap-signing-check: Signing: NOT REQUIRED'
+        ),
+    },
+    'LDAPS Channel Binding Not Required': {
+        'flags': '--script spoonmap/nse/ldap-channel-binding-check.nse',
+        'sample': (
+            'PORT    STATE SERVICE\n'
+            '636/tcp open  ldapssl\n'
+            '|_ldap-channel-binding-check: Channel Binding: NOT REQUIRED'
+        ),
+    },
+    'Global Catalog Channel Binding Not Required': {
+        'flags': '--script spoonmap/nse/ldap-channel-binding-check.nse',
+        'sample': (
+            'PORT     STATE SERVICE\n'
+            '3269/tcp open  globalcatLDAPssl\n'
+            '|_ldap-channel-binding-check: Channel Binding: NOT REQUIRED'
+        ),
+    },
+    'LDAP Anonymous Enumeration': {
+        'flags': '--script spoonmap/nse/ldap-anon-enum.nse',
+        'extra_cmds': [
+            'ldapsearch -x -H ldap://{host} -b "{base_dn}" -s sub "(objectClass=user)" sAMAccountName',
+        ],
+        'sample': (
+            'PORT    STATE SERVICE\n'
+            '389/tcp open  ldap\n'
+            '| ldap-anon-enum:\n'
+            '|   Anonymous bind: success\n'
+            '|   Base DN: DC=corp,DC=local\n'
+            '|   Sample Users Found: j.smith, m.carter, r.johnson, t.williams, k.brown\n'
+            '|_  Sample Computers Found: WS-SALES01$, WS-DEV03$, SRV-FILE02$'
+        ),
+    },
 }
 
 
@@ -1831,10 +1922,12 @@ def _write_findings_txt(output_path, target_scan, findings):
 
     # Group by (severity, title, port_str) so all hosts with the same
     # vulnerability on the same port are together for easy copy-paste.
-    groups = {}  # (sev, title, port_str) → list[host]
-    for sev, host, port_str, title, _detail in findings:
+    groups = {}  # (sev, title, port_str) → {'hosts': list[host], 'detail': str}
+    for sev, host, port_str, title, detail in findings:
         key = (sev, title, port_str)
-        groups.setdefault(key, []).append(host)
+        if key not in groups:
+            groups[key] = {'hosts': [], 'detail': detail}
+        groups[key]['hosts'].append(host)
 
     for sev in SEVERITY_ORDER:
         sev_keys = sorted(
@@ -1846,7 +1939,8 @@ def _write_findings_txt(output_path, target_scan, findings):
         lines += [sev, '-' * len(sev), '']
         for key in sev_keys:
             _, title, port_str = key
-            hosts = groups[key]
+            grp = groups[key]
+            hosts = grp['hosts']
             repro = _FINDING_REPRO.get(title, {})
             lines.append(f'  [{title}]  port {port_str}')
             lines.append(f'  Affected hosts ({len(hosts)}):')
@@ -1857,6 +1951,14 @@ def _write_findings_txt(output_path, target_scan, findings):
                 cmd = _build_repro_cmd(title, port_str, hosts[0])
                 lines.append('  Reproduce:')
                 lines.append(f'    {cmd}')
+                for extra in repro.get('extra_cmds', []):
+                    base_dn = next(
+                        (l[len('Base DN:'):].strip()
+                         for l in grp['detail'].splitlines()
+                         if l.startswith('Base DN:')),
+                        '',
+                    )
+                    lines.append(f'    {extra.format(host=hosts[0], base_dn=base_dn)}')
                 lines.append('')
                 if repro.get('sample'):
                     lines.append('  Sample output:')
