@@ -1067,6 +1067,8 @@ EXTERNAL_PORT_SCRIPTS = {
     '8443':  'ssl-cert',
     '10443': 'ssl-cert',
     'U:623': f'ipmi-version,ipmi-cipher-zero,{_DIR}/nse/ipmi-hashdump.nse',
+    '5900':  'vnc-info,realvnc-auth-bypass',
+    '5901':  'vnc-info,realvnc-auth-bypass',
 }
 
 # Scripts run on INTERNAL scans only (no ssl-cert — not relevant for internal assessments)
@@ -1103,6 +1105,8 @@ INTERNAL_PORT_SCRIPTS = {
     '3268':  f'{_DIR}/nse/ldap-signing-check.nse',
     '3269':  f'{_DIR}/nse/ldap-channel-binding-check.nse',
     'U:623': f'ipmi-version,ipmi-cipher-zero,{_DIR}/nse/ipmi-hashdump.nse',
+    '5900':  'vnc-info,realvnc-auth-bypass',
+    '5901':  'vnc-info,realvnc-auth-bypass',
 }
 
 # Ports that use multiple concurrent NSE scripts; omit --source-port to prevent
@@ -1142,6 +1146,8 @@ EXTERNAL_SENSITIVE_PORTS = [
     ('161',   'HIGH', 'SNMP — should not be internet-facing'),
     ('U:623', 'CRITICAL', 'IPMI — BMC management interface should never be internet-facing'),
     ('3389',  'HIGH', 'RDP — direct internet exposure is high risk'),
+    ('5900',  'HIGH', 'VNC — remote desktop should not be internet-facing'),
+    ('5901',  'HIGH', 'VNC — remote desktop should not be internet-facing'),
     ('21',    'HIGH', 'FTP — should not be exposed unless wrapped in SSL/SSH'),
     ('23',    'HIGH', 'Telnet — unencrypted, should not be internet-facing'),
     ('U:137', 'HIGH', 'NetBIOS Name Service — should not be internet-facing'),
@@ -1630,6 +1636,24 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
                         add('INFO', ip, port_str,
                             'IPMI Service Detected',
                             f'IPMI management interface is accessible. {out[:200]}')
+
+                # ── vnc-info (no-auth VNC) ────────────────────────────────────
+                if 'vnc-info' in scripts:
+                    out = scripts['vnc-info']
+                    if 'None' in out and 'Security types' in out:
+                        add('CRITICAL', ip, port_str,
+                            'VNC No Authentication Required',
+                            'The VNC server accepts connections with no password (security type "None"). '
+                            'Any client can view and control the desktop without credentials.')
+
+                # ── realvnc-auth-bypass (CVE-2006-2369) ──────────────────────
+                if 'realvnc-auth-bypass' in scripts:
+                    out = scripts['realvnc-auth-bypass']
+                    if 'VULNERABLE' in out and 'NOT VULNERABLE' not in out:
+                        add('HIGH', ip, port_str,
+                            'RealVNC Authentication Bypass (CVE-2006-2369)',
+                            'RealVNC 4.1.0–4.1.1 allows unauthenticated access by sending a '
+                            'crafted client security-type response. Upgrade to 4.1.2 or later.')
 
                 # ── jdwp-info (JDWP Java debugger — any output confirms live) ──
                 if 'jdwp-info' in scripts and scripts['jdwp-info'].strip():

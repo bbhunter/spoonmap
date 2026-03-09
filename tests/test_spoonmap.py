@@ -2271,6 +2271,68 @@ class TestIPMIFindings:
         assert '10.0.1.5' in content
 
 
+class TestVNCFindings:
+    """VNC findings from vnc-info and realvnc-auth-bypass scripts."""
+
+    def test_vnc_no_auth_critical(self, nmap_dir):
+        """vnc-info output with security type None -> CRITICAL finding."""
+        xml = _nmap_xml(
+            '10.0.2.1', 'tcp', '5900',
+            scripts={'vnc-info': 'Protocol version: 3.8\nSecurity types:\n  None (1)\n  VNC Authentication (2)'})
+        (nmap_dir / 'nmap_results' / 'port5900.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'VNC No Authentication Required' in content
+        assert 'CRITICAL' in content
+        assert '10.0.2.1' in content
+
+    def test_vnc_auth_required_no_finding(self, nmap_dir):
+        """vnc-info output with only VNC Authentication -> no CRITICAL finding."""
+        xml = _nmap_xml(
+            '10.0.2.2', 'tcp', '5900',
+            scripts={'vnc-info': 'Protocol version: 3.8\nSecurity types:\n  VNC Authentication (2)'})
+        (nmap_dir / 'nmap_results' / 'port5900.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        findings_file = nmap_dir / 'findings.txt'
+        if findings_file.exists():
+            assert 'VNC No Authentication Required' not in findings_file.read_text()
+
+    def test_realvnc_bypass_vulnerable_high(self, nmap_dir):
+        """realvnc-auth-bypass output contains VULNERABLE -> HIGH finding."""
+        xml = _nmap_xml(
+            '10.0.2.3', 'tcp', '5900',
+            scripts={'realvnc-auth-bypass': 'VULNERABLE\n  RealVNC 4.1.1 Authentication Bypass'})
+        (nmap_dir / 'nmap_results' / 'port5900.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'RealVNC Authentication Bypass' in content
+        assert 'HIGH' in content
+        assert '10.0.2.3' in content
+
+    def test_realvnc_bypass_not_vulnerable_no_finding(self, nmap_dir):
+        """realvnc-auth-bypass output contains NOT VULNERABLE -> no finding."""
+        xml = _nmap_xml(
+            '10.0.2.4', 'tcp', '5900',
+            scripts={'realvnc-auth-bypass': 'NOT VULNERABLE'})
+        (nmap_dir / 'nmap_results' / 'port5900.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        findings_file = nmap_dir / 'findings.txt'
+        if findings_file.exists():
+            assert 'RealVNC Authentication Bypass' not in findings_file.read_text()
+
+    def test_vnc_on_port_5901(self, nmap_dir):
+        """vnc-info no-auth on port 5901 -> CRITICAL finding."""
+        xml = _nmap_xml(
+            '10.0.2.5', 'tcp', '5901',
+            scripts={'vnc-info': 'Protocol version: 3.8\nSecurity types:\n  None (1)'})
+        (nmap_dir / 'nmap_results' / 'port5901.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'VNC No Authentication Required' in content
+        assert 'CRITICAL' in content
+        assert '10.0.2.5' in content
+
+
 # ── _parse_masscan_ping_xml ───────────────────────────────────────────────────
 
 def _masscan_ping_xml(*ips):
