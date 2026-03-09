@@ -214,9 +214,9 @@ Inter-scan wait: 29s (target ~256 hosts)
 
 When `script_scan` is enabled, nmap runs targeted NSE scripts against relevant ports. Scripts are chosen based on scan type (External vs Internal):
 
-**External scans** run: `ftp-anon`, `ssh-auth-methods`, `ssh2-enum-algos`, `*-ntlm-info`, `ssl-cert`, `ms-sql-ntlm-info`, `rdp-ntlm-info`, `docker-version`, `snmp-brute`, `snmp-sysdescr`, `ajp-headers`, `x11-access`, `dameware-detect` (custom, 6129), `cucm-detect` (custom, 6970)
+**External scans** run: `ftp-anon`, `ssh-auth-methods`, `ssh2-enum-algos`, `*-ntlm-info`, `ssl-cert`, `ms-sql-ntlm-info`, `rdp-ntlm-info`, `docker-version`, `snmp-brute`, `snmp-sysdescr`, `ajp-headers`, `x11-access`, `dameware-detect` (custom, 6129), `cucm-detect` (custom, 6970), `ipmi-version`, `ipmi-cipher-zero`, `ipmi-hashdump` (custom, U:623)
 
-**Internal scans** run: `ftp-anon`, `rpcinfo`, `nfs-showmount`, `nfs-ls`, `smb-security-mode`, `smb2-security-mode`, `smb-vuln-ms17-010`, `smb-vuln-ms08-067`, `smb-double-pulsar-backdoor`, `smb-vuln-cve-2017-7494`, `rmi-dumpregistry`, `ms-sql-info`, `docker-version`, `snmp-brute`, `snmp-sysdescr`, `ajp-headers`, `x11-access`, `jdwp-info` (5005), `http-title` (8001), `banner` (61616), `dameware-detect` (custom, 6129), `cucm-detect` (custom, 6970), `nodejs-inspector` (custom, 9229), `kubelet-anon-check` (custom, 10250), `delve-debugger` (custom, 2345)
+**Internal scans** run: `ftp-anon`, `rpcinfo`, `nfs-showmount`, `nfs-ls`, `smb-security-mode`, `smb2-security-mode`, `smb-vuln-ms17-010`, `smb-vuln-ms08-067`, `smb-double-pulsar-backdoor`, `smb-vuln-cve-2017-7494`, `rmi-dumpregistry`, `ms-sql-info`, `docker-version`, `snmp-brute`, `snmp-sysdescr`, `ajp-headers`, `x11-access`, `jdwp-info` (5005), `http-title` (8001), `banner` (61616), `dameware-detect` (custom, 6129), `cucm-detect` (custom, 6970), `nodejs-inspector` (custom, 9229), `kubelet-anon-check` (custom, 10250), `delve-debugger` (custom, 2345), `ipmi-version`, `ipmi-cipher-zero`, `ipmi-hashdump` (custom, U:623)
 
 Port 9100 (JetDirect raw printing protocol) is included in the Specialized category. Hosts with port 9100 open are identified as printers; SNMP default community string and anonymous FTP findings are suppressed for these hosts to reduce noise.
 
@@ -236,6 +236,7 @@ After scanning, `generate_findings()` parses all nmap XML results and produces s
 | CRITICAL | Kubernetes Kubelet Anonymous Access (10250, confirmed by custom NSE) |
 | CRITICAL | SNMP Accepts Any Community String (community-string auth effectively disabled) |
 | CRITICAL | SNMP Default Community String — read-write on network device (router/switch/firewall) |
+| CRITICAL | IPMI Cipher Zero Authentication Bypass (CVE-2013-4786) |
 | CRITICAL | Service Exposed Externally (Docker API, Swarm, debugger/container ports — external scan only) |
 | HIGH | Anonymous FTP login |
 | HIGH | Weak SSH authentication (password/keyboard-interactive — external scan only) |
@@ -251,6 +252,7 @@ After scanning, `generate_findings()` parses all nmap XML results and produces s
 | HIGH | ActiveMQ broker exposed (61616, CVE-2023-46604) |
 | HIGH | SNMP Default Community String — read-write, non-network device (non-printer hosts only) |
 | HIGH | Kubernetes Dashboard Accessible (8001, confirmed by `http-title`) |
+| HIGH | IPMI RAKP Hash Captured — offline cracking with hashcat mode 7300 |
 | HIGH | Service Exposed Externally (databases, RDP, SMB, SNMP, WebLogic, etc. — external scan only) |
 | MEDIUM | SMBv1 protocol enabled |
 | MEDIUM | Weak SSH algorithms (deprecated ciphers/MACs/KEX) |
@@ -258,6 +260,7 @@ After scanning, `generate_findings()` parses all nmap XML results and produces s
 | MEDIUM | Expired TLS certificate (external scan only) |
 | MEDIUM | Possible Cisco CUCM TFTP (Unconfirmed) (6970 open, NSE did not confirm) |
 | LOW | SNMP Default Community String — read-only, non-network device (non-printer hosts only) |
+| INFO | IPMI Service Detected |
 | INFO | SQL Server instance discovered |
 
 On Internal scans, if `ms-sql-info` discovers SQL Server named instances on non-standard ports, nmap is automatically re-run against those ports.
@@ -284,6 +287,7 @@ On Internal scans, if `ms-sql-info` discovers SQL Server named instances on non-
 | 9229 | Node.js Inspector | Auto-detected by `script_scan`; arbitrary code execution via CDP |
 | 10250 | Kubernetes Kubelet API | Auto-detected by `script_scan`; arbitrary pod exec |
 | 61616 | Apache ActiveMQ | Auto-detected by `script_scan`; RCE via CVE-2023-46604 |
+| U:623 | IPMI / BMC | Cipher Zero auto-detected (CRITICAL); RAKP hash captured for offline crack (HIGH) |
 
 ### References
 
@@ -304,3 +308,4 @@ On Internal scans, if `ms-sql-info` discovers SQL Server named instances on non-
 - **Node.js Inspector (9229)** — Arbitrary code execution via Chrome DevTools Protocol; `node --inspect` · [PoC](https://github.com/nicowillis/node-inspector-rce)
 - **Kubernetes Kubelet (10250)** — [Rapid7 module](https://www.rapid7.com/db/modules/exploit/multi/http/kubelet_exec_endpoint) · arbitrary pod exec
 - **ActiveMQ (61616)** — [CVE-2023-46604 PoC](https://github.com/X1r0z/ActiveMQ-RCE) · [Rapid7 module](https://www.rapid7.com/db/modules/exploit/multi/misc/apache_activemq_rce_cve_2023_46604)
+- **IPMI (U:623)** — [US-CERT TA13-207A](https://www.cisa.gov/news-events/alerts/2013/07/26/risks-using-intelligent-platform-management-interface-ipmi) · [hashcat mode 7300](https://hashcat.net/wiki/doku.php?id=hashcat)

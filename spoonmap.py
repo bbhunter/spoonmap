@@ -1066,6 +1066,7 @@ EXTERNAL_PORT_SCRIPTS = {
     '6000':  'x11-access',
     '8443':  'ssl-cert',
     '10443': 'ssl-cert',
+    'U:623': f'ipmi-version,ipmi-cipher-zero,{_DIR}/nse/ipmi-hashdump.nse',
 }
 
 # Scripts run on INTERNAL scans only (no ssl-cert — not relevant for internal assessments)
@@ -1101,6 +1102,7 @@ INTERNAL_PORT_SCRIPTS = {
     '636':   f'{_DIR}/nse/ldap-channel-binding-check.nse',
     '3268':  f'{_DIR}/nse/ldap-signing-check.nse',
     '3269':  f'{_DIR}/nse/ldap-channel-binding-check.nse',
+    'U:623': f'ipmi-version,ipmi-cipher-zero,{_DIR}/nse/ipmi-hashdump.nse',
 }
 
 # Ports that use multiple concurrent NSE scripts; omit --source-port to prevent
@@ -1138,6 +1140,7 @@ EXTERNAL_SENSITIVE_PORTS = [
     ('111',   'HIGH', 'RPC/NFS — should not be internet-facing'),
     ('U:161', 'HIGH', 'SNMP — should not be internet-facing'),
     ('161',   'HIGH', 'SNMP — should not be internet-facing'),
+    ('U:623', 'CRITICAL', 'IPMI — BMC management interface should never be internet-facing'),
     ('3389',  'HIGH', 'RDP — direct internet exposure is high risk'),
     ('21',    'HIGH', 'FTP — should not be exposed unless wrapped in SSL/SSH'),
     ('23',    'HIGH', 'Telnet — unencrypted, should not be internet-facing'),
@@ -1174,7 +1177,7 @@ SERVICE_CATEGORIES = {
         '389', '636'
     ],
     'Network Infrastructure': [
-        '53', '179', 'U:500', 'U:161'
+        '53', '179', 'U:500', 'U:161', 'U:623'
     ],
     'File Transfer': [
         '21', '111'
@@ -1598,6 +1601,35 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
                         if out:
                             add('INFO', ip, port_str, 'SQL Server Instance Discovered',
                                 out[:300])
+
+                # ── ipmi-cipher-zero (CVE-2013-4786 Cipher Zero auth bypass) ──
+                if 'ipmi-cipher-zero' in scripts:
+                    out = scripts['ipmi-cipher-zero']
+                    if 'VULNERABLE' in out and 'NOT VULNERABLE' not in out:
+                        add('CRITICAL', ip, port_str,
+                            'IPMI Cipher Zero Authentication Bypass (CVE-2013-4786)',
+                            'IPMI 2.0 is configured with cipher suite 0, allowing authentication '
+                            'with any password using a valid username. Default accounts (e.g. "admin") '
+                            'grant full BMC control: power, console, and firmware access.')
+
+                # ── ipmi-hashdump (RAKP hash captured for offline cracking) ───
+                if 'ipmi-hashdump' in scripts:
+                    out = scripts['ipmi-hashdump']
+                    if '$rakp$' in out:
+                        add('HIGH', ip, port_str,
+                            'IPMI RAKP Hash Captured (Offline Cracking Risk)',
+                            'The BMC responded to an unauthenticated RAKP-1 request and returned an '
+                            'HMAC-SHA1 hash. This hash can be cracked offline using hashcat (mode 7300). '
+                            'BMC default credentials (admin/admin) are common; cracking yields full '
+                            'power/console/firmware control.')
+
+                # ── ipmi-version (IPMI service detected) ──────────────────────
+                if 'ipmi-version' in scripts:
+                    out = scripts['ipmi-version'].strip()
+                    if out:
+                        add('INFO', ip, port_str,
+                            'IPMI Service Detected',
+                            f'IPMI management interface is accessible. {out[:200]}')
 
                 # ── jdwp-info (JDWP Java debugger — any output confirms live) ──
                 if 'jdwp-info' in scripts and scripts['jdwp-info'].strip():

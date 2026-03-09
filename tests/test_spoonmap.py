@@ -2213,6 +2213,64 @@ class TestLdapSecurityFindings:
         assert 'Global Catalog Signing Not Required' in content
 
 
+class TestIPMIFindings:
+    """IPMI findings from ipmi-cipher-zero, ipmi-hashdump, and ipmi-version scripts."""
+
+    def test_cipher_zero_vulnerable_critical(self, nmap_dir):
+        """ipmi-cipher-zero output contains VULNERABLE -> CRITICAL finding."""
+        xml = _nmap_xml('10.0.1.1', 'udp', '623',
+                        scripts={'ipmi-cipher-zero': 'VULNERABLE (cipher suite 0)'})
+        (nmap_dir / 'nmap_results' / 'portU:623.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'IPMI Cipher Zero Authentication Bypass' in content
+        assert 'CRITICAL' in content
+        assert '10.0.1.1' in content
+
+    def test_cipher_zero_not_vulnerable_no_finding(self, nmap_dir):
+        """ipmi-cipher-zero output does not contain VULNERABLE -> no CRITICAL finding."""
+        xml = _nmap_xml('10.0.1.2', 'udp', '623',
+                        scripts={'ipmi-cipher-zero': 'NOT VULNERABLE'})
+        (nmap_dir / 'nmap_results' / 'portU:623.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        findings_file = nmap_dir / 'findings.txt'
+        if findings_file.exists():
+            assert 'IPMI Cipher Zero Authentication Bypass' not in findings_file.read_text()
+
+    def test_hashdump_hash_captured_high(self, nmap_dir):
+        """ipmi-hashdump output contains $rakp$ -> HIGH finding."""
+        xml = _nmap_xml(
+            '10.0.1.3', 'udp', '623',
+            scripts={'ipmi-hashdump': 'Username: admin\nHash: $rakp$aabbcc$ddeeff'})
+        (nmap_dir / 'nmap_results' / 'portU:623.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'IPMI RAKP Hash Captured' in content
+        assert 'HIGH' in content
+        assert '10.0.1.3' in content
+
+    def test_hashdump_empty_no_finding(self, nmap_dir):
+        """ipmi-hashdump absent (no hash returned) -> no HIGH finding."""
+        xml = _nmap_xml('10.0.1.4', 'udp', '623')
+        (nmap_dir / 'nmap_results' / 'portU:623.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        findings_file = nmap_dir / 'findings.txt'
+        if findings_file.exists():
+            assert 'IPMI RAKP Hash Captured' not in findings_file.read_text()
+
+    def test_ipmi_version_detected_info(self, nmap_dir):
+        """ipmi-version non-empty output -> INFO finding."""
+        xml = _nmap_xml(
+            '10.0.1.5', 'udp', '623',
+            scripts={'ipmi-version': 'Version: 2.0\nUser Level: Administrator'})
+        (nmap_dir / 'nmap_results' / 'portU:623.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'IPMI Service Detected' in content
+        assert 'INFO' in content
+        assert '10.0.1.5' in content
+
+
 # ── _parse_masscan_ping_xml ───────────────────────────────────────────────────
 
 def _masscan_ping_xml(*ips):
