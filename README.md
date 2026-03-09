@@ -33,7 +33,7 @@ Service Categories (comma-separated numbers, default: All)
 	(3) Remote Management  [22, 23, 3389, 5900, 5901, 6129, 1723, 5985, 5986]
 	(4) Email        [25, 110, 143, 465, 587, 993, 995]
 	(5) LDAP         [389, 636]
-	(6) Network Infrastructure  [53, 179, U:500, U:161]
+	(6) Network Infrastructure  [53, 179, U:500, U:161, U:623]
 	(7) File Transfer      [21, 111]
 	(8) SMB          [445, 135, 139, U:137]
 	(9) Specialized  [1090, 3300, 4786, 6970, 2375, 4243, 9100]
@@ -111,6 +111,20 @@ uv run spoonmap.py --cleanup
 ./spoonmap.py --cleanup /path/to/output
 ```
 
+## Target File (ranges.txt)
+
+`ranges.txt` is committed to the repository as an empty placeholder and is marked `skip-worktree`, so git will never stage local edits to it. Fill it with your target ranges freely — they will never be accidentally committed.
+
+To manage the skip-worktree flag manually:
+
+```bash
+# Stop tracking local changes (already set — no action needed on a fresh clone)
+git update-index --skip-worktree ranges.txt
+
+# Resume tracking (e.g. to intentionally commit changes)
+git update-index --no-skip-worktree ranges.txt
+```
+
 ## config.json Parameters
 
 | Key | Values | Notes |
@@ -122,7 +136,7 @@ uv run spoonmap.py --cleanup
 | `host_discovery` | `"True"` / `"False"` | Run masscan ping + TCP SYN host discovery before port scanning; narrows target set (default: True) |
 | `target_scan` | `"External"` / `"Internal"` | External → source port 53; Internal → source port 88 |
 | `max_rate` | Packets/second string | See rate guidance below |
-| `target_file` | Path | One IP, CIDR, or hostname per line |
+| `target_file` | Path | One IP, CIDR, or hostname per line; `ranges.txt` is committed as a blank placeholder (see below) |
 | `output_path` | Path | Directory for all output; relative paths resolve to script dir |
 | `exclusions_file` | Path | IPs/CIDRs passed to masscan `--excludefile` |
 | `nmap_threads` | Integer | Concurrent nmap processes (default: 5) |
