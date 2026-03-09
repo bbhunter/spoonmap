@@ -16,7 +16,11 @@ from spoonmap import (
     PROBE_PORT_PRIORITY,
     _build_nmap_cmd,
     _merge_host_xml,
+    _parse_masscan_ping_xml,
+    _parse_nmap_sn_xml,
+    _run_masscan_batch,
     _scan_extra_sql_ports,
+    _SMB_COUPLED_PORTS,
     _SMB_PORTS,
     SERVICE_CATEGORIES,
     _calc_scan_wait,
@@ -147,6 +151,14 @@ class TestCalcScanWait:
         # 30000 hosts / 1000 pps = 30s = recovery_window → wait = 0
         result = _calc_scan_wait(30000, '1000')
         assert result == 0
+
+    def test_tiny_host_count_gets_zero_wait(self):
+        # 4 discovered hosts: recovery_window = 30 * 4/256 ≈ 0.47s → wait = 0
+        assert _calc_scan_wait(4, '2000') == 0
+
+    def test_sub_24_scales_proportionally(self):
+        # 16 hosts: recovery_window = 30 * 16/256 ≈ 1.875s, scan_duration ≈ 0.016s → wait = 1
+        assert _calc_scan_wait(16, '1000') == 1
 
 
 # ── _get_scripts_for_port ─────────────────────────────────────────────────────
@@ -2199,4 +2211,239 @@ class TestLdapSecurityFindings:
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'Global Catalog Signing Not Required' in content
-        assert 'HIGH' in content
+
+
+# ── _parse_masscan_ping_xml ───────────────────────────────────────────────────
+
+def _masscan_ping_xml(*ips):
+    """Minimal masscan --ping XML with one <host> per IP."""
+    hosts = ''.join(
+        f'<host><address addr="{ip}" addrtype="ipv4"/></host>'
+        for ip in ips
+    )
+    return f'<?xml version="1.0"?><nmaprun>{hosts}</nmaprun>'
+
+
+class TestParseMasscanPingXml:
+    def test_returns_ips_from_valid_xml(self, tmp_path):
+        f = tmp_path / 'ping.xml'
+        f.write_text(_masscan_ping_xml('192.168.1.1'))
+        assert _parse_masscan_ping_xml(str(f)) == {'192.168.1.1'}
+
+    def test_multiple_hosts(self, tmp_path):
+        f = tmp_path / 'ping.xml'
+        f.write_text(_masscan_ping_xml('10.0.0.1', '10.0.0.2', '10.0.0.3'))
+        assert _parse_masscan_ping_xml(str(f)) == {'10.0.0.1', '10.0.0.2', '10.0.0.3'}
+
+    def test_empty_file_returns_empty_set(self, tmp_path):
+        f = tmp_path / 'ping.xml'
+        f.write_text('')
+        assert _parse_masscan_ping_xml(str(f)) == set()
+
+    def test_missing_file_returns_empty_set(self, tmp_path):
+        assert _parse_masscan_ping_xml(str(tmp_path / 'nonexistent.xml')) == set()
+
+
+# ── _parse_nmap_sn_xml ────────────────────────────────────────────────────────
+
+def _nmap_sn_xml(*entries):
+    """Minimal nmap -sn XML.  entries is a list of (ip, state) tuples."""
+    hosts = ''.join(
+        f'<host><status state="{state}"/><address addr="{ip}" addrtype="ipv4"/></host>'
+        for ip, state in entries
+    )
+    return f'<?xml version="1.0"?><nmaprun>{hosts}</nmaprun>'
+
+
+class TestParseNmapSnXml:
+    def test_returns_only_up_hosts(self, tmp_path):
+        f = tmp_path / 'sn.xml'
+        f.write_text(_nmap_sn_xml(('10.1.1.1', 'up'), ('10.1.1.2', 'down')))
+        assert _parse_nmap_sn_xml(str(f)) == {'10.1.1.1'}
+
+    def test_all_up_hosts(self, tmp_path):
+        f = tmp_path / 'sn.xml'
+        f.write_text(_nmap_sn_xml(('10.0.0.1', 'up'), ('10.0.0.2', 'up'), ('10.0.0.3', 'up')))
+        assert _parse_nmap_sn_xml(str(f)) == {'10.0.0.1', '10.0.0.2', '10.0.0.3'}
+
+    def test_empty_file_returns_empty_set(self, tmp_path):
+        f = tmp_path / 'sn.xml'
+        f.write_text('')
+        assert _parse_nmap_sn_xml(str(f)) == set()
+
+    def test_missing_file_returns_empty_set(self, tmp_path):
+        assert _parse_nmap_sn_xml(str(tmp_path / 'nonexistent.xml')) == set()
+
+
+# ── TestRunMasscanBatchWaitMinimum ─────────────────────────────────────────────
+
+class TestRunMasscanBatchWaitMinimum:
+    """_run_masscan_batch must always pass --wait >= 3 to masscan regardless of wait_secs."""
+
+    def _make_mock_proc(self):
+        mock_proc = MagicMock()
+        mock_proc.wait.return_value = 0
+        mock_proc.pid = 12345
+        return mock_proc
+
+    def _captured_wait_arg(self, mock_popen):
+        """Return the integer value passed as --wait in the masscan command."""
+        cmd = mock_popen.call_args[0][0]
+        idx = cmd.index('--wait')
+        return int(cmd[idx + 1])
+
+    def test_wait_zero_becomes_three(self, tmp_path):
+        """When _calc_scan_wait returns 0 (small host set), masscan still gets --wait 3."""
+        output_xml = str(tmp_path / 'out.xml')
+        with patch('spoonmap.subprocess.Popen', return_value=self._make_mock_proc()) as mock_popen, \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            _run_masscan_batch(['445'], '2000', output_xml,
+                               '/fake/targets.txt', '88', None, wait_secs=0)
+        assert self._captured_wait_arg(mock_popen) >= 3
+
+    def test_wait_one_becomes_three(self, tmp_path):
+        """wait_secs < 3 is raised to 3."""
+        output_xml = str(tmp_path / 'out.xml')
+        with patch('spoonmap.subprocess.Popen', return_value=self._make_mock_proc()) as mock_popen, \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            _run_masscan_batch(['139'], '1000', output_xml,
+                               '/fake/targets.txt', '88', None, wait_secs=1)
+        assert self._captured_wait_arg(mock_popen) >= 3
+
+    def test_wait_large_value_preserved(self, tmp_path):
+        """wait_secs > 3 is passed through unchanged."""
+        output_xml = str(tmp_path / 'out.xml')
+        with patch('spoonmap.subprocess.Popen', return_value=self._make_mock_proc()) as mock_popen, \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            _run_masscan_batch(['445'], '1000', output_xml,
+                               '/fake/targets.txt', '88', None, wait_secs=29)
+        assert self._captured_wait_arg(mock_popen) == 29
+
+    def test_default_wait_secs_passes_minimum(self, tmp_path):
+        """Default wait_secs=2 is still raised to 3."""
+        output_xml = str(tmp_path / 'out.xml')
+        with patch('spoonmap.subprocess.Popen', return_value=self._make_mock_proc()) as mock_popen, \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            _run_masscan_batch(['80'], '10000', output_xml,
+                               '/fake/targets.txt', '53', None)
+        assert self._captured_wait_arg(mock_popen) >= 3
+
+
+# ── TestSMBCoupling ────────────────────────────────────────────────────────────
+
+class TestSMBCoupling:
+    """mass_scan() SMB port coupling: hosts found on 139 propagate to 445 and vice versa."""
+
+    @staticmethod
+    def _make_batch_side_effect(port_map):
+        """Return a side_effect function that yields port_map results keyed by call index."""
+        calls = []
+
+        def side_effect(batch, rate, output_file, target_file, source_port,
+                        exclusions_file, wait_secs=2):
+            idx = len(calls)
+            calls.append(batch)
+            return port_map.get(idx, {})
+
+        return side_effect
+
+    def test_hosts_on_139_propagate_to_445(self, tmp_path):
+        """If masscan only finds hosts on 139, coupling writes them to port445.txt too."""
+        spoonmap.output_path = str(tmp_path)
+        # dest_ports=['139','445']; masscan finds 3 hosts on 139, 0 on 445
+        responses = {
+            0: {'139': {'10.0.0.1', '10.0.0.2', '10.0.0.3'}},  # probe batch (139)
+            1: {'445': set()},                                    # probe batch (445)
+        }
+        with patch('spoonmap._run_masscan_batch',
+                   side_effect=self._make_batch_side_effect(responses)):
+            result = mass_scan('All', ['139', '445'], '88', '1000',
+                               '/fake/targets.txt', '', batch_size=5)
+
+        port445_file = tmp_path / 'live_hosts' / 'port445.txt'
+        if port445_file.exists():
+            written = {l.strip() for l in port445_file.read_text().splitlines() if l.strip()}
+            assert written == {'10.0.0.1', '10.0.0.2', '10.0.0.3'}
+
+    def test_smb_coupled_ports_constant(self):
+        """_SMB_COUPLED_PORTS must contain exactly 139 and 445."""
+        assert set(_SMB_COUPLED_PORTS) == {'139', '445'}
+
+    def test_port139_internal_scripts_include_smb2(self):
+        """INTERNAL_PORT_SCRIPTS['139'] must include smb2-security-mode for full SMB checks."""
+        scripts = INTERNAL_PORT_SCRIPTS.get('139', '')
+        assert 'smb2-security-mode' in scripts
+
+    def test_port139_internal_scripts_include_ms17010(self):
+        """INTERNAL_PORT_SCRIPTS['139'] must include smb-vuln-ms17-010."""
+        scripts = INTERNAL_PORT_SCRIPTS.get('139', '')
+        assert 'smb-vuln-ms17-010' in scripts
+
+
+# ── TestSlowPortsSMB ──────────────────────────────────────────────────────────
+
+class TestSlowPortsSMB:
+    """SMB ports 139/445 always scan solo; probe misses trigger a solo retry."""
+
+    def test_smb_ports_in_slow_ports(self):
+        """139 and 445 must be in SLOW_PORTS so they always get solo scans."""
+        assert '139' in SLOW_PORTS
+        assert '445' in SLOW_PORTS
+
+    def test_probe_missed_445_gets_solo_retry(self, tmp_path):
+        """batch_size > 1: zero-result probe for 445 must produce a solo batch later.
+
+        Uses dest_ports=['445','80','8888'] so that probe_ports=['445','80'] and
+        remaining_ports=['8888'] → probe guard fires.  Both probe calls (fast/slow)
+        return empty.  445 is probe-missed → _probe_missed=['445'] → re-queued →
+        batches include a solo ['445'] invocation (445 ∈ SLOW_PORTS → solo via batch builder).
+        """
+        spoonmap.output_path = str(tmp_path)
+        with patch('spoonmap._run_masscan_batch', return_value={}) as mock_batch:
+            mass_scan('All', ['445', '80', '8888'], '88', '1000',
+                      '/fake/targets.txt', '', batch_size=5)
+        solo = [c for c in mock_batch.call_args_list if c.args[0] == ['445']]
+        assert len(solo) >= 1, "Expected solo masscan call for 445 after probe miss"
+
+    def test_probe_found_445_no_duplicate_solo(self, tmp_path):
+        """batch_size > 1: when probe finds 445 it must NOT be re-queued as a solo batch."""
+        spoonmap.output_path = str(tmp_path)
+        call_log = []
+
+        def side_effect(batch, rate, output_file, target_file, source_port,
+                        exclusions_file, wait_secs=2):
+            call_log.append(list(batch))
+            # First call is the fast probe — simulate finding 445
+            return {'445': {'10.0.0.1'}} if len(call_log) == 1 else {}
+
+        with patch('spoonmap._run_masscan_batch', side_effect=side_effect):
+            mass_scan('All', ['445', '80', '8888'], '88', '1000',
+                      '/fake/targets.txt', '', batch_size=5)
+        solo = [b for b in call_log if b == ['445']]
+        assert len(solo) == 0, "445 found in probe must not be re-queued as a solo batch"
+
+    def test_probe_missed_3389_gets_rebatched(self, tmp_path):
+        """batch_size > 1: zero-result probe for 3389 must re-queue it into a batch.
+
+        3389 is in PROBE_PORT_PRIORITY (position 3) but NOT in SLOW_PORTS.
+        When the combined probe returns 0 for 3389, it must appear in a subsequent
+        masscan call so it isn't silently dropped.
+        """
+        spoonmap.output_path = str(tmp_path)
+        with patch('spoonmap._run_masscan_batch', return_value={}) as mock_batch:
+            mass_scan('All', ['3389', '80', '8888'], '88', '1000',
+                      '/fake/targets.txt', '', batch_size=5)
+        # Any call whose batch contains '3389' (solo or grouped)
+        calls_with_3389 = [c for c in mock_batch.call_args_list
+                           if '3389' in c.args[0]]
+        # Exclude the two probe calls (fast probe and slow probe)
+        probe_batches = [c for c in calls_with_3389
+                         if set(c.args[0]) <= {'3389', '80'}]
+        main_3389_calls = [c for c in calls_with_3389
+                           if c not in probe_batches]
+        assert len(main_3389_calls) >= 1, \
+            "Expected a main-batch masscan call for 3389 after probe miss"

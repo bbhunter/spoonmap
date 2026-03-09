@@ -219,6 +219,148 @@ def _get_scripts_for_port(dest_port, target_scan):
     return table.get(dest_port)
 
 
+def _parse_masscan_ping_xml(xml_file):
+    """Return set of IPs from a masscan --ping XML output file."""
+    ips = set()
+    if not os.path.exists(xml_file) or os.stat(xml_file).st_size == 0:
+        return ips
+    try:
+        root = etree.parse(xml_file)
+        for host in root.findall('host'):
+            addr_elem = host.find('address')
+            if addr_elem is not None:
+                ips.add(addr_elem.attrib['addr'])
+    except etree.ParseError:
+        pass
+    return ips
+
+
+def _parse_nmap_sn_xml(xml_file):
+    """Return set of IPs from a nmap -sn XML output where status is 'up'."""
+    ips = set()
+    if not os.path.exists(xml_file) or os.stat(xml_file).st_size == 0:
+        return ips
+    try:
+        root = etree.parse(xml_file)
+        for host in root.findall('host'):
+            status = host.find('status')
+            if status is not None and status.attrib.get('state') == 'up':
+                addr_elem = host.find('address')
+                if addr_elem is not None:
+                    ips.add(addr_elem.attrib['addr'])
+    except etree.ParseError:
+        pass
+    return ips
+
+
+def _host_discovery(target_file, output_path, max_rate, exclusions_file,
+                    scan_type='Internal', resume=False):
+    """Run masscan --ping then masscan TCP SYN probe; union results; write live_hosts_discovery.txt.
+
+    Uses --open on the TCP SYN scan so only SYN-ACK responders (real open ports) are reported.
+    Immune to proxy-ARP and virtualised-switch RST proxying, which cause nmap -sn to report
+    false positives (nmap treats TCP RST as "host up").
+
+    Returns live_hosts_discovery.txt path, or None if 0 hosts found
+    (probe will scan the full target range anyway on ICMP-blocked networks).
+    """
+    discovery_file = os.path.join(output_path, 'live_hosts_discovery.txt')
+
+    if resume and os.path.exists(discovery_file):
+        with open(discovery_file) as fh:
+            count = sum(1 for line in fh if line.strip())
+        print(_COLOR_INFO + f'Resume: skipping host discovery ({count} hosts cached)' + _COLOR_RESET)
+        return discovery_file
+
+    masscan_xml     = os.path.join(output_path, 'discovery_masscan.xml')
+    masscan_tcp_xml = os.path.join(output_path, 'discovery_masscan_tcp.xml')
+    live_ips = set()
+
+    # ── masscan ICMP ping ──────────────────────────────────────────────────────
+    print(_COLOR_INFO + 'Host discovery: running masscan --ping...' + _COLOR_RESET)
+    masscan_cmd = [
+        'masscan', '--ping',
+        '--max-rate', max_rate,
+        '-iL', target_file,
+        '-oX', masscan_xml,
+        '--wait', '3',
+    ]
+    if exclusions_file:
+        masscan_cmd.extend(['--excludefile', exclusions_file])
+    term_state = save_terminal_state()
+    try:
+        proc = subprocess.Popen(masscan_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc.wait()
+    except KeyboardInterrupt:
+        print(f'Killing PID {proc.pid}...')
+        proc.kill()
+        proc.wait()
+        restore_terminal_state(term_state)
+        raise
+    except FileNotFoundError:
+        print(_COLOR_ERROR + 'Error: masscan not found. Please install masscan.' + _COLOR_RESET)
+        restore_terminal_state(term_state)
+        quit(1)
+    finally:
+        restore_terminal_state(term_state)
+    live_ips.update(_parse_masscan_ping_xml(masscan_xml))
+    print(_COLOR_PROGRESS + f'Host discovery (masscan ping): {len(live_ips)} host(s)' + _COLOR_RESET)
+
+    # ── masscan TCP SYN probe ──────────────────────────────────────────────────
+    # Uses --open: only SYN-ACK responders (real open ports) are reported.
+    # Immune to proxy-ARP and virtualised-switch RST proxying, which cause
+    # nmap -sn to report false positives (nmap treats RST as "host up").
+    tcp_ports = (DISCOVERY_TCP_PORTS_INTERNAL
+                 if scan_type == 'Internal'
+                 else DISCOVERY_TCP_PORTS_EXTERNAL)
+    print(_COLOR_INFO + 'Host discovery: running masscan TCP SYN probe...' + _COLOR_RESET)
+    masscan_tcp_cmd = [
+        'masscan',
+        '-p', tcp_ports,
+        '--open',
+        '--max-rate', max_rate,
+        '-iL', target_file,
+        '-oX', masscan_tcp_xml,
+        '--wait', '3',
+    ]
+    if exclusions_file:
+        masscan_tcp_cmd.extend(['--excludefile', exclusions_file])
+    term_state = save_terminal_state()
+    try:
+        proc = subprocess.Popen(masscan_tcp_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc.wait()
+    except KeyboardInterrupt:
+        print(f'Killing PID {proc.pid}...')
+        proc.kill()
+        proc.wait()
+        restore_terminal_state(term_state)
+        raise
+    except FileNotFoundError:
+        print(_COLOR_ERROR + 'Error: masscan not found. Please install masscan.' + _COLOR_RESET)
+        restore_terminal_state(term_state)
+        quit(1)
+    finally:
+        restore_terminal_state(term_state)
+    tcp_ips = _parse_masscan_ping_xml(masscan_tcp_xml)
+    print(_COLOR_PROGRESS + f'Host discovery (masscan TCP): {len(tcp_ips)} host(s)' + _COLOR_RESET)
+    live_ips.update(tcp_ips)
+
+    total = len(live_ips)
+    print(_COLOR_PROGRESS + f'Host discovery total: {total} unique live host(s)' + _COLOR_RESET)
+
+    if not live_ips:
+        print(_COLOR_ERROR
+              + 'Warning: host discovery found 0 live hosts — probe will scan full target range.'
+              + _COLOR_RESET)
+        return None          # probe always uses full target range
+
+    with open(discovery_file, 'w') as fh:
+        for ip in sorted(live_ips, key=lambda x: tuple(int(o) for o in x.split('.'))):
+            fh.write(ip + '\n')
+
+    return discovery_file
+
+
 def _run_masscan_batch(batch, rate, output_file, target_file, source_port, exclusions_file, wait_secs=2):
     """Run masscan for one batch and return {port_key: set_of_ips}."""
     masscan_cmd = [
@@ -230,7 +372,7 @@ def _run_masscan_batch(batch, rate, output_file, target_file, source_port, exclu
         '-iL', target_file,
         '-oX', output_file,
         '--retries', '4',
-        '--wait', str(wait_secs),
+        '--wait', str(max(3, wait_secs)),
     ]
 
     if exclusions_file:
@@ -305,11 +447,17 @@ def _calc_scan_wait(host_count, rate):
     second, creating a sharp traffic burst that saturates the network for ~30 s.
     Larger ranges take longer to scan, spreading the load so no cooldown is
     needed.  Returns 0 when scan_duration >= recovery_window.
+
+    The recovery_window scales linearly with host count up to /24 (256 hosts).
+    Very small targets (e.g. 4 discovered hosts) send so few packets that no
+    saturation occurs and no inter-scan wait is needed.
     """
     if not host_count or host_count <= 0:
         return 2   # safe default when count is unknown
     scan_duration = host_count / max(1, int(rate))
-    recovery_window = 30   # seconds observed for a /24 at typical rates
+    # Calibrated at 30 s for /24 (256 hosts).  Scale proportionally for
+    # smaller bursts — fewer hosts → fewer packets → less network stress.
+    recovery_window = 30 * min(host_count, 256) / 256
     return max(0, int(recovery_window - scan_duration))
 
 
@@ -318,7 +466,11 @@ _RESULT_DIRS  = ('masscan_results', 'live_hosts', 'nmap_results')
 _RESULT_FILES = ('all_live_hosts.txt', 'masscan_targets.txt',
                  'ip_hostname_map.json', 'spoonmap_output.xml',
                  'spoonmap_output.json',
-                 'findings.txt', 'findings.md', 'findings.json')
+                 'findings.txt', 'findings.md', 'findings.json',
+                 'live_hosts_discovery.txt',
+                 'discovery_masscan.xml',
+                 'discovery_masscan_tcp.xml',
+                 'live_hosts_combined.txt')
 
 
 def _previous_results_exist(output_path):
@@ -345,7 +497,7 @@ def _delete_previous_results(output_path):
             os.remove(p)
 
 
-def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusions_file, batch_size=1, resume=False):
+def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusions_file, batch_size=1, resume=False, discovery_file=None):
     status_summary = '\nSummary'
 
     if not os.path.exists(f'{output_path}/masscan_results'):
@@ -360,11 +512,21 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
     # Full scans cover all 65535 ports in one invocation — cap to avoid saturation.
     full_scan_rate = str(min(int(max_rate), 10000 if source_port == '53' else 1000))
 
-    # Calculate --wait to prevent inter-scan saturation on small target ranges
-    target_host_count = _count_hosts_in_file(target_file)
+    # Calculate --wait to prevent inter-scan saturation on small target ranges.
+    # Use discovery file when available — its host count reflects the actual probe target.
+    _wait_count_file = (discovery_file
+                        if (discovery_file and os.path.exists(discovery_file))
+                        else target_file)
+    target_host_count = _count_hosts_in_file(_wait_count_file)
     wait_secs = _calc_scan_wait(target_host_count, max_rate)
     if wait_secs > 0 and target_host_count is not None:
         print(_COLOR_INFO + f'Inter-scan wait: {wait_secs}s (target ~{target_host_count:,} hosts)' + _COLOR_RESET)
+
+    # Probe and subsequent batches target discovered hosts when available,
+    # falling back to the full target file if discovery was skipped.
+    probe_target = (discovery_file
+                    if (discovery_file and os.path.exists(discovery_file))
+                    else target_file)
 
     # Full port scan: skip adaptive probe, run single masscan over 1-65535
     if scan_type == 'Full':
@@ -423,7 +585,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
                 print(_COLOR_INFO + f'Probe: scanning port {port} at {max_rate} pps...' + _COLOR_RESET)
                 port_fast = _run_masscan_batch([port], max_rate,
                     f'{output_path}/masscan_results/probe_fast_{pb_idx}.xml',
-                    target_file, source_port, exclusions_file, wait_secs=wait_secs)
+                    probe_target, source_port, exclusions_file, wait_secs=wait_secs)
                 for k, v in port_fast.items():
                     fast_results.setdefault(k, set()).update(v)
                 fast_ips = {ip for s in port_fast.values() for ip in s}
@@ -433,7 +595,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
                 print(_COLOR_INFO + f'Probe found 0 hosts at {max_rate} pps — checking {half_rate} pps...' + _COLOR_RESET)
                 port_slow = _run_masscan_batch([port], half_rate,
                     f'{output_path}/masscan_results/probe_slow_{pb_idx}.xml',
-                    target_file, source_port, exclusions_file, wait_secs=wait_secs)
+                    probe_target, source_port, exclusions_file, wait_secs=wait_secs)
                 for k, v in port_slow.items():
                     slow_results.setdefault(k, set()).update(v)
                 slow_ips = {ip for s in port_slow.values() for ip in s}
@@ -450,10 +612,10 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
             probe_label = ', '.join(probe_ports)
             print(_COLOR_INFO + f'Probe: scanning {probe_label} at {max_rate} pps then {half_rate} pps to check for packet loss...' + _COLOR_RESET)
             fast_results = _run_masscan_batch(probe_ports, max_rate,
-                f'{output_path}/masscan_results/probe_fast.xml', target_file, source_port, exclusions_file,
+                f'{output_path}/masscan_results/probe_fast.xml', probe_target, source_port, exclusions_file,
                 wait_secs=wait_secs)
             slow_results = _run_masscan_batch(probe_ports, half_rate,
-                f'{output_path}/masscan_results/probe_slow.xml', target_file, source_port, exclusions_file,
+                f'{output_path}/masscan_results/probe_slow.xml', probe_target, source_port, exclusions_file,
                 wait_secs=wait_secs)
             fast_ips = {ip for s in fast_results.values() for ip in s}
             slow_ips = {ip for s in slow_results.values() for ip in s}
@@ -479,8 +641,43 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
                 status_update = f'\nHosts Found on Port {port_key}: {host_count}'
                 status_summary += status_update
                 print(_COLOR_PROGRESS + status_update + _COLOR_RESET)
+
+        # When batch_size > 1, any probe port that returned zero results in the
+        # combined probe batch is re-queued into the main batch phase for a second
+        # chance. SLOW_PORTS among them still receive solo scans via the batch builder.
+        if batch_size > 1:
+            _probe_missed = [p for p in probe_ports_used
+                             if not fast_results.get(p) and not slow_results.get(p)]
+            if _probe_missed:
+                ports_to_batch = ports_to_batch + _probe_missed
+
+        # ── Build combined target: union(discovery IPs, probe IPs) ────────────
+        probe_ips = {ip
+                     for results in (fast_results, slow_results)
+                     for s in results.values()
+                     for ip in s}
+        _combined_ips = set(probe_ips)
+        if discovery_file and os.path.exists(discovery_file):
+            with open(discovery_file) as fh:
+                _combined_ips.update(line.strip() for line in fh if line.strip())
+        if _combined_ips:
+            combined_path = os.path.join(output_path, 'live_hosts_combined.txt')
+            with open(combined_path, 'w') as fh:
+                for ip in sorted(_combined_ips,
+                                 key=lambda x: tuple(int(o) for o in x.split('.'))):
+                    fh.write(ip + '\n')
+            batch_target = combined_path
+            print(_COLOR_INFO
+                  + f'Combined target: {len(_combined_ips)} host(s) for remaining port batches.'
+                  + _COLOR_RESET)
+        else:
+            batch_target = target_file
     else:
-        ports_to_batch = dest_ports  # no probe: batch all ports normally
+        # No probe ran — use discovery file if available, else full target
+        ports_to_batch = dest_ports
+        batch_target = discovery_file if (discovery_file and os.path.exists(discovery_file)) else target_file
+
+    batch_wait_secs = 0 if discovery_file else wait_secs
 
     normal = [p for p in ports_to_batch if p not in SLOW_PORTS]
     slow   = [p for p in ports_to_batch if p in SLOW_PORTS]
@@ -519,8 +716,8 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
 
         print(_COLOR_INFO + f'Scanning ports {batch_label}...' + _COLOR_RESET)
 
-        batch_results = _run_masscan_batch(batch, effective_rate, output_file, target_file, source_port, exclusions_file,
-                                           wait_secs=wait_secs)
+        batch_results = _run_masscan_batch(batch, effective_rate, output_file, batch_target, source_port, exclusions_file,
+                                           wait_secs=batch_wait_secs)
 
         if not batch_results:
             print(_COLOR_INFO + f'\nNo hosts found in batch {batch_idx + 1}/{total_batches} ({batch_label})' + _COLOR_RESET)
@@ -553,6 +750,24 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
                     print(_COLOR_PROGRESS + status_update + _COLOR_RESET)
 
             _print_completion_status('Masscan', batch_idx + 1, total_batches, scan_start_time)
+
+    # ── SMB port coupling ─────────────────────────────────────────────────────
+    smb_in_scope = [p for p in _SMB_COUPLED_PORTS if p in set(dest_ports)]
+    if len(smb_in_scope) == 2:
+        merged_smb = port_ips.get('139', set()) | port_ips.get('445', set())
+        if merged_smb:
+            for smb_port in smb_in_scope:
+                added = merged_smb - port_ips.get(smb_port, set())
+                if added:
+                    port_ips[smb_port] = merged_smb
+                    with open(f'{output_path}/live_hosts/port{smb_port}.txt', 'w') as _f:
+                        for _ip in sorted(merged_smb):
+                            _f.write(_ip + '\n')
+                    partner = '445' if smb_port == '139' else '139'
+                    print(_COLOR_INFO
+                          + f'SMB coupling: added {len(added)} host(s) to port {smb_port} '
+                          + f'(from port {partner})'
+                          + _COLOR_RESET)
 
     return status_summary
 
@@ -811,10 +1026,18 @@ EXTERNAL_PROBE_PORT_PRIORITY = [
     '8443',
 ]
 
+# TCP ports used for host discovery probes (replace ARP which produces proxy-ARP false positives
+# on virtualised networks where the hypervisor answers every ARP request).
+DISCOVERY_TCP_PORTS_INTERNAL = '22,80,135,139,443,445,3389'
+DISCOVERY_TCP_PORTS_EXTERNAL = '22,80,443,8080,8443'
+
 # Ports scanned solo (one per masscan invocation) regardless of batch_size.
 # These services have low traffic density and responses are easily crowded out
 # in multi-port batches at high scan rates.
-SLOW_PORTS = frozenset({'389', '636', '3268', '3269'})  # LDAP / Global Catalog family
+SLOW_PORTS = frozenset({
+    '139', '445',                    # SMB — high-value, easily crowded out in multi-port batches
+    '389', '636', '3268', '3269',    # LDAP / Global Catalog family
+})
 
 # Scripts run on EXTERNAL scans only
 EXTERNAL_PORT_SCRIPTS = {
@@ -849,7 +1072,7 @@ EXTERNAL_PORT_SCRIPTS = {
 INTERNAL_PORT_SCRIPTS = {
     '21':    'ftp-anon',
     '111':   'rpcinfo,nfs-showmount,nfs-ls',
-    '139':   'smb-security-mode',
+    '139':   'smb-security-mode,smb2-security-mode,smb-vuln-ms17-010,smb-vuln-ms08-067,smb-double-pulsar-backdoor,smb-vuln-cve-2017-7494',
     '445':   'smb-security-mode,smb2-security-mode,smb-vuln-ms17-010,smb-vuln-ms08-067,smb-double-pulsar-backdoor,smb-vuln-cve-2017-7494',
     '2375':  'docker-version',
     '4243':  'docker-version',
@@ -883,6 +1106,10 @@ INTERNAL_PORT_SCRIPTS = {
 # Ports that use multiple concurrent NSE scripts; omit --source-port to prevent
 # TCP 4-tuple collision when nsock opens parallel connections to the same target.
 _SMB_PORTS = frozenset({'139', '445'})
+
+# Windows SMB ports are always co-resident; merge their live hosts after scanning
+# so a missed SYN-ACK on one port does not suppress nmap SMB script checks.
+_SMB_COUPLED_PORTS = ('139', '445')
 
 # Deprecated/weak SSH algorithms used by the ssh2-enum-algos finding check
 WEAK_SSH_ALGOS = {
@@ -2157,6 +2384,7 @@ def main():
         output_path = ''
         nmap_threads = 5  # Default number of concurrent NMAP threads
         masscan_batch_size = 5  # Default number of ports per masscan invocation
+        host_discovery = None   # None = prompt user; True/False = set from config
 
 
         # Get options from configuration file if it exists
@@ -2203,6 +2431,7 @@ def main():
             nmap_threads = config_parser.get('nmap_threads', 5)
             masscan_batch_size = int(config_parser.get('masscan_batch_size', 5))
             script_scan = config_parser.get('script_scan', 'False') == 'True'
+            host_discovery = config_parser.get('host_discovery', 'True') == 'True'
             resume = resume or config_parser.get('resume', 'False').strip().lower() == 'true'
 
             # Resolve relative paths in config relative to the script directory
@@ -2374,7 +2603,15 @@ def main():
                         print(_COLOR_ERROR + f'Error: File not found: {exclusions_file}' + _COLOR_RESET)
             else:
                 exclusions_file = None
-    
+
+        if host_discovery is None:
+            disc_default = 'y'
+            disc_choice = input(
+                '\nRun host discovery (masscan ping + nmap -sn) before scanning '
+                '(default: Yes)? '
+            ) or disc_default
+            host_discovery = disc_choice[0].lower() == 'y'
+
         print(f'\nScan Type: {scan_type}')
         print(f'Target Ports: {dest_ports}')
         print(f'Service Banner: {banner_scan}')
@@ -2385,6 +2622,7 @@ def main():
         print(f'Exclusions File: {exclusions_file}')
         print(f'NMAP Concurrent Threads: {nmap_threads}')
         print(f'Masscan Batch Size: {masscan_batch_size}')
+        print(f'Host Discovery:  {host_discovery}')
 
         target_count = _count_hosts_in_file(target_file)
         if target_count is not None:
@@ -2418,7 +2656,20 @@ def main():
         # Preprocess targets to handle hostnames
         masscan_target_file, ip_to_hostname = preprocess_targets(target_file, output_path)
 
-        status_summary = mass_scan(scan_type, dest_ports, source_port, max_rate, masscan_target_file, exclusions_file, masscan_batch_size, resume=resume)
+        if host_discovery:
+            discovery_file = _host_discovery(
+                masscan_target_file, output_path, max_rate, exclusions_file,
+                scan_type=target_scan, resume=resume,
+            )
+        else:
+            discovery_file = None
+
+        status_summary = mass_scan(
+            scan_type, dest_ports, source_port, max_rate,
+            masscan_target_file,                   # always full range for probe
+            exclusions_file, masscan_batch_size,
+            resume=resume, discovery_file=discovery_file,
+        )
 
         # If service banners requested, send to nmap
         if banner_scan or script_scan:
