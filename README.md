@@ -60,6 +60,8 @@ How fast would you like to scan (default: 20000 packets/second)?
 Please enter the full path for the file containing target hosts (default: /opt/spoonmap/ranges.txt):
 
 Would you like to exclude any hosts? (default: No)
+
+Run host discovery (masscan ping + TCP SYN probe) before scanning (default: Yes)?
 ```
 
 You can also create a `config.json` file (based on `config.json.sample`) to skip all prompts:
@@ -69,6 +71,7 @@ You can also create a `config.json` file (based on `config.json.sample`) to skip
     "scan_categories": ["Web", "Database", "Remote Management"],
     "banner_scan": "True",
     "script_scan": "False",
+    "host_discovery": "True",
     "target_scan": "Internal",
     "max_rate": "2000",
     "target_file": "ranges.txt",
@@ -116,6 +119,7 @@ uv run spoonmap.py --cleanup
 | `dest_ports` | Array of port strings | Overrides `scan_categories`; use `U:` prefix for UDP |
 | `banner_scan` | `"True"` / `"False"` | Runs nmap -sV against discovered hosts |
 | `script_scan` | `"True"` / `"False"` | Runs NSE security scripts (implies `banner_scan`) |
+| `host_discovery` | `"True"` / `"False"` | Run masscan ping + TCP SYN host discovery before port scanning; narrows target set (default: True) |
 | `target_scan` | `"External"` / `"Internal"` | External → source port 53; Internal → source port 88 |
 | `max_rate` | Packets/second string | See rate guidance below |
 | `target_file` | Path | One IP, CIDR, or hostname per line |
@@ -166,6 +170,10 @@ Inter-scan wait: 29s (target ~256 hosts)
 <output_path>/
   masscan_targets.txt         # IPs-only target list for masscan
   ip_hostname_map.json        # hostname → resolved IP mapping
+  discovery_masscan.xml       # raw masscan --ping XML (host_discovery only)
+  discovery_masscan_tcp.xml   # raw masscan TCP SYN probe XML (host_discovery only)
+  live_hosts_discovery.txt    # hosts found by discovery phase (host_discovery only)
+  live_hosts_combined.txt     # union of discovery + probe IPs used as scan target
   masscan_results/portN.xml   # raw masscan XML per port
   live_hosts/portN.txt        # deduplicated IPs per port
   nmap_results/portN.xml      # nmap banner/script XML per port
