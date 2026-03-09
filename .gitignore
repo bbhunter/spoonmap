@@ -10,5 +10,14 @@ masscan_results/
 live_hosts/
 nmap_results/
 spoonmap_output.xml
+spoonmap_output.json
 findings.txt
 findings.md
+findings.json
+discovery_masscan.xml
+discovery_masscan_tcp.xml
+discovery_nmap.xml
+live_hosts_discovery.txt
+live_hosts_combined.txt
+resume.cfg
+ranges.txt
