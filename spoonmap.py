@@ -644,7 +644,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
         return status_summary
 
     probe_priority = EXTERNAL_PROBE_PORT_PRIORITY if source_port == '53' else PROBE_PORT_PRIORITY
-    probe_ports = _select_probe_ports(tcp_ports, priority=probe_priority)
+    probe_ports = _select_probe_ports(tcp_ports, max_ports=batch_size, priority=probe_priority)
     probe_set = set(probe_ports)
     remaining_ports = [p for p in tcp_ports if p not in probe_set]
 
