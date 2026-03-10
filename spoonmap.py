@@ -198,13 +198,14 @@ def preprocess_targets(target_file, output_path):
                 masscan_targets.append(line)
 
     # Create temporary file for masscan with IPs
-    masscan_file = f'{output_path}/masscan_targets.txt'
+    os.makedirs(_disc(output_path), exist_ok=True)
+    masscan_file = os.path.join(_disc(output_path), 'masscan_targets.txt')
     with open(masscan_file, 'w') as f:
         for target in masscan_targets:
             f.write(f'{target}\n')
 
     # Save IP-to-hostname mapping
-    mapping_file = f'{output_path}/ip_hostname_map.json'
+    mapping_file = os.path.join(_disc(output_path), 'ip_hostname_map.json')
     with open(mapping_file, 'w') as f:
         json.dump(ip_to_hostname, f, indent=2)
 
@@ -264,7 +265,9 @@ def _host_discovery(target_file, output_path, max_rate, exclusions_file,
     Returns live_hosts_discovery.txt path, or None if 0 hosts found
     (probe will scan the full target range anyway on ICMP-blocked networks).
     """
-    discovery_file = os.path.join(output_path, 'live_hosts_discovery.txt')
+    disc = _disc(output_path)
+    os.makedirs(disc, exist_ok=True)
+    discovery_file = os.path.join(disc, 'live_hosts_discovery.txt')
 
     if resume and os.path.exists(discovery_file):
         with open(discovery_file) as fh:
@@ -272,8 +275,8 @@ def _host_discovery(target_file, output_path, max_rate, exclusions_file,
         print(_COLOR_INFO + f'Resume: skipping host discovery ({count} hosts cached)' + _COLOR_RESET)
         return discovery_file
 
-    masscan_xml     = os.path.join(output_path, 'discovery_masscan.xml')
-    masscan_tcp_xml = os.path.join(output_path, 'discovery_masscan_tcp.xml')
+    masscan_xml     = os.path.join(disc, 'discovery_masscan.xml')
+    masscan_tcp_xml = os.path.join(disc, 'discovery_masscan_tcp.xml')
     live_ips = set()
 
     # ── masscan ICMP ping ──────────────────────────────────────────────────────
@@ -461,16 +464,16 @@ def _calc_scan_wait(host_count, rate):
     return max(0, int(recovery_window - scan_duration))
 
 
+def _disc(output_path):
+    """Return the discovery subdirectory path."""
+    return os.path.join(output_path, 'discovery')
+
+
 # Result dirs and files written during a scan run.
-_RESULT_DIRS  = ('masscan_results', 'live_hosts', 'nmap_results')
-_RESULT_FILES = ('all_live_hosts.txt', 'masscan_targets.txt',
-                 'ip_hostname_map.json', 'spoonmap_output.xml',
+_RESULT_DIRS  = ('discovery', 'nmap_results')
+_RESULT_FILES = ('all_live_hosts.txt', 'spoonmap_output.xml',
                  'spoonmap_output.json',
-                 'findings.txt', 'findings.md', 'findings.json',
-                 'live_hosts_discovery.txt',
-                 'discovery_masscan.xml',
-                 'discovery_masscan_tcp.xml',
-                 'live_hosts_combined.txt')
+                 'findings.txt', 'findings.md', 'findings.json')
 
 
 def _previous_results_exist(output_path):
@@ -507,10 +510,10 @@ def _nmap_udp_discovery(udp_port, target_file, output_path, source_port,
     live_hosts/portU:N.txt for consumption by nmap_scan().
     """
     port_num = udp_port[2:]          # strip 'U:'
-    output_file = f'{output_path}/masscan_results/port{udp_port}.xml'
+    output_file = f'{_disc(output_path)}/masscan_results/port{udp_port}.xml'
 
     if resume and os.path.exists(output_file):
-        live_file = f'{output_path}/live_hosts/port{udp_port}.txt'
+        live_file = f'{_disc(output_path)}/live_hosts/port{udp_port}.txt'
         if os.path.exists(live_file):
             with open(live_file) as fh:
                 return {line.strip() for line in fh if line.strip()}
@@ -567,8 +570,8 @@ def _nmap_udp_discovery(udp_port, target_file, output_path, source_port,
 def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusions_file, batch_size=1, resume=False, discovery_file=None):
     status_summary = '\nSummary'
 
-    if not os.path.exists(f'{output_path}/masscan_results'):
-        os.makedirs(f'{output_path}/masscan_results')
+    if not os.path.exists(f'{_disc(output_path)}/masscan_results'):
+        os.makedirs(f'{_disc(output_path)}/masscan_results')
 
     # Track unique IPs per port in memory for efficiency
     port_ips = {}
@@ -601,15 +604,16 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
                     else target_file)
 
     # Full port scan: skip adaptive probe, run single masscan over 1-65535
+    disc = _disc(output_path)
     if scan_type == 'Full':
-        output_file = f'{output_path}/masscan_results/portFull.xml'
-        full_targets_file = f'{output_path}/masscan_targets.txt'
+        output_file = f'{disc}/masscan_results/portFull.xml'
+        full_targets_file = f'{disc}/masscan_targets.txt'
         full_targets_mtime = os.path.getmtime(full_targets_file) if os.path.exists(full_targets_file) else 0
         if (resume
                 and os.path.exists(output_file)
                 and os.path.getmtime(output_file) >= full_targets_mtime):
             print(_COLOR_INFO + 'Resume: skipping completed Full port scan' + _COLOR_RESET)
-            live_hosts_dir = f'{output_path}/live_hosts'
+            live_hosts_dir = f'{disc}/live_hosts'
             if os.path.exists(live_hosts_dir):
                 for fname in sorted(os.listdir(live_hosts_dir)):
                     if not (fname.startswith('port') and fname.endswith('.txt')
@@ -628,9 +632,9 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
         full_results = _run_masscan_batch(['1-65535'], full_scan_rate, output_file,
                                           target_file, source_port, exclusions_file,
                                           wait_secs=wait_secs)
-        os.makedirs(output_path + '/live_hosts', exist_ok=True)
+        os.makedirs(f'{disc}/live_hosts', exist_ok=True)
         for port_key, ips in full_results.items():
-            with open(f'{output_path}/live_hosts/port{port_key}.txt', 'w') as f:
+            with open(f'{disc}/live_hosts/port{port_key}.txt', 'w') as f:
                 for ip in sorted(ips):
                     f.write(f'{ip}\n')
             host_count = len(ips)
@@ -656,7 +660,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
                 unprobed.remove(port)
                 print(_COLOR_INFO + f'Probe: scanning port {port} at {max_rate} pps...' + _COLOR_RESET)
                 port_fast = _run_masscan_batch([port], max_rate,
-                    f'{output_path}/masscan_results/probe_fast_{pb_idx}.xml',
+                    f'{disc}/masscan_results/probe_fast_{pb_idx}.xml',
                     probe_target, source_port, exclusions_file, wait_secs=wait_secs)
                 for k, v in port_fast.items():
                     fast_results.setdefault(k, set()).update(v)
@@ -666,7 +670,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
                     break
                 print(_COLOR_INFO + f'Probe found 0 hosts at {max_rate} pps — checking {half_rate} pps...' + _COLOR_RESET)
                 port_slow = _run_masscan_batch([port], half_rate,
-                    f'{output_path}/masscan_results/probe_slow_{pb_idx}.xml',
+                    f'{disc}/masscan_results/probe_slow_{pb_idx}.xml',
                     probe_target, source_port, exclusions_file, wait_secs=wait_secs)
                 for k, v in port_slow.items():
                     slow_results.setdefault(k, set()).update(v)
@@ -684,10 +688,10 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
             probe_label = ', '.join(probe_ports)
             print(_COLOR_INFO + f'Probe: scanning {probe_label} at {max_rate} pps then {half_rate} pps to check for packet loss...' + _COLOR_RESET)
             fast_results = _run_masscan_batch(probe_ports, max_rate,
-                f'{output_path}/masscan_results/probe_fast.xml', probe_target, source_port, exclusions_file,
+                f'{disc}/masscan_results/probe_fast.xml', probe_target, source_port, exclusions_file,
                 wait_secs=wait_secs)
             slow_results = _run_masscan_batch(probe_ports, half_rate,
-                f'{output_path}/masscan_results/probe_slow.xml', probe_target, source_port, exclusions_file,
+                f'{disc}/masscan_results/probe_slow.xml', probe_target, source_port, exclusions_file,
                 wait_secs=wait_secs)
             fast_ips = {ip for s in fast_results.values() for ip in s}
             slow_ips = {ip for s in slow_results.values() for ip in s}
@@ -701,12 +705,12 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
             probe_ports_used = probe_ports
 
         # Merge probe results into port_ips and write live_hosts files now
-        os.makedirs(output_path + '/live_hosts', exist_ok=True)
+        os.makedirs(f'{disc}/live_hosts', exist_ok=True)
         for port_key in probe_ports_used:
             combined = fast_results.get(port_key, set()) | slow_results.get(port_key, set())
             if combined:
                 port_ips[port_key] = combined
-                with open(f'{output_path}/live_hosts/port{port_key}.txt', 'w') as f:
+                with open(f'{disc}/live_hosts/port{port_key}.txt', 'w') as f:
                     for ip in sorted(combined):
                         f.write(f'{ip}\n')
                 host_count = len(combined)
@@ -733,7 +737,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
             with open(discovery_file) as fh:
                 _combined_ips.update(line.strip() for line in fh if line.strip())
         if _combined_ips:
-            combined_path = os.path.join(output_path, 'live_hosts_combined.txt')
+            combined_path = os.path.join(disc, 'live_hosts_combined.txt')
             with open(combined_path, 'w') as fh:
                 for ip in sorted(_combined_ips,
                                  key=lambda x: tuple(int(o) for o in x.split('.'))):
@@ -758,12 +762,12 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
     total_batches = len(batches)
     scan_start_time = time.time()
 
-    targets_file = f'{output_path}/masscan_targets.txt'
+    targets_file = f'{disc}/masscan_targets.txt'
     targets_mtime = os.path.getmtime(targets_file) if os.path.exists(targets_file) else 0
 
     for batch_idx, batch in enumerate(batches):
         batch_label = ', '.join(batch)
-        output_file = f'{output_path}/masscan_results/batch_{batch_idx}.xml'
+        output_file = f'{disc}/masscan_results/batch_{batch_idx}.xml'
 
         if (resume
                 and os.path.exists(output_file)
@@ -773,7 +777,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
                   f'({batch_label})' + _COLOR_RESET)
             for dest_port in batch:
                 port_ips.setdefault(dest_port, set())
-                live_file = f'{output_path}/live_hosts/port{dest_port}.txt'
+                live_file = f'{disc}/live_hosts/port{dest_port}.txt'
                 if os.path.exists(live_file):
                     with open(live_file) as fh:
                         port_ips[dest_port].update(
@@ -799,7 +803,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
             for dest_port in batch:
                 if dest_port not in port_ips:
                     port_ips[dest_port] = set()
-                    live_host_file = f'{output_path}/live_hosts/port{dest_port}.txt'
+                    live_host_file = f'{disc}/live_hosts/port{dest_port}.txt'
                     if os.path.exists(live_host_file):
                         with open(live_host_file, 'r') as file:
                             port_ips[dest_port].update(line.strip() for line in file if line.strip())
@@ -810,10 +814,10 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
                     port_ips[port_key].update(ips)
 
             # Write per-port live_hosts files (nmap_scan expects this layout)
-            os.makedirs(output_path + '/live_hosts', exist_ok=True)
+            os.makedirs(f'{disc}/live_hosts', exist_ok=True)
             for dest_port in batch:
                 if port_ips.get(dest_port):
-                    with open(f'{output_path}/live_hosts/port{dest_port}.txt', 'w') as file:
+                    with open(f'{disc}/live_hosts/port{dest_port}.txt', 'w') as file:
                         for ip in sorted(port_ips[dest_port]):
                             file.write(f'{ip}\n')
                     host_count = len(port_ips[dest_port])
@@ -832,7 +836,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
                 added = merged_smb - port_ips.get(smb_port, set())
                 if added:
                     port_ips[smb_port] = merged_smb
-                    with open(f'{output_path}/live_hosts/port{smb_port}.txt', 'w') as _f:
+                    with open(f'{disc}/live_hosts/port{smb_port}.txt', 'w') as _f:
                         for _ip in sorted(merged_smb):
                             _f.write(_ip + '\n')
                     partner = '445' if smb_port == '139' else '139'
@@ -843,14 +847,14 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
 
     # ── nmap UDP discovery (masscan replacement) ──────────────────────────────
     for udp_port in udp_ports:
-        os.makedirs(output_path + '/live_hosts', exist_ok=True)
+        os.makedirs(f'{disc}/live_hosts', exist_ok=True)
         ips = _nmap_udp_discovery(
             udp_port, target_file, output_path,
             source_port, exclusions_file, resume=resume,
         )
         if ips:
             port_ips[udp_port] = ips
-            with open(f'{output_path}/live_hosts/port{udp_port}.txt', 'w') as f:
+            with open(f'{disc}/live_hosts/port{udp_port}.txt', 'w') as f:
                 for ip in sorted(ips):
                     f.write(f'{ip}\n')
             host_count = len(ips)
@@ -936,11 +940,11 @@ def nmap_worker(work_queue, completed_count, total_count, source_port, lock,
 
             dest_port = ((host_file.split('.')[0])[4:])
             output_file = f'{output_path}/nmap_results/port{dest_port}.xml'
-            input_file = f'{output_path}/live_hosts/port{dest_port}.txt'
+            input_file = f'{_disc(output_path)}/live_hosts/port{dest_port}.txt'
 
             # Create hostname-based target file if we have hostname mappings
             if ip_to_hostname:
-                hostname_file = f'{output_path}/live_hosts/port{dest_port}_hostnames.txt'
+                hostname_file = f'{_disc(output_path)}/live_hosts/port{dest_port}_hostnames.txt'
                 create_hostname_target_file(input_file, hostname_file, ip_to_hostname)
                 input_file = hostname_file
 
@@ -1013,7 +1017,7 @@ def nmap_scan(source_port, max_threads=5, ip_to_hostname=None,
     os.makedirs(output_path+"/nmap_results", exist_ok=True)
 
     try:
-        host_files = os.listdir(f'{output_path}/live_hosts')
+        host_files = os.listdir(f'{_disc(output_path)}/live_hosts')
 
         # Filter out files that have already been scanned
         files_to_scan = []
@@ -1076,7 +1080,7 @@ def nmap_scan(source_port, max_threads=5, ip_to_hostname=None,
             raise
 
     except FileNotFoundError:
-        print(_COLOR_ERROR + f'Error: live_hosts directory not found at {output_path}/live_hosts' + _COLOR_RESET)
+        print(_COLOR_ERROR + f'Error: live_hosts directory not found at {_disc(output_path)}/live_hosts' + _COLOR_RESET)
     except Exception as e:
         print(_COLOR_ERROR + f'Error during nmap scan: {e}' + _COLOR_RESET)
 
@@ -1414,7 +1418,7 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
 
     # ── collect printer IPs (port 9100 open = JetDirect = printer) ───────────
     printer_ips = set()
-    p9100 = f'{output_path}/live_hosts/port9100.txt'
+    p9100 = f'{_disc(output_path)}/live_hosts/port9100.txt'
     if os.path.exists(p9100):
         with open(p9100) as fh:
             for line in fh:
@@ -2540,7 +2544,7 @@ def _filter_udp_live_hosts(output_path):
     aggregations (all_live_hosts.txt, spoonmap_output.xml/.json) are clean.
     """
     nmap_dir = os.path.join(output_path, 'nmap_results')
-    live_dir  = os.path.join(output_path, 'live_hosts')
+    live_dir  = os.path.join(_disc(output_path), 'live_hosts')
     if not os.path.isdir(nmap_dir):
         return
 
@@ -2924,11 +2928,12 @@ def main():
                 snmp_any_validated = _validate_snmp_any_community(output_path, target_scan)
 
         # Combine all live hosts into one file
+        disc = _disc(output_path)
         all_ips = set()
-        if os.path.exists(f'{output_path}/live_hosts'):
-            host_files = os.listdir(f'{output_path}/live_hosts')
+        if os.path.exists(f'{disc}/live_hosts'):
+            host_files = os.listdir(f'{disc}/live_hosts')
             for host_file in host_files:
-                with open(f'{output_path}/live_hosts/{host_file}') as input_file:
+                with open(f'{disc}/live_hosts/{host_file}') as input_file:
                     for line in input_file:
                         all_ips.add(line)
             with open(f'{output_path}/all_live_hosts.txt', 'w') as output_file:
@@ -2939,7 +2944,7 @@ def main():
             if banner_scan or script_scan:
                 result_dir = f'{output_path}/nmap_results/'
             else:
-                result_dir = f'{output_path}/masscan_results/'
+                result_dir = f'{disc}/masscan_results/'
             hosts_json = []
             ip_index   = {}  # {ip: index into hosts_json}
             xml_hosts  = {}  # {ip: merged <host> Element}

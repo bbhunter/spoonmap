@@ -30,9 +30,9 @@ uv run pytest tests/test_spoonmap.py::TestGenerateFindings  # single class
 The entire tool is a single script: `spoonmap.py`. Execution flow:
 
 1. `main()` — loads `config.json` if present, otherwise runs interactive prompts to collect: scan type, banner scan flag, internal/external target, max rate, output path, target file, exclusions file
-2. `preprocess_targets()` — reads the target file; resolves hostnames via DNS to IPs (masscan requires IPs); writes `masscan_targets.txt` and `ip_hostname_map.json` to the output directory
-3. `mass_scan()` — iterates over each port, runs masscan as a subprocess, parses XML output, deduplicates IPs per port using in-memory sets, writes `live_hosts/port<N>.txt`
-4. `nmap_scan()` — if banner scanning is enabled, uses a thread pool (`Queue` + worker threads, default 5 threads) to run nmap concurrently against each `live_hosts/port<N>.txt`; workers skip ports already present in `nmap_results/`
+2. `preprocess_targets()` — reads the target file; resolves hostnames via DNS to IPs (masscan requires IPs); writes `discovery/masscan_targets.txt` and `discovery/ip_hostname_map.json`
+3. `mass_scan()` — iterates over each port, runs masscan as a subprocess, parses XML output, deduplicates IPs per port using in-memory sets, writes `discovery/live_hosts/port<N>.txt`
+4. `nmap_scan()` — if banner scanning is enabled, uses a thread pool (`Queue` + worker threads, default 5 threads) to run nmap concurrently against each `discovery/live_hosts/port<N>.txt`; workers skip ports already present in `nmap_results/`
 5. `main()` — aggregates all live hosts into `all_live_hosts.txt` and merges all per-port XML into `spoonmap_output.xml`; if `script_scan` is enabled, calls `generate_findings()` to produce `findings.txt` / `findings.md`
 
 Pass `--cleanup [dir]` to remove prior scan output non-interactively (reads `output_path` from `config.json` if no directory is given).
@@ -41,15 +41,17 @@ Pass `--cleanup [dir]` to remove prior scan output non-interactively (reads `out
 
 ```
 <output_path>/
-  masscan_targets.txt       # IPs-only target list for masscan
-  ip_hostname_map.json      # hostname → IP mapping
-  masscan_results/portN.xml # raw masscan XML per port
-  live_hosts/portN.txt      # deduplicated IPs per port
-  nmap_results/portN.xml    # nmap banner/script XML per port
-  all_live_hosts.txt        # union of all live IPs
-  spoonmap_output.xml       # merged XML (nmap if banner scan, masscan otherwise)
-  findings.txt              # severity-sorted findings report (script_scan only)
-  findings.md               # same report in Markdown table format
+  discovery/
+    masscan_targets.txt       # IPs-only target list for masscan
+    ip_hostname_map.json      # hostname → IP mapping
+    live_hosts_discovery.txt  # hosts found during host-discovery phase
+    masscan_results/portN.xml # raw masscan XML per port
+    live_hosts/portN.txt      # deduplicated IPs per port
+  nmap_results/portN.xml      # nmap banner/script XML per port
+  all_live_hosts.txt          # union of all live IPs
+  spoonmap_output.xml         # merged XML (nmap if banner scan, masscan otherwise)
+  findings.txt                # severity-sorted findings report (script_scan only)
+  findings.md                 # same report in Markdown table format
 ```
 
 ## config.json Parameters

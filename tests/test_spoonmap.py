@@ -495,8 +495,8 @@ class TestGenerateFindings:
         assert 'Anonymous FTP' not in (nmap_dir / 'findings.txt').read_text()
 
     def test_anonymous_ftp_suppressed_via_port_9100(self, nmap_dir):
-        (nmap_dir / 'live_hosts').mkdir()
-        (nmap_dir / 'live_hosts' / 'port9100.txt').write_text('10.0.0.3\n')
+        (nmap_dir / 'discovery' / 'live_hosts').mkdir(parents=True)
+        (nmap_dir / 'discovery' / 'live_hosts' / 'port9100.txt').write_text('10.0.0.3\n')
         xml = _nmap_xml('10.0.0.3', 'tcp', '21',
                         scripts={'ftp-anon': 'Anonymous FTP login allowed'})
         (nmap_dir / 'nmap_results' / 'port21.xml').write_text(xml)
@@ -505,8 +505,8 @@ class TestGenerateFindings:
 
     def test_anonymous_ftp_not_suppressed_for_different_host(self, nmap_dir):
         # port9100.txt lists a different IP — the scanned host is not a printer
-        (nmap_dir / 'live_hosts').mkdir()
-        (nmap_dir / 'live_hosts' / 'port9100.txt').write_text('10.0.0.99\n')
+        (nmap_dir / 'discovery' / 'live_hosts').mkdir(parents=True)
+        (nmap_dir / 'discovery' / 'live_hosts' / 'port9100.txt').write_text('10.0.0.99\n')
         xml = _nmap_xml('10.0.0.4', 'tcp', '21',
                         scripts={'ftp-anon': 'Anonymous FTP login allowed'})
         (nmap_dir / 'nmap_results' / 'port21.xml').write_text(xml)
@@ -881,14 +881,14 @@ class TestPreviousResults:
         assert _previous_results_exist(str(tmp_path)) is False
 
     def test_detects_masscan_results_dir(self, tmp_path):
-        d = tmp_path / 'masscan_results'
-        d.mkdir()
+        d = tmp_path / 'discovery' / 'masscan_results'
+        d.mkdir(parents=True)
         (d / 'port80.xml').write_text('<nmaprun/>')
         assert _previous_results_exist(str(tmp_path)) is True
 
     def test_detects_live_hosts_dir(self, tmp_path):
-        d = tmp_path / 'live_hosts'
-        d.mkdir()
+        d = tmp_path / 'discovery' / 'live_hosts'
+        d.mkdir(parents=True)
         (d / 'port80.txt').write_text('10.0.0.1\n')
         assert _previous_results_exist(str(tmp_path)) is True
 
@@ -912,26 +912,24 @@ class TestPreviousResults:
 
     def test_empty_result_dir_not_detected(self, tmp_path):
         # An empty result directory is not considered a previous run
-        (tmp_path / 'masscan_results').mkdir()
+        (tmp_path / 'discovery').mkdir()
         assert _previous_results_exist(str(tmp_path)) is False
 
     def test_delete_removes_result_dirs(self, tmp_path):
-        for d in ('masscan_results', 'live_hosts', 'nmap_results'):
+        for d in ('discovery', 'nmap_results'):
             p = tmp_path / d
             p.mkdir()
             (p / 'file.xml').write_text('<nmaprun/>')
         _delete_previous_results(str(tmp_path))
-        for d in ('masscan_results', 'live_hosts', 'nmap_results'):
+        for d in ('discovery', 'nmap_results'):
             assert not (tmp_path / d).exists()
 
     def test_delete_removes_aggregate_files(self, tmp_path):
-        for f in ('all_live_hosts.txt', 'masscan_targets.txt',
-                  'ip_hostname_map.json', 'spoonmap_output.xml',
+        for f in ('all_live_hosts.txt', 'spoonmap_output.xml',
                   'findings.txt', 'findings.md'):
             (tmp_path / f).write_text('data')
         _delete_previous_results(str(tmp_path))
-        for f in ('all_live_hosts.txt', 'masscan_targets.txt',
-                  'ip_hostname_map.json', 'spoonmap_output.xml',
+        for f in ('all_live_hosts.txt', 'spoonmap_output.xml',
                   'findings.txt', 'findings.md'):
             assert not (tmp_path / f).exists()
 
@@ -1024,7 +1022,7 @@ class TestFullPortScan:
                                '/fake/targets.txt', '')
         mock_batch.assert_called_once_with(
             ['1-65535'], '10000',   # capped from 20000 (External cap)
-            str(tmp_path) + '/masscan_results/portFull.xml',
+            str(tmp_path) + '/discovery/masscan_results/portFull.xml',
             '/fake/targets.txt', '53', '',
             wait_secs=2,
         )
@@ -1038,7 +1036,7 @@ class TestFullPortScan:
             mass_scan('Full', ['1-65535'], '88', '2000', '/fake/targets.txt', '')
         mock_batch.assert_called_once_with(
             ['1-65535'], '1000',   # capped from 2000 (Internal cap)
-            str(tmp_path) + '/masscan_results/portFull.xml',
+            str(tmp_path) + '/discovery/masscan_results/portFull.xml',
             '/fake/targets.txt', '88', '',
             wait_secs=2,
         )
@@ -1048,7 +1046,7 @@ class TestFullPortScan:
         fake_results = {'22': {'10.0.0.5', '10.0.0.6'}}
         with patch('spoonmap._run_masscan_batch', return_value=fake_results):
             mass_scan('Full', ['1-65535'], '53', '10000', '/fake/targets.txt', '')
-        live_file = tmp_path / 'live_hosts' / 'port22.txt'
+        live_file = tmp_path / 'discovery' / 'live_hosts' / 'port22.txt'
         assert live_file.exists()
         assert '10.0.0.5' in live_file.read_text()
         assert '10.0.0.6' in live_file.read_text()
@@ -1198,8 +1196,8 @@ class TestSnmpBruteFinding:
         assert 'private' in content
 
     def test_snmp_brute_suppressed_via_port_9100(self, nmap_dir):
-        (nmap_dir / 'live_hosts').mkdir()
-        (nmap_dir / 'live_hosts' / 'port9100.txt').write_text('10.0.0.12\n')
+        (nmap_dir / 'discovery' / 'live_hosts').mkdir(parents=True)
+        (nmap_dir / 'discovery' / 'live_hosts' / 'port9100.txt').write_text('10.0.0.12\n')
         xml = _nmap_xml('10.0.0.12', 'udp', '161',
                         scripts={'snmp-brute': 'public - Valid credentials'})
         (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
@@ -1651,11 +1649,12 @@ class TestMassScanResume:
     def test_completed_batch_skipped_when_resume_true(self, tmp_path):
         """A batch whose XML is newer than masscan_targets.txt is skipped when resume=True."""
         spoonmap.output_path = str(tmp_path)
-        batch_xml = tmp_path / 'masscan_results' / 'batch_0.xml'
+        batch_xml = tmp_path / 'discovery' / 'masscan_results' / 'batch_0.xml'
         batch_xml.parent.mkdir(parents=True)
         self._write_batch_xml(batch_xml)
 
-        targets_file = tmp_path / 'masscan_targets.txt'
+        targets_file = tmp_path / 'discovery' / 'masscan_targets.txt'
+        targets_file.parent.mkdir(parents=True, exist_ok=True)
         targets_file.write_text('10.0.0.1\n')
         # Make batch XML newer than targets file
         import os, time as _time
@@ -1676,11 +1675,12 @@ class TestMassScanResume:
     def test_completed_batch_not_skipped_when_resume_false(self, tmp_path):
         """A pre-existing batch XML is NOT skipped when resume=False."""
         spoonmap.output_path = str(tmp_path)
-        batch_xml = tmp_path / 'masscan_results' / 'batch_0.xml'
+        batch_xml = tmp_path / 'discovery' / 'masscan_results' / 'batch_0.xml'
         batch_xml.parent.mkdir(parents=True)
         self._write_batch_xml(batch_xml)
 
-        targets_file = tmp_path / 'masscan_targets.txt'
+        targets_file = tmp_path / 'discovery' / 'masscan_targets.txt'
+        targets_file.parent.mkdir(parents=True, exist_ok=True)
         targets_file.write_text('10.0.0.1\n')
         import os
         os.utime(str(targets_file), (0, 0))
@@ -1698,15 +1698,16 @@ class TestMassScanResume:
     def test_live_hosts_loaded_from_file_when_batch_skipped(self, tmp_path):
         """When a batch is skipped, IPs from live_hosts/portN.txt are loaded into port_ips."""
         spoonmap.output_path = str(tmp_path)
-        batch_xml = tmp_path / 'masscan_results' / 'batch_0.xml'
+        batch_xml = tmp_path / 'discovery' / 'masscan_results' / 'batch_0.xml'
         batch_xml.parent.mkdir(parents=True)
         self._write_batch_xml(batch_xml)
 
-        live_dir = tmp_path / 'live_hosts'
-        live_dir.mkdir()
+        live_dir = tmp_path / 'discovery' / 'live_hosts'
+        live_dir.mkdir(parents=True)
         (live_dir / 'port80.txt').write_text('10.0.0.1\n10.0.0.2\n')
 
-        targets_file = tmp_path / 'masscan_targets.txt'
+        targets_file = tmp_path / 'discovery' / 'masscan_targets.txt'
+        targets_file.parent.mkdir(parents=True, exist_ok=True)
         targets_file.write_text('10.0.0.1\n')
         import os, time as _time
         os.utime(str(targets_file), (0, 0))
@@ -1722,13 +1723,14 @@ class TestMassScanResume:
     def test_partial_resume_only_skips_completed_batches(self, tmp_path):
         """Only batches with existing XML are skipped; missing ones run normally."""
         spoonmap.output_path = str(tmp_path)
-        results_dir = tmp_path / 'masscan_results'
-        results_dir.mkdir()
+        results_dir = tmp_path / 'discovery' / 'masscan_results'
+        results_dir.mkdir(parents=True)
         # batch_0 exists (ports 80, 443); batch_1 does NOT exist
         batch0_xml = results_dir / 'batch_0.xml'
         self._write_batch_xml(batch0_xml)
 
-        targets_file = tmp_path / 'masscan_targets.txt'
+        targets_file = tmp_path / 'discovery' / 'masscan_targets.txt'
+        targets_file.parent.mkdir(parents=True, exist_ok=True)
         targets_file.write_text('10.0.0.1\n')
         import os, time as _time
         os.utime(str(targets_file), (0, 0))
@@ -1754,11 +1756,12 @@ class TestMassScanResume:
     def test_batch_not_skipped_when_targets_file_is_newer(self, tmp_path):
         """If masscan_targets.txt is newer than batch XML, the batch re-runs."""
         spoonmap.output_path = str(tmp_path)
-        batch_xml = tmp_path / 'masscan_results' / 'batch_0.xml'
+        batch_xml = tmp_path / 'discovery' / 'masscan_results' / 'batch_0.xml'
         batch_xml.parent.mkdir(parents=True)
         self._write_batch_xml(batch_xml)
 
-        targets_file = tmp_path / 'masscan_targets.txt'
+        targets_file = tmp_path / 'discovery' / 'masscan_targets.txt'
+        targets_file.parent.mkdir(parents=True, exist_ok=True)
         targets_file.write_text('10.0.0.1\n')
 
         import os, time as _time
@@ -2567,7 +2570,7 @@ class TestSMBCoupling:
             result = mass_scan('All', ['139', '445'], '88', '1000',
                                '/fake/targets.txt', '', batch_size=5)
 
-        port445_file = tmp_path / 'live_hosts' / 'port445.txt'
+        port445_file = tmp_path / 'discovery' / 'live_hosts' / 'port445.txt'
         if port445_file.exists():
             written = {l.strip() for l in port445_file.read_text().splitlines() if l.strip()}
             assert written == {'10.0.0.1', '10.0.0.2', '10.0.0.3'}
@@ -2657,7 +2660,7 @@ class TestNmapUdpDiscovery:
 
     def test_open_host_is_returned(self, tmp_path):
         """Host with UDP port 'open' → included in result."""
-        (tmp_path / 'masscan_results').mkdir()
+        (tmp_path / 'discovery' / 'masscan_results').mkdir(parents=True)
         xml = (
             '<?xml version="1.0"?>'
             '<nmaprun><host>'
@@ -2673,7 +2676,7 @@ class TestNmapUdpDiscovery:
             mock_proc = MagicMock()
             mock_proc.wait.return_value = 0
             mock_popen.return_value = mock_proc
-            xml_path = tmp_path / 'masscan_results' / 'portU:500.xml'
+            xml_path = tmp_path / 'discovery' / 'masscan_results' / 'portU:500.xml'
             xml_path.write_text(xml)
             result = _nmap_udp_discovery('U:500', '/targets.txt', str(tmp_path),
                                          '53', '')
@@ -2681,7 +2684,7 @@ class TestNmapUdpDiscovery:
 
     def test_open_filtered_host_is_returned(self, tmp_path):
         """Host with UDP port 'open|filtered' → included in result for NSE confirmation."""
-        (tmp_path / 'masscan_results').mkdir()
+        (tmp_path / 'discovery' / 'masscan_results').mkdir(parents=True)
         xml = (
             '<?xml version="1.0"?>'
             '<nmaprun><host>'
@@ -2697,7 +2700,7 @@ class TestNmapUdpDiscovery:
             mock_proc = MagicMock()
             mock_proc.wait.return_value = 0
             mock_popen.return_value = mock_proc
-            xml_path = tmp_path / 'masscan_results' / 'portU:500.xml'
+            xml_path = tmp_path / 'discovery' / 'masscan_results' / 'portU:500.xml'
             xml_path.write_text(xml)
             result = _nmap_udp_discovery('U:500', '/targets.txt', str(tmp_path),
                                          '53', '')
@@ -2705,7 +2708,7 @@ class TestNmapUdpDiscovery:
 
     def test_closed_host_is_excluded(self, tmp_path):
         """Host with UDP port 'closed' → not included."""
-        (tmp_path / 'masscan_results').mkdir()
+        (tmp_path / 'discovery' / 'masscan_results').mkdir(parents=True)
         xml = (
             '<?xml version="1.0"?>'
             '<nmaprun><host>'
@@ -2721,7 +2724,7 @@ class TestNmapUdpDiscovery:
             mock_proc = MagicMock()
             mock_proc.wait.return_value = 0
             mock_popen.return_value = mock_proc
-            xml_path = tmp_path / 'masscan_results' / 'portU:500.xml'
+            xml_path = tmp_path / 'discovery' / 'masscan_results' / 'portU:500.xml'
             xml_path.write_text(xml)
             result = _nmap_udp_discovery('U:500', '/targets.txt', str(tmp_path),
                                          '53', '')
@@ -2729,11 +2732,11 @@ class TestNmapUdpDiscovery:
 
     def test_resume_skips_scan_when_live_file_exists(self, tmp_path):
         """resume=True + existing live_hosts file → no subprocess call."""
-        (tmp_path / 'masscan_results').mkdir()
-        (tmp_path / 'live_hosts').mkdir()
-        xml_path = tmp_path / 'masscan_results' / 'portU:500.xml'
+        (tmp_path / 'discovery' / 'masscan_results').mkdir(parents=True)
+        (tmp_path / 'discovery' / 'live_hosts').mkdir(parents=True)
+        xml_path = tmp_path / 'discovery' / 'masscan_results' / 'portU:500.xml'
         xml_path.write_text('<nmaprun/>')
-        live_path = tmp_path / 'live_hosts' / 'portU:500.txt'
+        live_path = tmp_path / 'discovery' / 'live_hosts' / 'portU:500.txt'
         live_path.write_text('192.168.1.1\n')
         spoonmap.output_path = str(tmp_path)
         with patch('spoonmap.subprocess.Popen') as mock_popen:
@@ -2744,7 +2747,7 @@ class TestNmapUdpDiscovery:
 
     def test_nmap_cmd_uses_sU_and_source_port(self, tmp_path):
         """nmap command uses -sU, -Pn, --open, and --source-port."""
-        (tmp_path / 'masscan_results').mkdir()
+        (tmp_path / 'discovery' / 'masscan_results').mkdir(parents=True)
         spoonmap.output_path = str(tmp_path)
         with patch('spoonmap.subprocess.Popen') as mock_popen, \
              patch('spoonmap.save_terminal_state', return_value=None), \
@@ -2806,9 +2809,9 @@ class TestFilterUdpLiveHosts:
     def test_confirmed_open_ip_kept(self, tmp_path):
         """IP with port state 'open' stays in live_hosts and nmap XML after filter."""
         nmap_dir  = tmp_path / 'nmap_results'
-        live_dir  = tmp_path / 'live_hosts'
+        live_dir  = tmp_path / 'discovery' / 'live_hosts'
         nmap_dir.mkdir()
-        live_dir.mkdir()
+        live_dir.mkdir(parents=True)
         (nmap_dir / 'portU:500.xml').write_text(self._make_nmap_xml('10.0.0.1', '500', 'open'))
         (live_dir / 'portU:500.txt').write_text('10.0.0.1\n')
 
@@ -2823,9 +2826,9 @@ class TestFilterUdpLiveHosts:
     def test_open_filtered_ip_removed(self, tmp_path):
         """IP with port state 'open|filtered' is removed from live_hosts and nmap XML."""
         nmap_dir  = tmp_path / 'nmap_results'
-        live_dir  = tmp_path / 'live_hosts'
+        live_dir  = tmp_path / 'discovery' / 'live_hosts'
         nmap_dir.mkdir()
-        live_dir.mkdir()
+        live_dir.mkdir(parents=True)
         (nmap_dir / 'portU:500.xml').write_text(
             self._make_nmap_xml('10.0.0.2', '500', 'open|filtered'))
         (live_dir / 'portU:500.txt').write_text('10.0.0.2\n')
@@ -2843,9 +2846,9 @@ class TestFilterUdpLiveHosts:
     def test_removal_count_printed(self, tmp_path, capsys):
         """Removed IPs produce an info message with count."""
         nmap_dir  = tmp_path / 'nmap_results'
-        live_dir  = tmp_path / 'live_hosts'
+        live_dir  = tmp_path / 'discovery' / 'live_hosts'
         nmap_dir.mkdir()
-        live_dir.mkdir()
+        live_dir.mkdir(parents=True)
         (nmap_dir / 'portU:500.xml').write_text(
             self._make_nmap_xml('10.0.0.3', '500', 'open|filtered'))
         (live_dir / 'portU:500.txt').write_text('10.0.0.3\n')
@@ -2859,9 +2862,9 @@ class TestFilterUdpLiveHosts:
     def test_nmap_xml_rewritten_without_unconfirmed_hosts(self, tmp_path):
         """After filter, XML on disk has no host elements for unconfirmed IPs."""
         nmap_dir  = tmp_path / 'nmap_results'
-        live_dir  = tmp_path / 'live_hosts'
+        live_dir  = tmp_path / 'discovery' / 'live_hosts'
         nmap_dir.mkdir()
-        live_dir.mkdir()
+        live_dir.mkdir(parents=True)
         # Two hosts: one open, one open|filtered
         xml = (
             '<?xml version="1.0"?>'
