@@ -114,9 +114,16 @@ class TestSelectProbePorts:
         assert _select_probe_ports([]) == []
 
     def test_subset_of_priority_list(self):
-        # Only two priority ports available; should return both, not pad with fallback
+        # Only two priority ports in dest — no non-priority ports to fill remaining slots
         result = _select_probe_ports(['22', '443'], max_ports=5)
         assert set(result) == {'22', '443'}
+
+    def test_fills_remaining_slots_with_non_priority_ports(self):
+        # 443 is priority; 9997/9998 are not — should fill up to max_ports=3
+        result = _select_probe_ports(['443', '9997', '9998'], max_ports=3)
+        assert result[0] == '443'          # priority port first
+        assert set(result) == {'443', '9997', '9998'}
+        assert len(result) == 3
 
 
 # ── _calc_scan_wait ────────────────────────────────────────────────────────────
@@ -1528,10 +1535,9 @@ class TestMassScanProbe:
     # ── scan-type-aware probe port selection ─────────────────────────────────
 
     def test_external_scan_uses_web_probe_ports_only(self, tmp_path):
-        """source_port=53 (External) → probe ports drawn only from EXTERNAL_PROBE_PORT_PRIORITY."""
+        """source_port=53 (External) → probe prefers EXTERNAL_PROBE_PORT_PRIORITY ports."""
         spoonmap.output_path = str(tmp_path)
-        # dest_ports: mix of external-priority ('443','80') and non-priority ('445','22')
-        # probe_ports=['443','80'], remaining=['445','22']
+        # batch_size=1: dest=['443','80','445','22'] → probe=['443'], remaining=['80','445','22']
         dest_ports = ['443', '80', '445', '22']
         with patch('spoonmap._run_masscan_batch', return_value={}) as mock_b:
             mass_scan('All', dest_ports, '53', '10000',
@@ -1542,7 +1548,8 @@ class TestMassScanProbe:
             if 'probe_fast' in call[0][2] or 'probe_slow' in call[0][2]
         ]
         probed_ports = {p for call in probe_calls for p in call[0][0]}
-        assert probed_ports <= set(EXTERNAL_PROBE_PORT_PRIORITY)
+        # With batch_size=1, only one probe port; it must be the top priority match
+        assert probed_ports == {'443'}
 
     def test_internal_scan_uses_full_probe_priority(self, tmp_path):
         """source_port=88 (Internal) → probe ports drawn from full PROBE_PORT_PRIORITY."""
@@ -2614,8 +2621,13 @@ class TestSlowPortsSMB:
         solo = [c for c in mock_batch.call_args_list if c.args[0] == ['445']]
         assert len(solo) >= 1, "Expected solo masscan call for 445 after probe miss"
 
-    def test_probe_found_445_no_duplicate_solo(self, tmp_path):
-        """batch_size > 1: when probe finds 445 it must NOT be re-queued as a solo batch."""
+    def test_probe_found_445_always_gets_solo_scan(self, tmp_path):
+        """batch_size=2: even when probe finds 445, it must still get a solo main-batch scan.
+
+        The probe runs against probe_target (discovery narrowed); main batches use the
+        combined target which may include additional hosts not in probe_target.
+        batch_size=2 → probe_ports=['445','80'], remaining_ports=['8888'].
+        """
         spoonmap.output_path = str(tmp_path)
         call_log = []
 
@@ -2627,9 +2639,9 @@ class TestSlowPortsSMB:
 
         with patch('spoonmap._run_masscan_batch', side_effect=side_effect):
             mass_scan('All', ['445', '80', '8888'], '88', '1000',
-                      '/fake/targets.txt', '', batch_size=5)
+                      '/fake/targets.txt', '', batch_size=2)
         solo = [b for b in call_log if b == ['445']]
-        assert len(solo) == 0, "445 found in probe must not be re-queued as a solo batch"
+        assert len(solo) >= 1, "445 must always get a solo main-batch scan regardless of probe result"
 
     def test_probe_missed_3389_gets_rebatched(self, tmp_path):
         """batch_size > 1: zero-result probe for 3389 must re-queue it into a batch.

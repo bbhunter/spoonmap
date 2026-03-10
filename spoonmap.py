@@ -433,13 +433,15 @@ def _run_masscan_batch(batch, rate, output_file, target_file, source_port, exclu
 
 
 def _select_probe_ports(dest_ports, max_ports=5, priority=None):
-    """Return up to max_ports high-probability ports from dest_ports."""
+    """Return up to max_ports ports from dest_ports, priority ports first."""
     if priority is None:
         priority = PROBE_PORT_PRIORITY
     dest_set = set(dest_ports)
     probe = [p for p in priority if p in dest_set][:max_ports]
-    if not probe:
-        probe = list(dest_ports[:max_ports])
+    if len(probe) < max_ports:
+        probed = set(probe)
+        extras = [p for p in dest_ports if p not in probed]
+        probe = probe + extras[:max_ports - len(probe)]
     return probe
 
 
@@ -726,6 +728,17 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
                              if not fast_results.get(p) and not slow_results.get(p)]
             if _probe_missed:
                 ports_to_batch = ports_to_batch + _probe_missed
+
+        # SLOW_PORTS from the probe are always re-queued for a dedicated solo scan.
+        # The probe runs against probe_target (a narrower set); main batches use the
+        # combined batch_target, so a probe hit alone may miss hosts that only appear
+        # in the combined target.
+        _slow_in_probe = [p for p in probe_ports_used if p in SLOW_PORTS]
+        if _slow_in_probe:
+            _already_queued = set(ports_to_batch)
+            ports_to_batch = ports_to_batch + [
+                p for p in _slow_in_probe if p not in _already_queued
+            ]
 
         # ── Build combined target: union(discovery IPs, probe IPs) ────────────
         probe_ips = {ip
