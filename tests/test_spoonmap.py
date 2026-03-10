@@ -16,6 +16,7 @@ from spoonmap import (
     PROBE_PORT_PRIORITY,
     _build_nmap_cmd,
     _merge_host_xml,
+    _nmap_udp_discovery,
     _parse_masscan_ping_xml,
     _parse_nmap_sn_xml,
     _run_masscan_batch,
@@ -2092,6 +2093,7 @@ class TestBuildNmapCmd:
         assert '--source-port' not in cmd
 
 
+
 # ── cucm-detect finding ───────────────────────────────────────────────────────
 
 class TestCucmDetectFinding:
@@ -2333,6 +2335,54 @@ class TestVNCFindings:
         assert '10.0.2.5' in content
 
 
+class TestIKEFindings:
+    """IKE findings from ike-version script on U:500."""
+
+    def test_ike_aggressive_psk_high(self, nmap_dir):
+        """ike-version output with 'aggressive' and 'psk' -> HIGH finding."""
+        xml = _nmap_xml(
+            '10.0.3.1', 'udp', '500',
+            scripts={'ike-version': 'Aggressive mode: yes\n  auth: PSK\n  vendor: strongSwan'})
+        (nmap_dir / 'nmap_results' / 'portU:500.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'IKE Aggressive Mode with Pre-Shared Key' in content
+        assert 'HIGH' in content
+        assert '10.0.3.1' in content
+
+    def test_ike_main_mode_only_info(self, nmap_dir):
+        """ike-version output without 'aggressive' keyword -> INFO, no HIGH."""
+        xml = _nmap_xml(
+            '10.0.3.2', 'udp', '500',
+            scripts={'ike-version': 'Main mode: supported\n  vendor: Cisco'})
+        (nmap_dir / 'nmap_results' / 'portU:500.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'IKE/IPsec Service Detected' in content
+        assert 'IKE Aggressive Mode with Pre-Shared Key' not in content
+
+    def test_ike_aggressive_no_psk_info(self, nmap_dir):
+        """ike-version output with 'aggressive' but auth RSA (not PSK) -> INFO, no HIGH."""
+        xml = _nmap_xml(
+            '10.0.3.3', 'udp', '500',
+            scripts={'ike-version': 'Aggressive mode: yes\n  auth: RSA\n  vendor: OpenSwan'})
+        (nmap_dir / 'nmap_results' / 'portU:500.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'IKE/IPsec Service Detected' in content
+        assert 'IKE Aggressive Mode with Pre-Shared Key' not in content
+
+    def test_ike_empty_output_no_finding(self, nmap_dir):
+        """ike-version absent -> no finding at all."""
+        xml = _nmap_xml('10.0.3.4', 'udp', '500')
+        (nmap_dir / 'nmap_results' / 'portU:500.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        findings_file = nmap_dir / 'findings.txt'
+        if findings_file.exists():
+            content = findings_file.read_text()
+            assert 'IKE' not in content
+
+
 # ── _parse_masscan_ping_xml ───────────────────────────────────────────────────
 
 def _masscan_ping_xml(*ips):
@@ -2567,3 +2617,139 @@ class TestSlowPortsSMB:
                            if c not in probe_batches]
         assert len(main_3389_calls) >= 1, \
             "Expected a main-batch masscan call for 3389 after probe miss"
+
+
+class TestNmapUdpDiscovery:
+    """Unit tests for _nmap_udp_discovery()."""
+
+    def test_open_host_is_returned(self, tmp_path):
+        """Host with UDP port 'open' → included in result."""
+        (tmp_path / 'masscan_results').mkdir()
+        xml = (
+            '<?xml version="1.0"?>'
+            '<nmaprun><host>'
+            '<address addr="10.0.0.1" addrtype="ipv4"/>'
+            '<ports><port protocol="udp" portid="500">'
+            '<state state="open"/></port></ports>'
+            '</host></nmaprun>'
+        )
+        spoonmap.output_path = str(tmp_path)
+        with patch('spoonmap.subprocess.Popen') as mock_popen, \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            mock_proc = MagicMock()
+            mock_proc.wait.return_value = 0
+            mock_popen.return_value = mock_proc
+            xml_path = tmp_path / 'masscan_results' / 'portU:500.xml'
+            xml_path.write_text(xml)
+            result = _nmap_udp_discovery('U:500', '/targets.txt', str(tmp_path),
+                                         '53', '')
+        assert '10.0.0.1' in result
+
+    def test_open_filtered_host_is_returned(self, tmp_path):
+        """Host with UDP port 'open|filtered' → included (NSE phase will confirm)."""
+        (tmp_path / 'masscan_results').mkdir()
+        xml = (
+            '<?xml version="1.0"?>'
+            '<nmaprun><host>'
+            '<address addr="10.0.0.2" addrtype="ipv4"/>'
+            '<ports><port protocol="udp" portid="500">'
+            '<state state="open|filtered"/></port></ports>'
+            '</host></nmaprun>'
+        )
+        spoonmap.output_path = str(tmp_path)
+        with patch('spoonmap.subprocess.Popen') as mock_popen, \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            mock_proc = MagicMock()
+            mock_proc.wait.return_value = 0
+            mock_popen.return_value = mock_proc
+            xml_path = tmp_path / 'masscan_results' / 'portU:500.xml'
+            xml_path.write_text(xml)
+            result = _nmap_udp_discovery('U:500', '/targets.txt', str(tmp_path),
+                                         '53', '')
+        assert '10.0.0.2' in result
+
+    def test_closed_host_is_excluded(self, tmp_path):
+        """Host with UDP port 'closed' → not included."""
+        (tmp_path / 'masscan_results').mkdir()
+        xml = (
+            '<?xml version="1.0"?>'
+            '<nmaprun><host>'
+            '<address addr="10.0.0.3" addrtype="ipv4"/>'
+            '<ports><port protocol="udp" portid="500">'
+            '<state state="closed"/></port></ports>'
+            '</host></nmaprun>'
+        )
+        spoonmap.output_path = str(tmp_path)
+        with patch('spoonmap.subprocess.Popen') as mock_popen, \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            mock_proc = MagicMock()
+            mock_proc.wait.return_value = 0
+            mock_popen.return_value = mock_proc
+            xml_path = tmp_path / 'masscan_results' / 'portU:500.xml'
+            xml_path.write_text(xml)
+            result = _nmap_udp_discovery('U:500', '/targets.txt', str(tmp_path),
+                                         '53', '')
+        assert '10.0.0.3' not in result
+
+    def test_resume_skips_scan_when_live_file_exists(self, tmp_path):
+        """resume=True + existing live_hosts file → no subprocess call."""
+        (tmp_path / 'masscan_results').mkdir()
+        (tmp_path / 'live_hosts').mkdir()
+        xml_path = tmp_path / 'masscan_results' / 'portU:500.xml'
+        xml_path.write_text('<nmaprun/>')
+        live_path = tmp_path / 'live_hosts' / 'portU:500.txt'
+        live_path.write_text('192.168.1.1\n')
+        spoonmap.output_path = str(tmp_path)
+        with patch('spoonmap.subprocess.Popen') as mock_popen:
+            result = _nmap_udp_discovery('U:500', '/targets.txt', str(tmp_path),
+                                         '53', '', resume=True)
+        mock_popen.assert_not_called()
+        assert '192.168.1.1' in result
+
+    def test_nmap_cmd_uses_sU_and_source_port(self, tmp_path):
+        """nmap command uses -sU, -Pn, --open, and --source-port."""
+        (tmp_path / 'masscan_results').mkdir()
+        spoonmap.output_path = str(tmp_path)
+        with patch('spoonmap.subprocess.Popen') as mock_popen, \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            mock_proc = MagicMock()
+            mock_proc.wait.return_value = 0
+            mock_popen.return_value = mock_proc
+            _nmap_udp_discovery('U:500', '/targets.txt', str(tmp_path), '53', '')
+        cmd = mock_popen.call_args[0][0]
+        assert '-sU' in cmd
+        assert '-Pn' in cmd
+        assert '--open' in cmd
+        assert '--source-port' in cmd
+        assert '53' in cmd
+        assert '500' in cmd
+        assert 'masscan' not in cmd[0]   # must be nmap, not masscan
+
+
+class TestMassScanUdp:
+    """mass_scan() routes UDP ports to nmap, not masscan."""
+
+    def test_udp_ports_not_passed_to_masscan(self, tmp_path):
+        """dest_ports with U:500 → masscan never called with U:500."""
+        spoonmap.output_path = str(tmp_path)
+        with patch('spoonmap._run_masscan_batch', return_value={}) as mock_m, \
+             patch('spoonmap._nmap_udp_discovery', return_value=set()) as mock_u:
+            mass_scan('All', ['443', 'U:500'], '53', '10000',
+                      '/fake/targets.txt', '', batch_size=1)
+        for call in mock_m.call_args_list:
+            batch = call[0][0]
+            assert 'U:500' not in batch
+
+    def test_udp_ports_trigger_nmap_udp_discovery(self, tmp_path):
+        """dest_ports with U:500 → _nmap_udp_discovery called with 'U:500'."""
+        spoonmap.output_path = str(tmp_path)
+        with patch('spoonmap._run_masscan_batch', return_value={}) as mock_m, \
+             patch('spoonmap._nmap_udp_discovery', return_value=set()) as mock_u:
+            mass_scan('All', ['443', 'U:500'], '53', '10000',
+                      '/fake/targets.txt', '', batch_size=1)
+        udp_calls = [c for c in mock_u.call_args_list if c[0][0] == 'U:500']
+        assert len(udp_calls) == 1

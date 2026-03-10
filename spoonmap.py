@@ -497,6 +497,73 @@ def _delete_previous_results(output_path):
             os.remove(p)
 
 
+def _nmap_udp_discovery(udp_port, target_file, output_path, source_port,
+                        exclusions_file, resume=False):
+    """Run nmap UDP scan for a single port; return set of candidate IPs.
+
+    Uses --open (which in nmap captures 'open' and 'open|filtered' states) so
+    that protocol-specific services only detectable by NSE probes are not missed
+    by the banner/script phase.  The resulting IPs are written to
+    live_hosts/portU:N.txt for consumption by nmap_scan().
+    """
+    port_num = udp_port[2:]          # strip 'U:'
+    output_file = f'{output_path}/masscan_results/port{udp_port}.xml'
+
+    if resume and os.path.exists(output_file):
+        live_file = f'{output_path}/live_hosts/port{udp_port}.txt'
+        if os.path.exists(live_file):
+            with open(live_file) as fh:
+                return {line.strip() for line in fh if line.strip()}
+        return set()
+
+    cmd = [
+        'nmap', '-T4', '-sU', '-Pn',
+        '-p', port_num,
+        '--open',
+        '--source-port', source_port,
+        '-iL', target_file,
+        '-oX', output_file,
+    ]
+    if exclusions_file:
+        cmd += ['--excludefile', exclusions_file]
+
+    print(_COLOR_INFO + f'UDP discovery: scanning port {port_num} with nmap...' + _COLOR_RESET)
+
+    term_state = save_terminal_state()
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc.wait()
+    except KeyboardInterrupt:
+        proc.kill()
+        proc.wait()
+        restore_terminal_state(term_state)
+        raise
+    except FileNotFoundError:
+        print(_COLOR_ERROR + 'Error: nmap not found.' + _COLOR_RESET)
+        restore_terminal_state(term_state)
+        return set()
+    finally:
+        restore_terminal_state(term_state)
+
+    ips = set()
+    if not os.path.exists(output_file) or os.stat(output_file).st_size == 0:
+        return ips
+    try:
+        root = etree.parse(output_file)
+        for host in root.findall('host'):
+            addr = host.find('address[@addrtype="ipv4"]')
+            if addr is None:
+                continue
+            ip = addr.attrib['addr']
+            for port_elem in host.findall('.//port'):
+                state_elem = port_elem.find('state')
+                if state_elem is not None and state_elem.attrib.get('state') in ('open', 'open|filtered'):
+                    ips.add(ip)
+    except etree.ParseError as e:
+        print(_COLOR_ERROR + f'Error parsing nmap UDP XML: {e}' + _COLOR_RESET)
+    return ips
+
+
 def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusions_file, batch_size=1, resume=False, discovery_file=None):
     status_summary = '\nSummary'
 
@@ -505,6 +572,11 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
 
     # Track unique IPs per port in memory for efficiency
     port_ips = {}
+
+    # Split TCP and UDP: masscan is unreliable for UDP (no protocol-specific probes).
+    # UDP ports are discovered separately via nmap after the TCP masscan phase.
+    tcp_ports = [p for p in dest_ports if not p.startswith('U:')]
+    udp_ports  = [p for p in dest_ports if p.startswith('U:')]
 
     effective_rate = max_rate
     # (no cap — category/custom batched scans always use full max_rate)
@@ -568,9 +640,9 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
         return status_summary
 
     probe_priority = EXTERNAL_PROBE_PORT_PRIORITY if source_port == '53' else PROBE_PORT_PRIORITY
-    probe_ports = _select_probe_ports(dest_ports, priority=probe_priority)
+    probe_ports = _select_probe_ports(tcp_ports, priority=probe_priority)
     probe_set = set(probe_ports)
-    remaining_ports = [p for p in dest_ports if p not in probe_set]
+    remaining_ports = [p for p in tcp_ports if p not in probe_set]
 
     # Only run probe when there are additional ports beyond the probe set
     if probe_ports and remaining_ports:
@@ -674,7 +746,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
             batch_target = target_file
     else:
         # No probe ran — use discovery file if available, else full target
-        ports_to_batch = dest_ports
+        ports_to_batch = tcp_ports
         batch_target = discovery_file if (discovery_file and os.path.exists(discovery_file)) else target_file
 
     batch_wait_secs = 0 if discovery_file else wait_secs
@@ -769,6 +841,26 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
                           + f'(from port {partner})'
                           + _COLOR_RESET)
 
+    # ── nmap UDP discovery (masscan replacement) ──────────────────────────────
+    for udp_port in udp_ports:
+        os.makedirs(output_path + '/live_hosts', exist_ok=True)
+        ips = _nmap_udp_discovery(
+            udp_port, target_file, output_path,
+            source_port, exclusions_file, resume=resume,
+        )
+        if ips:
+            port_ips[udp_port] = ips
+            with open(f'{output_path}/live_hosts/port{udp_port}.txt', 'w') as f:
+                for ip in sorted(ips):
+                    f.write(f'{ip}\n')
+            host_count = len(ips)
+            status_update = f'\nHosts Found on Port {udp_port}: {host_count}'
+            status_summary += status_update
+            print(_COLOR_PROGRESS + status_update + _COLOR_RESET)
+        else:
+            print(_COLOR_INFO
+                  + f'No hosts found on UDP port {udp_port[2:]}' + _COLOR_RESET)
+
     return status_summary
 
 def create_hostname_target_file(ip_file, hostname_file, ip_to_hostname):
@@ -794,6 +886,7 @@ def _build_nmap_cmd(dest_port, input_file, output_file, source_port,
     --source-port is omitted for SMB ports when scripts are active: nmap runs all
     NSE scripts concurrently; with a fixed source port every script tries to connect
     from the same (src:88, dst:445) 4-tuple and all but one fail silently.
+
     """
     if 'U:' in dest_port:
         cmd = [
@@ -1067,6 +1160,7 @@ EXTERNAL_PORT_SCRIPTS = {
     '8443':  'ssl-cert',
     '10443': 'ssl-cert',
     'U:623': f'ipmi-version,ipmi-cipher-zero,{_DIR}/nse/ipmi-hashdump.nse',
+    'U:500': 'ike-version',
     '5900':  'vnc-info,realvnc-auth-bypass',
     '5901':  'vnc-info,realvnc-auth-bypass',
 }
@@ -1105,6 +1199,7 @@ INTERNAL_PORT_SCRIPTS = {
     '3268':  f'{_DIR}/nse/ldap-signing-check.nse',
     '3269':  f'{_DIR}/nse/ldap-channel-binding-check.nse',
     'U:623': f'ipmi-version,ipmi-cipher-zero,{_DIR}/nse/ipmi-hashdump.nse',
+    'U:500': 'ike-version',
     '5900':  'vnc-info,realvnc-auth-bypass',
     '5901':  'vnc-info,realvnc-auth-bypass',
 }
@@ -1145,6 +1240,7 @@ EXTERNAL_SENSITIVE_PORTS = [
     ('U:161', 'HIGH', 'SNMP — should not be internet-facing'),
     ('161',   'HIGH', 'SNMP — should not be internet-facing'),
     ('U:623', 'CRITICAL', 'IPMI — BMC management interface should never be internet-facing'),
+    ('U:500', 'HIGH', 'IKE/IPsec — VPN endpoint exposed; confirm only authorised sources can reach it'),
     ('3389',  'HIGH', 'RDP — direct internet exposure is high risk'),
     ('5900',  'HIGH', 'VNC — remote desktop should not be internet-facing'),
     ('5901',  'HIGH', 'VNC — remote desktop should not be internet-facing'),
@@ -1636,6 +1732,21 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
                         add('INFO', ip, port_str,
                             'IPMI Service Detected',
                             f'IPMI management interface is accessible. {out[:200]}')
+
+                # ── ike-version (IKE Aggressive Mode + PSK) ──────────────────
+                if 'ike-version' in scripts:
+                    out = scripts['ike-version']
+                    if 'aggressive' in out.lower() and 'psk' in out.lower():
+                        add('HIGH', ip, port_str,
+                            'IKE Aggressive Mode with Pre-Shared Key',
+                            'The IKE service accepts Aggressive Mode proposals with PSK authentication. '
+                            'The responder transmits its identity and a hash of the pre-shared key in '
+                            'cleartext, enabling offline cracking. Use ike-scan --aggressive to capture '
+                            'the hash; crack with hashcat. Migrate to Main Mode or certificate-based auth.')
+                    elif out.strip():
+                        add('INFO', ip, port_str,
+                            'IKE/IPsec Service Detected',
+                            f'IKE VPN endpoint identified. {out.strip()[:200]}')
 
                 # ── vnc-info (no-auth VNC) ────────────────────────────────────
                 if 'vnc-info' in scripts:
