@@ -650,8 +650,8 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
     probe_set = set(probe_ports)
     remaining_ports = [p for p in tcp_ports if p not in probe_set]
 
-    # Only run probe when there are additional ports beyond the probe set
-    if probe_ports and remaining_ports:
+    # Always probe for rate calibration when there are TCP ports
+    if probe_ports:
         half_rate = str(max(1, int(max_rate) // 2))
         if batch_size == 1:
             # Iterative single-port probe: try each probe port until a result is found
