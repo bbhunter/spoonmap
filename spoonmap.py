@@ -2546,8 +2546,9 @@ def _filter_udp_live_hosts(output_path):
     nmap_dir = os.path.join(output_path, 'nmap_results')
     live_dir  = os.path.join(_disc(output_path), 'live_hosts')
     if not os.path.isdir(nmap_dir):
-        return
+        return {}
 
+    confirmed_counts = {}
     for fname in sorted(os.listdir(nmap_dir)):
         if not (fname.startswith('portU:') and fname.endswith('.xml')):
             continue
@@ -2582,6 +2583,8 @@ def _filter_udp_live_hosts(output_path):
                   + f'UDP filter ({port_key}): removed {len(removed)} unconfirmed host(s)'
                   + _COLOR_RESET)
 
+        confirmed_counts[port_key] = len(confirmed)
+
         # Rewrite live_hosts file
         with open(live_file, 'w') as fh:
             for ip in sorted(confirmed):
@@ -2594,6 +2597,8 @@ def _filter_udp_live_hosts(output_path):
                 root_elem.remove(host)
         with open(nmap_xml, 'wb') as fh:
             tree.write(fh)
+
+    return confirmed_counts
 
 
 # The Main Guts
@@ -2918,7 +2923,18 @@ def main():
         # If service banners requested, send to nmap
         if banner_scan or script_scan:
             nmap_scan(source_port, nmap_threads, ip_to_hostname, script_scan, target_scan)
-            _filter_udp_live_hosts(output_path)
+            udp_confirmed = _filter_udp_live_hosts(output_path)
+            for port_key, count in udp_confirmed.items():
+                lines = status_summary.split('\n')
+                updated = []
+                for line in lines:
+                    if line.startswith(f'Hosts Found on Port {port_key}:'):
+                        if count > 0:
+                            updated.append(f'Hosts Found on Port {port_key}: {count}')
+                        # drop the line entirely when count == 0
+                    else:
+                        updated.append(line)
+                status_summary = '\n'.join(updated)
 
             if script_scan and target_scan == 'Internal':
                 _scan_extra_sql_ports(output_path, source_port)

@@ -2815,13 +2815,14 @@ class TestFilterUdpLiveHosts:
         (nmap_dir / 'portU:500.xml').write_text(self._make_nmap_xml('10.0.0.1', '500', 'open'))
         (live_dir / 'portU:500.txt').write_text('10.0.0.1\n')
 
-        _filter_udp_live_hosts(str(tmp_path))
+        result = _filter_udp_live_hosts(str(tmp_path))
 
         assert (live_dir / 'portU:500.txt').read_text().strip() == '10.0.0.1'
         tree = etree.parse(str(nmap_dir / 'portU:500.xml'))
         hosts = tree.findall('host')
         assert len(hosts) == 1
         assert hosts[0].find('address').attrib['addr'] == '10.0.0.1'
+        assert result == {'U:500': 1}
 
     def test_open_filtered_ip_removed(self, tmp_path):
         """IP with port state 'open|filtered' is removed from live_hosts and nmap XML."""
@@ -2833,15 +2834,17 @@ class TestFilterUdpLiveHosts:
             self._make_nmap_xml('10.0.0.2', '500', 'open|filtered'))
         (live_dir / 'portU:500.txt').write_text('10.0.0.2\n')
 
-        _filter_udp_live_hosts(str(tmp_path))
+        result = _filter_udp_live_hosts(str(tmp_path))
 
         assert (live_dir / 'portU:500.txt').read_text().strip() == ''
         tree = etree.parse(str(nmap_dir / 'portU:500.xml'))
         assert tree.findall('host') == []
+        assert result == {'U:500': 0}
 
     def test_no_nmap_results_dir_is_noop(self, tmp_path):
-        """Missing nmap_results/ directory → function returns without error."""
-        _filter_udp_live_hosts(str(tmp_path))   # must not raise
+        """Missing nmap_results/ directory → function returns empty dict without error."""
+        result = _filter_udp_live_hosts(str(tmp_path))
+        assert result == {}
 
     def test_removal_count_printed(self, tmp_path, capsys):
         """Removed IPs produce an info message with count."""
@@ -2880,7 +2883,7 @@ class TestFilterUdpLiveHosts:
         (nmap_dir / 'portU:500.xml').write_text(xml)
         (live_dir / 'portU:500.txt').write_text('10.0.0.10\n10.0.0.20\n')
 
-        _filter_udp_live_hosts(str(tmp_path))
+        result = _filter_udp_live_hosts(str(tmp_path))
 
         tree = etree.parse(str(nmap_dir / 'portU:500.xml'))
         remaining_ips = {
@@ -2888,3 +2891,69 @@ class TestFilterUdpLiveHosts:
         }
         assert '10.0.0.10' in remaining_ips
         assert '10.0.0.20' not in remaining_ips
+        assert result == {'U:500': 1}
+
+    def test_summary_updated_after_filter(self, tmp_path):
+        """status_summary lines for UDP ports reflect post-filter confirmed count."""
+        nmap_dir = tmp_path / 'nmap_results'
+        live_dir = tmp_path / 'discovery' / 'live_hosts'
+        nmap_dir.mkdir()
+        live_dir.mkdir(parents=True)
+        # One open, one open|filtered — only one confirmed
+        xml = (
+            '<?xml version="1.0"?><nmaprun>'
+            '<host><address addr="10.0.0.1" addrtype="ipv4"/>'
+            '<ports><port protocol="udp" portid="500">'
+            '<state state="open"/></port></ports></host>'
+            '<host><address addr="10.0.0.2" addrtype="ipv4"/>'
+            '<ports><port protocol="udp" portid="500">'
+            '<state state="open|filtered"/></port></ports></host>'
+            '</nmaprun>'
+        )
+        (nmap_dir / 'portU:500.xml').write_text(xml)
+        (live_dir / 'portU:500.txt').write_text('10.0.0.1\n10.0.0.2\n')
+
+        udp_confirmed = _filter_udp_live_hosts(str(tmp_path))
+
+        # Simulate the summary-patching logic from main()
+        status_summary = '\nSummary\nHosts Found on Port 80: 3\nHosts Found on Port U:500: 2'
+        for port_key, count in udp_confirmed.items():
+            lines = status_summary.split('\n')
+            updated = []
+            for line in lines:
+                if line.startswith(f'Hosts Found on Port {port_key}:'):
+                    if count > 0:
+                        updated.append(f'Hosts Found on Port {port_key}: {count}')
+                else:
+                    updated.append(line)
+            status_summary = '\n'.join(updated)
+
+        assert 'Hosts Found on Port U:500: 1' in status_summary
+        assert 'Hosts Found on Port U:500: 2' not in status_summary
+        assert 'Hosts Found on Port 80: 3' in status_summary
+
+    def test_summary_drops_zero_count_udp_port(self, tmp_path):
+        """A UDP port with 0 confirmed hosts is removed from status_summary."""
+        nmap_dir = tmp_path / 'nmap_results'
+        live_dir = tmp_path / 'discovery' / 'live_hosts'
+        nmap_dir.mkdir()
+        live_dir.mkdir(parents=True)
+        (nmap_dir / 'portU:500.xml').write_text(
+            self._make_nmap_xml('10.0.0.1', '500', 'open|filtered'))
+        (live_dir / 'portU:500.txt').write_text('10.0.0.1\n')
+
+        udp_confirmed = _filter_udp_live_hosts(str(tmp_path))
+
+        status_summary = '\nSummary\nHosts Found on Port U:500: 1'
+        for port_key, count in udp_confirmed.items():
+            lines = status_summary.split('\n')
+            updated = []
+            for line in lines:
+                if line.startswith(f'Hosts Found on Port {port_key}:'):
+                    if count > 0:
+                        updated.append(f'Hosts Found on Port {port_key}: {count}')
+                else:
+                    updated.append(line)
+            status_summary = '\n'.join(updated)
+
+        assert 'U:500' not in status_summary
