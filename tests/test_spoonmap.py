@@ -16,6 +16,7 @@ from spoonmap import (
     PROBE_PORT_PRIORITY,
     _build_nmap_cmd,
     _merge_host_xml,
+    _filter_udp_live_hosts,
     _nmap_udp_discovery,
     _parse_masscan_ping_xml,
     _parse_nmap_sn_xml,
@@ -2647,7 +2648,7 @@ class TestNmapUdpDiscovery:
         assert '10.0.0.1' in result
 
     def test_open_filtered_host_is_returned(self, tmp_path):
-        """Host with UDP port 'open|filtered' → included (NSE phase will confirm)."""
+        """Host with UDP port 'open|filtered' → included in result for NSE confirmation."""
         (tmp_path / 'masscan_results').mkdir()
         xml = (
             '<?xml version="1.0"?>'
@@ -2753,3 +2754,102 @@ class TestMassScanUdp:
                       '/fake/targets.txt', '', batch_size=1)
         udp_calls = [c for c in mock_u.call_args_list if c[0][0] == 'U:500']
         assert len(udp_calls) == 1
+
+
+class TestFilterUdpLiveHosts:
+    """Unit tests for _filter_udp_live_hosts()."""
+
+    def _make_nmap_xml(self, ip, port, state):
+        """Return minimal nmap XML with a single host/port entry."""
+        return (
+            '<?xml version="1.0"?>'
+            '<nmaprun>'
+            f'<host><address addr="{ip}" addrtype="ipv4"/>'
+            f'<ports><port protocol="udp" portid="{port}">'
+            f'<state state="{state}"/></port></ports>'
+            '</host>'
+            '</nmaprun>'
+        )
+
+    def test_confirmed_open_ip_kept(self, tmp_path):
+        """IP with port state 'open' stays in live_hosts and nmap XML after filter."""
+        nmap_dir  = tmp_path / 'nmap_results'
+        live_dir  = tmp_path / 'live_hosts'
+        nmap_dir.mkdir()
+        live_dir.mkdir()
+        (nmap_dir / 'portU:500.xml').write_text(self._make_nmap_xml('10.0.0.1', '500', 'open'))
+        (live_dir / 'portU:500.txt').write_text('10.0.0.1\n')
+
+        _filter_udp_live_hosts(str(tmp_path))
+
+        assert (live_dir / 'portU:500.txt').read_text().strip() == '10.0.0.1'
+        tree = etree.parse(str(nmap_dir / 'portU:500.xml'))
+        hosts = tree.findall('host')
+        assert len(hosts) == 1
+        assert hosts[0].find('address').attrib['addr'] == '10.0.0.1'
+
+    def test_open_filtered_ip_removed(self, tmp_path):
+        """IP with port state 'open|filtered' is removed from live_hosts and nmap XML."""
+        nmap_dir  = tmp_path / 'nmap_results'
+        live_dir  = tmp_path / 'live_hosts'
+        nmap_dir.mkdir()
+        live_dir.mkdir()
+        (nmap_dir / 'portU:500.xml').write_text(
+            self._make_nmap_xml('10.0.0.2', '500', 'open|filtered'))
+        (live_dir / 'portU:500.txt').write_text('10.0.0.2\n')
+
+        _filter_udp_live_hosts(str(tmp_path))
+
+        assert (live_dir / 'portU:500.txt').read_text().strip() == ''
+        tree = etree.parse(str(nmap_dir / 'portU:500.xml'))
+        assert tree.findall('host') == []
+
+    def test_no_nmap_results_dir_is_noop(self, tmp_path):
+        """Missing nmap_results/ directory → function returns without error."""
+        _filter_udp_live_hosts(str(tmp_path))   # must not raise
+
+    def test_removal_count_printed(self, tmp_path, capsys):
+        """Removed IPs produce an info message with count."""
+        nmap_dir  = tmp_path / 'nmap_results'
+        live_dir  = tmp_path / 'live_hosts'
+        nmap_dir.mkdir()
+        live_dir.mkdir()
+        (nmap_dir / 'portU:500.xml').write_text(
+            self._make_nmap_xml('10.0.0.3', '500', 'open|filtered'))
+        (live_dir / 'portU:500.txt').write_text('10.0.0.3\n')
+
+        _filter_udp_live_hosts(str(tmp_path))
+
+        captured = capsys.readouterr()
+        assert 'UDP filter (U:500)' in captured.out
+        assert '1' in captured.out
+
+    def test_nmap_xml_rewritten_without_unconfirmed_hosts(self, tmp_path):
+        """After filter, XML on disk has no host elements for unconfirmed IPs."""
+        nmap_dir  = tmp_path / 'nmap_results'
+        live_dir  = tmp_path / 'live_hosts'
+        nmap_dir.mkdir()
+        live_dir.mkdir()
+        # Two hosts: one open, one open|filtered
+        xml = (
+            '<?xml version="1.0"?>'
+            '<nmaprun>'
+            '<host><address addr="10.0.0.10" addrtype="ipv4"/>'
+            '<ports><port protocol="udp" portid="500">'
+            '<state state="open"/></port></ports></host>'
+            '<host><address addr="10.0.0.20" addrtype="ipv4"/>'
+            '<ports><port protocol="udp" portid="500">'
+            '<state state="open|filtered"/></port></ports></host>'
+            '</nmaprun>'
+        )
+        (nmap_dir / 'portU:500.xml').write_text(xml)
+        (live_dir / 'portU:500.txt').write_text('10.0.0.10\n10.0.0.20\n')
+
+        _filter_udp_live_hosts(str(tmp_path))
+
+        tree = etree.parse(str(nmap_dir / 'portU:500.xml'))
+        remaining_ips = {
+            h.find('address').attrib['addr'] for h in tree.findall('host')
+        }
+        assert '10.0.0.10' in remaining_ips
+        assert '10.0.0.20' not in remaining_ips

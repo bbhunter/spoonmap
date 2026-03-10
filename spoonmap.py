@@ -2527,6 +2527,69 @@ def _path_completion():
             pass
 
 
+def _filter_udp_live_hosts(output_path):
+    """Rewrite live_hosts/portU:N.txt and nmap_results/portU:N.xml to only
+    NSE-confirmed open IPs.
+
+    After nmap_scan() runs protocol-specific scripts against UDP candidates,
+    parse each nmap_results/portU:N.xml and drop any IP whose port state is
+    still 'open|filtered' (no script response = firewall drop, not confirmed).
+    Both the live_hosts file and the nmap XML are rewritten so that downstream
+    aggregations (all_live_hosts.txt, spoonmap_output.xml/.json) are clean.
+    """
+    nmap_dir = os.path.join(output_path, 'nmap_results')
+    live_dir  = os.path.join(output_path, 'live_hosts')
+    if not os.path.isdir(nmap_dir):
+        return
+
+    for fname in sorted(os.listdir(nmap_dir)):
+        if not (fname.startswith('portU:') and fname.endswith('.xml')):
+            continue
+        port_key  = fname[4:-4]          # e.g. 'U:500'
+        nmap_xml  = os.path.join(nmap_dir, fname)
+        live_file = os.path.join(live_dir, f'port{port_key}.txt')
+        if not os.path.exists(nmap_xml) or not os.path.exists(live_file):
+            continue
+
+        confirmed = set()
+        try:
+            tree = etree.parse(nmap_xml)
+            root_elem = tree.getroot()
+            for host in root_elem.findall('host'):
+                addr = host.find('address[@addrtype="ipv4"]')
+                if addr is None:
+                    continue
+                ip = addr.attrib['addr']
+                for port_elem in host.findall('.//port'):
+                    state_elem = port_elem.find('state')
+                    if state_elem is not None and state_elem.attrib.get('state') == 'open':
+                        confirmed.add(ip)
+        except etree.ParseError as e:
+            print(_COLOR_ERROR + f'Error parsing {fname}: {e}' + _COLOR_RESET)
+            continue
+
+        with open(live_file) as fh:
+            original = {line.strip() for line in fh if line.strip()}
+        removed = original - confirmed
+        if removed:
+            print(_COLOR_INFO
+                  + f'UDP filter ({port_key}): removed {len(removed)} unconfirmed host(s)'
+                  + _COLOR_RESET)
+
+        # Rewrite live_hosts file
+        with open(live_file, 'w') as fh:
+            for ip in sorted(confirmed):
+                fh.write(ip + '\n')
+
+        # Rewrite nmap XML — remove open|filtered host entries so spoonmap_output.* is clean
+        for host in root_elem.findall('host'):
+            addr = host.find('address[@addrtype="ipv4"]')
+            if addr is None or addr.attrib['addr'] not in confirmed:
+                root_elem.remove(host)
+        with open(nmap_xml, 'wb') as fh:
+            tree.write(fh)
+
+
 # The Main Guts
 def main():
     global dir_path
@@ -2672,6 +2735,14 @@ def main():
                 banner_scan = True
             else:
                 banner_scan = False
+                # Warn if UDP ports are in scope — open|filtered won't be confirmed
+                udp_in_scope = any(p.startswith('U:') for p in dest_ports)
+                if udp_in_scope:
+                    print(_COLOR_WARNING
+                          + 'Warning: UDP ports are in scope but banner_scan is disabled. '
+                          + 'open|filtered hosts will not be confirmed via NSE scripts, '
+                          + 'which may significantly inflate host counts.'
+                          + _COLOR_RESET)
 
         if script_scan == '':
             if banner_scan:
@@ -2841,6 +2912,7 @@ def main():
         # If service banners requested, send to nmap
         if banner_scan or script_scan:
             nmap_scan(source_port, nmap_threads, ip_to_hostname, script_scan, target_scan)
+            _filter_udp_live_hosts(output_path)
 
             if script_scan and target_scan == 'Internal':
                 _scan_extra_sql_ports(output_path, source_port)

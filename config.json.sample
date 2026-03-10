@@ -5,6 +5,7 @@
     "dest_ports": [],
     "masscan_batch_size": 5,
     "__banner_scan_choices__" : "True, False",
+    "__banner_scan_udp_warning__": "WARNING: When scanning UDP ports (U:* prefixed) with banner_scan=False, hosts will not undergo NSE confirmation. All open|filtered UDP hosts (typically the majority) will appear in output, inflating host counts significantly. Enable banner_scan or script_scan when using UDP ports.",
     "banner_scan" : "True",
     "__script_scan_choices__" : "True, False",
     "script_scan" : "False",
