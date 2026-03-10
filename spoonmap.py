@@ -1240,7 +1240,6 @@ EXTERNAL_SENSITIVE_PORTS = [
     ('U:161', 'HIGH', 'SNMP — should not be internet-facing'),
     ('161',   'HIGH', 'SNMP — should not be internet-facing'),
     ('U:623', 'CRITICAL', 'IPMI — BMC management interface should never be internet-facing'),
-    ('U:500', 'HIGH', 'IKE/IPsec — VPN endpoint exposed; confirm only authorised sources can reach it'),
     ('3389',  'HIGH', 'RDP — direct internet exposure is high risk'),
     ('5900',  'HIGH', 'VNC — remote desktop should not be internet-facing'),
     ('5901',  'HIGH', 'VNC — remote desktop should not be internet-facing'),
@@ -1444,6 +1443,9 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
             ip = addr_elem.attrib['addr']
 
             for port_elem in host.iter('port'):
+                state_elem = port_elem.find('state')
+                if state_elem is not None and state_elem.attrib.get('state') != 'open':
+                    continue
                 portid   = port_elem.attrib.get('portid', '')
                 protocol = port_elem.attrib.get('protocol', 'tcp')
                 port_key = f'U:{portid}' if protocol == 'udp' else portid

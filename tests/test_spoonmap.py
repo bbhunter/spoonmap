@@ -852,6 +852,27 @@ class TestGenerateFindings:
         data = json.loads((nmap_dir / 'findings.json').read_text())
         assert any(r['title'] == 'Anonymous FTP' for r in data)
 
+    def test_open_filtered_port_excluded_from_findings(self, nmap_dir):
+        """Port with state open|filtered must not appear in findings."""
+        xml = (
+            '<?xml version="1.0"?>\n'
+            '<nmaprun>\n'
+            '  <host>\n'
+            '    <address addr="10.0.0.5" addrtype="ipv4"/>\n'
+            '    <ports>\n'
+            '      <port protocol="tcp" portid="445">\n'
+            '        <state state="open|filtered"/>\n'
+            '      </port>\n'
+            '    </ports>\n'
+            '  </host>\n'
+            '</nmaprun>\n'
+        )
+        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        findings_file = nmap_dir / 'findings.txt'
+        if findings_file.exists():
+            assert 'Service Exposed Externally' not in findings_file.read_text()
+
 
 # ── _previous_results_exist / _delete_previous_results ───────────────────────
 
@@ -2382,6 +2403,17 @@ class TestIKEFindings:
         if findings_file.exists():
             content = findings_file.read_text()
             assert 'IKE' not in content
+
+    def test_ike_port_not_flagged_as_service_exposed(self, nmap_dir):
+        """U:500 must not produce a 'Service Exposed Externally' finding even when confirmed open."""
+        xml = _nmap_xml(
+            '10.0.3.5', 'udp', '500',
+            scripts={'ike-version': 'Main mode: supported\n  vendor: Cisco'})
+        (nmap_dir / 'nmap_results' / 'portU:500.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'Service Exposed Externally' not in content
+        assert 'IKE/IPsec Service Detected' in content
 
 
 # ── _parse_masscan_ping_xml ───────────────────────────────────────────────────
