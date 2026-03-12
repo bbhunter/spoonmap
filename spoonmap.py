@@ -862,10 +862,11 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
                           + _COLOR_RESET)
 
     # ── nmap UDP discovery (masscan replacement) ──────────────────────────────
+    udp_target = discovery_file if (discovery_file and os.path.exists(discovery_file)) else target_file
     for udp_port in udp_ports:
         os.makedirs(f'{disc}/live_hosts', exist_ok=True)
         ips = _nmap_udp_discovery(
-            udp_port, target_file, output_path,
+            udp_port, udp_target, output_path,
             source_port, exclusions_file, resume=resume,
         )
         if ips:

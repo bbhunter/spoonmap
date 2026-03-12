@@ -2801,6 +2801,29 @@ class TestMassScanUdp:
         udp_calls = [c for c in mock_u.call_args_list if c[0][0] == 'U:500']
         assert len(udp_calls) == 1
 
+    def test_udp_uses_discovery_file_when_available(self, tmp_path):
+        """UDP discovery uses discovery_file (live hosts) when it exists, not full target list."""
+        spoonmap.output_path = str(tmp_path)
+        disc_file = tmp_path / 'live_hosts_discovery.txt'
+        disc_file.write_text('10.0.0.1\n')
+        with patch('spoonmap._run_masscan_batch', return_value={}), \
+             patch('spoonmap._nmap_udp_discovery', return_value=set()) as mock_u:
+            mass_scan('All', ['U:161'], '88', '1000',
+                      '/fake/targets.txt', '', batch_size=1,
+                      discovery_file=str(disc_file))
+        udp_call = mock_u.call_args_list[0]
+        assert udp_call[0][1] == str(disc_file)
+
+    def test_udp_falls_back_to_target_file_without_discovery(self, tmp_path):
+        """UDP discovery falls back to full target file when no discovery file exists."""
+        spoonmap.output_path = str(tmp_path)
+        with patch('spoonmap._run_masscan_batch', return_value={}), \
+             patch('spoonmap._nmap_udp_discovery', return_value=set()) as mock_u:
+            mass_scan('All', ['U:161'], '88', '1000',
+                      '/fake/targets.txt', '', batch_size=1)
+        udp_call = mock_u.call_args_list[0]
+        assert udp_call[0][1] == '/fake/targets.txt'
+
 
 class TestFilterUdpLiveHosts:
     """Unit tests for _filter_udp_live_hosts()."""
