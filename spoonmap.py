@@ -718,10 +718,13 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
                 with open(f'{disc}/live_hosts/port{port_key}.txt', 'w') as f:
                     for ip in sorted(combined):
                         f.write(f'{ip}\n')
-                host_count = len(combined)
-                status_update = f'\nHosts Found on Port {port_key}: {host_count}'
-                status_summary += status_update
-                print(_COLOR_PROGRESS + status_update + _COLOR_RESET)
+                if port_key not in SLOW_PORTS:
+                    # SLOW_PORTS are always re-queued for a solo batch scan;
+                    # their summary is emitted once from that batch phase.
+                    host_count = len(combined)
+                    status_update = f'\nHosts Found on Port {port_key}: {host_count}'
+                    status_summary += status_update
+                    print(_COLOR_PROGRESS + status_update + _COLOR_RESET)
 
         # When batch_size > 1, any probe port that returned zero results in the
         # combined probe batch is re-queued into the main batch phase for a second

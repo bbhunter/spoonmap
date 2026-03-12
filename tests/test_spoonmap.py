@@ -1642,6 +1642,65 @@ class TestMassScanProbe:
         ]
         assert '389' not in all_ports_scanned
 
+    # ── summary deduplication ─────────────────────────────────────────────────
+
+    def test_slow_port_summary_not_emitted_in_probe_phase(self, tmp_path):
+        """Port 445 (SLOW_PORT) probed and found: summary must not appear from probe phase.
+
+        445 is always re-queued for a solo batch; the summary is emitted exactly
+        once from that batch phase, not twice (once from probe + once from batch).
+        """
+        spoonmap.output_path = str(tmp_path)
+        # Internal scan: PROBE_PORT_PRIORITY includes 445 (position 2, after 443).
+        # dest_ports=['445','3306'], batch_size=1 → probe selects ['445'].
+        # remaining=['3306']. 445 is in SLOW_PORTS so it is re-queued for a solo batch.
+        responses = [
+            {'445': {'10.0.0.1'}},   # probe_fast_0 (445) — hit
+            {},                       # probe_slow_0 (445) — no extra hosts
+            {'445': {'10.0.0.2'}},   # solo batch for 445 — additional host
+            {},                       # main batch for 3306
+        ]
+        with patch('spoonmap._run_masscan_batch',
+                   side_effect=self._make_batch_side_effect(responses)):
+            result = mass_scan('All', ['445', '3306'], '88', '1000',
+                               '/fake/targets.txt', '', batch_size=1)
+
+        assert result.count('Hosts Found on Port 445') == 1
+
+    def test_slow_port_summary_emitted_from_batch_phase(self, tmp_path):
+        """The single 445 summary reflects merged count: probe IPs ∪ batch IPs."""
+        spoonmap.output_path = str(tmp_path)
+        responses = [
+            {'445': {'10.0.0.1'}},   # probe_fast_0 — 1 host
+            {},                       # probe_slow_0
+            {'445': {'10.0.0.2'}},   # solo batch — 1 additional host
+            {},                       # main batch 3306
+        ]
+        with patch('spoonmap._run_masscan_batch',
+                   side_effect=self._make_batch_side_effect(responses)):
+            result = mass_scan('All', ['445', '3306'], '88', '1000',
+                               '/fake/targets.txt', '', batch_size=1)
+
+        # Both hosts (probe + batch) must be reflected in the summary count
+        assert 'Hosts Found on Port 445: 2' in result
+
+    def test_non_slow_port_summary_emitted_from_probe(self, tmp_path):
+        """Non-SLOW_PORT found in probe still emits summary exactly once."""
+        spoonmap.output_path = str(tmp_path)
+        # 3306 is not in SLOW_PORTS and not in PROBE_PORT_PRIORITY,
+        # so with dest_ports=['443','3306'] the probe selects ['443'].
+        # 443 is not a SLOW_PORT → summary appears from probe phase.
+        responses = [
+            {'443': {'10.0.0.1'}},   # probe_fast_0 (443) — hit
+            {},                       # main batch 3306
+        ]
+        with patch('spoonmap._run_masscan_batch',
+                   side_effect=self._make_batch_side_effect(responses)):
+            result = mass_scan('All', ['443', '3306'], '88', '1000',
+                               '/fake/targets.txt', '', batch_size=1)
+
+        assert result.count('Hosts Found on Port 443') == 1
+
 
 # ── TestMassScanResume ────────────────────────────────────────────────────────
 
