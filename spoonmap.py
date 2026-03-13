@@ -2052,15 +2052,15 @@ _FINDING_REPRO = {
         ),
     },
     'SMBv1 Enabled': {
-        'flags': '--script smb-security-mode',
+        'flags': '--script smb-protocols',
         'sample': (
             'PORT    STATE SERVICE\n'
             '445/tcp open  microsoft-ds\n'
-            '| smb-security-mode:\n'
-            '|   account_used: guest\n'
-            '|   authentication_level: user\n'
-            '|   challenge_response: supported\n'
-            '|_  message_signing: required'
+            '| smb-protocols:\n'
+            '|   dialects:\n'
+            '|     NT LM 0.12 (SMBv1) [dangerous, but default]\n'
+            '|     2:0:2\n'
+            '|_    3:1:1'
         ),
     },
     'NFS Shares Exposed': {
