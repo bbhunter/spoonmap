@@ -477,9 +477,8 @@ def _nmap_xml_hostscript(host_ip, protocol, portid, hostscripts):
 
 @pytest.fixture()
 def nmap_dir(tmp_path):
-    d = tmp_path / 'nmap_results'
-    d.mkdir()
-    return tmp_path  # callers write files under tmp_path/nmap_results/
+    (tmp_path / 'nse_results').mkdir()
+    return tmp_path  # callers write files under tmp_path/nse_results/
 
 
 class TestGenerateFindings:
@@ -488,7 +487,7 @@ class TestGenerateFindings:
     def test_anonymous_ftp_detected(self, nmap_dir):
         xml = _nmap_xml('10.0.0.1', 'tcp', '21',
                         scripts={'ftp-anon': 'Anonymous FTP login allowed'})
-        (nmap_dir / 'nmap_results' / 'port21.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port21.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'Anonymous FTP' in content
@@ -497,7 +496,7 @@ class TestGenerateFindings:
     def test_anonymous_ftp_not_triggered_when_denied(self, nmap_dir):
         xml = _nmap_xml('10.0.0.1', 'tcp', '21',
                         scripts={'ftp-anon': 'Anonymous FTP login not allowed'})
-        (nmap_dir / 'nmap_results' / 'port21.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port21.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         assert 'Anonymous FTP' not in (nmap_dir / 'findings.txt').read_text()
 
@@ -506,7 +505,7 @@ class TestGenerateFindings:
         (nmap_dir / 'discovery' / 'live_hosts' / 'port9100.txt').write_text('10.0.0.3\n')
         xml = _nmap_xml('10.0.0.3', 'tcp', '21',
                         scripts={'ftp-anon': 'Anonymous FTP login allowed'})
-        (nmap_dir / 'nmap_results' / 'port21.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port21.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         assert 'Anonymous FTP' not in (nmap_dir / 'findings.txt').read_text()
 
@@ -516,7 +515,7 @@ class TestGenerateFindings:
         (nmap_dir / 'discovery' / 'live_hosts' / 'port9100.txt').write_text('10.0.0.99\n')
         xml = _nmap_xml('10.0.0.4', 'tcp', '21',
                         scripts={'ftp-anon': 'Anonymous FTP login allowed'})
-        (nmap_dir / 'nmap_results' / 'port21.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port21.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         assert 'Anonymous FTP' in (nmap_dir / 'findings.txt').read_text()
 
@@ -526,7 +525,7 @@ class TestGenerateFindings:
         # smb2-security-mode is a hostrule script — appears under <hostscript>
         xml = _nmap_xml_hostscript('10.0.0.5', 'tcp', '445',
                                    hostscripts={'smb2-security-mode': 'Message signing enabled but not required'})
-        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port445.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'Signing Not Required' in content
@@ -535,7 +534,7 @@ class TestGenerateFindings:
     def test_smb_signing_required_not_flagged(self, nmap_dir):
         xml = _nmap_xml_hostscript('10.0.0.5', 'tcp', '445',
                                    hostscripts={'smb2-security-mode': 'Message signing enabled and required'})
-        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port445.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         assert 'Signing Not Required' not in (nmap_dir / 'findings.txt').read_text()
 
@@ -545,7 +544,7 @@ class TestGenerateFindings:
         xml = _nmap_xml_hostscript('10.0.0.6', 'tcp', '445',
                                    hostscripts={'smb-security-mode':
                                                 'account_used: guest message_signing: required'})
-        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port445.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'SMBv1 Enabled' in content
@@ -556,7 +555,7 @@ class TestGenerateFindings:
         xml = _nmap_xml_hostscript('1.2.3.4', 'tcp', '445',
                                    hostscripts={'smb-security-mode':
                                                 'account_used: guest message_signing: required'})
-        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port445.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'External')
         assert 'SMBv1 Enabled' not in (nmap_dir / 'findings.txt').read_text()
 
@@ -565,7 +564,7 @@ class TestGenerateFindings:
         xml = _nmap_xml_hostscript('10.0.0.9', 'tcp', '445',
                                    hostscripts={'smb-security-mode':
                                                 'message_signing: disabled (dangerous, but default)'})
-        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port445.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'SMBv1 Enabled' in content
@@ -579,7 +578,7 @@ class TestGenerateFindings:
                                        'smb-security-mode': 'message_signing: disabled',
                                        'smb2-security-mode': 'Message signing enabled but not required',
                                    })
-        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port445.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'SMBv2 Signing Not Required' in content
@@ -592,7 +591,7 @@ class TestGenerateFindings:
                                        'smb-security-mode': 'message_signing: disabled',
                                        'smb2-security-mode': 'Message signing enabled and required',
                                    })
-        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port445.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'SMBv1 Signing Not Required' in content
@@ -604,7 +603,7 @@ class TestGenerateFindings:
         # smb-vuln-ms17-010 is a hostrule script — appears under <hostscript>
         xml = _nmap_xml_hostscript('10.0.0.7', 'tcp', '445',
                                    hostscripts={'smb-vuln-ms17-010': 'VULNERABLE'})
-        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port445.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'MS17-010' in content
@@ -614,7 +613,7 @@ class TestGenerateFindings:
     def test_ms17010_not_vulnerable_no_finding(self, nmap_dir):
         xml = _nmap_xml_hostscript('10.0.0.7', 'tcp', '445',
                                    hostscripts={'smb-vuln-ms17-010': 'NOT VULNERABLE'})
-        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port445.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         assert 'MS17-010' not in (nmap_dir / 'findings.txt').read_text()
 
@@ -622,7 +621,7 @@ class TestGenerateFindings:
         # Should not fire on External scans
         xml = _nmap_xml_hostscript('1.2.3.4', 'tcp', '445',
                                    hostscripts={'smb-vuln-ms17-010': 'VULNERABLE'})
-        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port445.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'External')
         assert 'MS17-010' not in (nmap_dir / 'findings.txt').read_text()
 
@@ -631,7 +630,7 @@ class TestGenerateFindings:
     def test_ms08067_vulnerable_critical_finding(self, nmap_dir):
         xml = _nmap_xml_hostscript('10.0.0.8', 'tcp', '445',
                                    hostscripts={'smb-vuln-ms08-067': 'VULNERABLE'})
-        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port445.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'MS08-067' in content
@@ -641,7 +640,7 @@ class TestGenerateFindings:
     def test_ms08067_not_vulnerable_no_finding(self, nmap_dir):
         xml = _nmap_xml_hostscript('10.0.0.8', 'tcp', '445',
                                    hostscripts={'smb-vuln-ms08-067': 'NOT VULNERABLE'})
-        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port445.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         assert 'MS08-067' not in (nmap_dir / 'findings.txt').read_text()
 
@@ -650,7 +649,7 @@ class TestGenerateFindings:
     def test_doublepulsar_vulnerable_critical_finding(self, nmap_dir):
         xml = _nmap_xml_hostscript('10.0.0.9', 'tcp', '445',
                                    hostscripts={'smb-double-pulsar-backdoor': 'VULNERABLE'})
-        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port445.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'DoublePulsar' in content
@@ -659,7 +658,7 @@ class TestGenerateFindings:
     def test_doublepulsar_not_vulnerable_no_finding(self, nmap_dir):
         xml = _nmap_xml_hostscript('10.0.0.9', 'tcp', '445',
                                    hostscripts={'smb-double-pulsar-backdoor': 'NOT VULNERABLE'})
-        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port445.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         assert 'DoublePulsar' not in (nmap_dir / 'findings.txt').read_text()
 
@@ -668,7 +667,7 @@ class TestGenerateFindings:
     def test_sambacry_vulnerable_critical_finding(self, nmap_dir):
         xml = _nmap_xml_hostscript('10.0.0.10', 'tcp', '445',
                                    hostscripts={'smb-vuln-cve-2017-7494': 'VULNERABLE'})
-        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port445.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'SambaCry' in content
@@ -677,7 +676,7 @@ class TestGenerateFindings:
     def test_sambacry_not_vulnerable_no_finding(self, nmap_dir):
         xml = _nmap_xml_hostscript('10.0.0.10', 'tcp', '445',
                                    hostscripts={'smb-vuln-cve-2017-7494': 'NOT VULNERABLE'})
-        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port445.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         assert 'SambaCry' not in (nmap_dir / 'findings.txt').read_text()
 
@@ -686,7 +685,7 @@ class TestGenerateFindings:
     def test_docker_api_exposed_on_2375(self, nmap_dir):
         xml = _nmap_xml('10.0.0.12', 'tcp', '2375',
                         scripts={'docker-version': 'Version: 20.10.7'})
-        (nmap_dir / 'nmap_results' / 'port2375.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port2375.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'Docker API' in content
@@ -696,21 +695,21 @@ class TestGenerateFindings:
     def test_docker_api_exposed_on_4243(self, nmap_dir):
         xml = _nmap_xml('10.0.0.12', 'tcp', '4243',
                         scripts={'docker-version': 'Version: 20.10.7'})
-        (nmap_dir / 'nmap_results' / 'port4243.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port4243.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         assert 'Docker API' in (nmap_dir / 'findings.txt').read_text()
 
     def test_docker_api_no_response_no_finding(self, nmap_dir):
         # No docker-version script output means API did not respond
         xml = _nmap_xml('10.0.0.12', 'tcp', '2375')
-        (nmap_dir / 'nmap_results' / 'port2375.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port2375.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         assert 'Docker API' not in (nmap_dir / 'findings.txt').read_text()
 
     def test_docker_api_fires_on_external_too(self, nmap_dir):
         xml = _nmap_xml('1.2.3.4', 'tcp', '2375',
                         scripts={'docker-version': 'Version: 20.10.7'})
-        (nmap_dir / 'nmap_results' / 'port2375.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port2375.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'External')
         assert 'Docker API' in (nmap_dir / 'findings.txt').read_text()
 
@@ -719,14 +718,14 @@ class TestGenerateFindings:
     def test_ntlm_disclosure_on_external(self, nmap_dir):
         xml = _nmap_xml('1.2.3.4', 'tcp', '25',
                         scripts={'smtp-ntlm-info': 'NetBIOS_Domain_Name: CORP'})
-        (nmap_dir / 'nmap_results' / 'port25.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port25.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'External')
         assert 'NTLM Information Disclosure' in (nmap_dir / 'findings.txt').read_text()
 
     def test_ntlm_disclosure_not_on_internal(self, nmap_dir):
         xml = _nmap_xml('10.0.0.2', 'tcp', '25',
                         scripts={'smtp-ntlm-info': 'NetBIOS_Domain_Name: CORP'})
-        (nmap_dir / 'nmap_results' / 'port25.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port25.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         assert 'NTLM Information Disclosure' not in (nmap_dir / 'findings.txt').read_text()
 
@@ -734,13 +733,13 @@ class TestGenerateFindings:
 
     def test_sensitive_port_flagged_on_external(self, nmap_dir):
         xml = _nmap_xml('1.2.3.4', 'tcp', '445')
-        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port445.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'External')
         assert 'Service Exposed Externally' in (nmap_dir / 'findings.txt').read_text()
 
     def test_sensitive_port_not_flagged_on_internal(self, nmap_dir):
         xml = _nmap_xml('10.0.0.1', 'tcp', '445')
-        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port445.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         assert 'Service Exposed Externally' not in (nmap_dir / 'findings.txt').read_text()
 
@@ -749,7 +748,7 @@ class TestGenerateFindings:
     def test_expired_cert_flagged(self, nmap_dir):
         xml = _nmap_xml('1.2.3.4', 'tcp', '443',
                         scripts={'ssl-cert': 'Not valid after:  2020-06-01T00:00:00'})
-        (nmap_dir / 'nmap_results' / 'port443.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port443.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'External')
         assert 'Expired TLS Certificate' in (nmap_dir / 'findings.txt').read_text()
 
@@ -759,7 +758,7 @@ class TestGenerateFindings:
         ).isoformat()
         xml = _nmap_xml('1.2.3.4', 'tcp', '443',
                         scripts={'ssl-cert': f'Not valid after:  {future}T00:00:00'})
-        (nmap_dir / 'nmap_results' / 'port443.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port443.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'External')
         assert 'Expired TLS Certificate' not in (nmap_dir / 'findings.txt').read_text()
 
@@ -769,7 +768,7 @@ class TestGenerateFindings:
         xml = _nmap_xml('10.0.0.1', 'tcp', '6129',
                         service_attrs={'name': 'dameware',
                                        'product': 'DameWare Mini Remote Control'})
-        (nmap_dir / 'nmap_results' / 'port6129.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port6129.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'DameWare' in content
@@ -784,7 +783,7 @@ class TestGenerateFindings:
                      'CVE: CVE-2019-3980 (CVSS 9.8) - Unauthenticated RCE v12.1.0.89 and earlier\n'
                      'Remediation: Upgrade to v12.1.2+'},
         )
-        (nmap_dir / 'nmap_results' / 'port6129.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port6129.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'DameWare' in content
@@ -797,7 +796,7 @@ class TestGenerateFindings:
         # cisco-siet.nse confirms VULNERABLE → finding raised
         xml = _nmap_xml('10.0.0.1', 'tcp', '4786',
                         scripts={'cisco-siet': 'Host: 10.0.0.1  Status: VULNERABLE'})
-        (nmap_dir / 'nmap_results' / 'port4786.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port4786.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         assert 'Cisco Smart Install' in (nmap_dir / 'findings.txt').read_text()
 
@@ -805,20 +804,20 @@ class TestGenerateFindings:
         # cisco-siet.nse returns NOT VULNERABLE → no finding
         xml = _nmap_xml('10.0.0.1', 'tcp', '4786',
                         scripts={'cisco-siet': 'Host: 10.0.0.1  Status: NOT VULNERABLE'})
-        (nmap_dir / 'nmap_results' / 'port4786.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port4786.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         assert 'Cisco Smart Install' not in (nmap_dir / 'findings.txt').read_text()
 
     def test_cisco_smart_install_no_script_no_finding(self, nmap_dir):
         # port 4786 open but no cisco-siet script output → no finding (avoid false positives)
         xml = _nmap_xml('10.0.0.1', 'tcp', '4786')
-        (nmap_dir / 'nmap_results' / 'port4786.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port4786.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         assert 'Cisco Smart Install' not in (nmap_dir / 'findings.txt').read_text()
 
     def test_sap_gateway_detected(self, nmap_dir):
         xml = _nmap_xml('10.0.0.1', 'tcp', '3300')
-        (nmap_dir / 'nmap_results' / 'port3300.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port3300.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         assert 'SAP Gateway' in (nmap_dir / 'findings.txt').read_text()
 
@@ -827,7 +826,7 @@ class TestGenerateFindings:
     def test_both_output_files_created(self, nmap_dir):
         xml = _nmap_xml('10.0.0.1', 'tcp', '21',
                         scripts={'ftp-anon': 'Anonymous FTP login allowed'})
-        (nmap_dir / 'nmap_results' / 'port21.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port21.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         assert (nmap_dir / 'findings.txt').exists()
         assert (nmap_dir / 'findings.md').exists()
@@ -839,11 +838,11 @@ class TestGenerateFindings:
     def test_severity_order_in_output(self, nmap_dir):
         # HIGH from ftp-anon, INFO from ms-sql-info — HIGH must come first
         # ms-sql-info is a hostrule script — appears under <hostscript>
-        (nmap_dir / 'nmap_results' / 'port21.xml').write_text(
+        (nmap_dir / 'nse_results' / 'port21.xml').write_text(
             _nmap_xml('10.0.0.1', 'tcp', '21',
                       scripts={'ftp-anon': 'Anonymous FTP login allowed'})
         )
-        (nmap_dir / 'nmap_results' / 'port1433.xml').write_text(
+        (nmap_dir / 'nse_results' / 'port1433.xml').write_text(
             _nmap_xml_hostscript('10.0.0.2', 'tcp', '1433',
                                  hostscripts={'ms-sql-info': 'SQL Server 2019'})
         )
@@ -854,7 +853,7 @@ class TestGenerateFindings:
     def test_generate_findings_writes_json(self, nmap_dir):
         xml = _nmap_xml('10.0.0.1', 'tcp', '21',
                         scripts={'ftp-anon': 'Anonymous FTP login allowed'})
-        (nmap_dir / 'nmap_results' / 'port21.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port21.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         data = json.loads((nmap_dir / 'findings.json').read_text())
         assert any(r['title'] == 'Anonymous FTP' for r in data)
@@ -874,7 +873,7 @@ class TestGenerateFindings:
             '  </host>\n'
             '</nmaprun>\n'
         )
-        (nmap_dir / 'nmap_results' / 'port445.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port445.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'External')
         findings_file = nmap_dir / 'findings.txt'
         if findings_file.exists():
@@ -923,12 +922,12 @@ class TestPreviousResults:
         assert _previous_results_exist(str(tmp_path)) is False
 
     def test_delete_removes_result_dirs(self, tmp_path):
-        for d in ('discovery', 'nmap_results'):
+        for d in ('discovery', 'nmap_results', 'nse_results'):
             p = tmp_path / d
             p.mkdir()
             (p / 'file.xml').write_text('<nmaprun/>')
         _delete_previous_results(str(tmp_path))
-        for d in ('discovery', 'nmap_results'):
+        for d in ('discovery', 'nmap_results', 'nse_results'):
             assert not (tmp_path / d).exists()
 
     def test_delete_removes_aggregate_files(self, tmp_path):
@@ -1185,7 +1184,7 @@ class TestSnmpBruteFinding:
             scripts={'snmp-brute': 'public - Valid credentials\nprivate - Valid credentials'},
             service_attrs={'name': 'snmp', 'product': 'Net-SNMP'},
         )
-        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'portU:161.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'SNMP Default Community String' in content
@@ -1196,7 +1195,7 @@ class TestSnmpBruteFinding:
             '10.0.0.5', 'udp', '161',
             scripts={'snmp-brute': 'public - Valid credentials\nprivate - Valid credentials'},
         )
-        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'portU:161.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'public' in content
@@ -1207,7 +1206,7 @@ class TestSnmpBruteFinding:
         (nmap_dir / 'discovery' / 'live_hosts' / 'port9100.txt').write_text('10.0.0.12\n')
         xml = _nmap_xml('10.0.0.12', 'udp', '161',
                         scripts={'snmp-brute': 'public - Valid credentials'})
-        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'portU:161.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         assert 'SNMP Default Community String' not in (nmap_dir / 'findings.txt').read_text()
 
@@ -1216,7 +1215,7 @@ class TestSnmpBruteFinding:
             '10.0.0.5', 'udp', '161',
             scripts={'snmp-brute': 'public - No response\nprivate - No response'},
         )
-        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'portU:161.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'SNMP Default Community String' not in content
@@ -1226,7 +1225,7 @@ class TestSnmpBruteFinding:
             '10.0.0.7', 'tcp', '161',
             scripts={'snmp-brute': 'public - Valid credentials'},
         )
-        (nmap_dir / 'nmap_results' / 'port161.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port161.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'SNMP Default Community String' in content
@@ -1243,7 +1242,7 @@ class TestSnmpSeverityAndDetail:
                 'snmp-sysdescr': 'Cisco IOS Software, Version 15.7',
             },
         )
-        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'portU:161.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'CRITICAL' in content
@@ -1257,7 +1256,7 @@ class TestSnmpSeverityAndDetail:
                 'snmp-sysdescr': 'Linux Ubuntu 20.04 x86_64',
             },
         )
-        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'portU:161.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'HIGH' in content
@@ -1268,7 +1267,7 @@ class TestSnmpSeverityAndDetail:
             '10.0.0.5', 'udp', '161',
             scripts={'snmp-brute': 'public - Valid credentials   (Access level: read-only)'},
         )
-        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'portU:161.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'LOW' in content
@@ -1279,7 +1278,7 @@ class TestSnmpSeverityAndDetail:
             '10.0.0.5', 'udp', '161',
             scripts={'snmp-brute': 'public - Valid credentials'},
         )
-        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'portU:161.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal',
                           snmp_any_validated={'10.0.0.5': True})
         content = (nmap_dir / 'findings.txt').read_text()
@@ -1291,7 +1290,7 @@ class TestSnmpSeverityAndDetail:
             '10.0.0.5', 'udp', '161',
             scripts={'snmp-brute': 'public - Valid credentials'},
         )
-        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'portU:161.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.md').read_text()
         assert 'printer' in content.lower()
@@ -1304,7 +1303,7 @@ class TestSnmpSeverityAndDetail:
                 'snmp-sysdescr': 'Linux host 5.4.0 #1 SMP x86_64',
             },
         )
-        (nmap_dir / 'nmap_results' / 'portU:161.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'portU:161.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.md').read_text()
         assert 'Linux host 5.4.0' in content
@@ -1981,7 +1980,7 @@ class TestMsSqlInfoUdp1434:
         output lands under <port>, not <hostscript>.  generate_findings() must
         check both locations.
         """
-        (nmap_dir / 'nmap_results' / 'portU:1434.xml').write_text(_MS_SQL_INFO_UDP_XML)
+        (nmap_dir / 'nse_results' / 'portU:1434.xml').write_text(_MS_SQL_INFO_UDP_XML)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'SQL Server Instance Discovered' in content
@@ -1991,7 +1990,7 @@ class TestMsSqlInfoUdp1434:
         """ms-sql-info under <hostscript> in portU:1434.xml (regression: existing path)."""
         xml = _nmap_xml_hostscript('192.168.1.10', 'udp', '1434',
                                    hostscripts={'ms-sql-info': 'SQL Server 2019'})
-        (nmap_dir / 'nmap_results' / 'portU:1434.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'portU:1434.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'SQL Server Instance Discovered' in content
@@ -1999,7 +1998,7 @@ class TestMsSqlInfoUdp1434:
 
     def test_no_finding_for_external_scan(self, nmap_dir):
         """ms-sql-info should not generate a finding for External scans."""
-        (nmap_dir / 'nmap_results' / 'portU:1434.xml').write_text(_MS_SQL_INFO_UDP_XML)
+        (nmap_dir / 'nse_results' / 'portU:1434.xml').write_text(_MS_SQL_INFO_UDP_XML)
         generate_findings(str(nmap_dir), 'External')
         findings_file = nmap_dir / 'findings.txt'
         if findings_file.exists():
@@ -2020,9 +2019,9 @@ class TestScanExtraSqlPorts:
         sub-table.  The correct XPath to reach instance tables is 'table', not
         'table/table' (which would navigate into the version sub-table).
         """
-        nmap_dir = tmp_path / 'nmap_results'
-        nmap_dir.mkdir()
-        (nmap_dir / 'portU:1434.xml').write_text(_MS_SQL_INFO_NAMED_INSTANCE_XML)
+        nse_dir = tmp_path / 'nse_results'
+        nse_dir.mkdir()
+        (nse_dir / 'portU:1434.xml').write_text(_MS_SQL_INFO_NAMED_INSTANCE_XML)
 
         with patch('spoonmap.subprocess.Popen') as mock_popen, \
              patch('spoonmap.save_terminal_state', return_value=None), \
@@ -2038,9 +2037,9 @@ class TestScanExtraSqlPorts:
 
     def test_standard_1433_instance_not_rescanned(self, tmp_path):
         """An instance on the default port 1433 must not trigger an extra scan."""
-        nmap_dir = tmp_path / 'nmap_results'
-        nmap_dir.mkdir()
-        (nmap_dir / 'portU:1434.xml').write_text(_MS_SQL_INFO_UDP_XML)
+        nse_dir = tmp_path / 'nse_results'
+        nse_dir.mkdir()
+        (nse_dir / 'portU:1434.xml').write_text(_MS_SQL_INFO_UDP_XML)
 
         with patch('spoonmap.subprocess.Popen') as mock_popen, \
              patch('spoonmap.save_terminal_state', return_value=None), \
@@ -2059,7 +2058,7 @@ class TestInternalNseFindings:
         """jdwp-info output with content triggers JDWP finding."""
         xml = _nmap_xml('10.0.1.1', 'tcp', '5005',
                         scripts={'jdwp-info': 'Protocol version: 1.1\nVM name: Java HotSpot'})
-        (nmap_dir / 'nmap_results' / 'port5005.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port5005.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'JDWP Java Debugger Exposed' in content
@@ -2069,7 +2068,7 @@ class TestInternalNseFindings:
         """nodejs-inspector output triggers Node.js Inspector finding."""
         xml = _nmap_xml('10.0.1.2', 'tcp', '9229',
                         scripts={'nodejs-inspector': 'Node.js Inspector accessible — version: node.js/v18.17.0'})
-        (nmap_dir / 'nmap_results' / 'port9229.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port9229.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'Node.js Inspector Port Exposed' in content
@@ -2079,7 +2078,7 @@ class TestInternalNseFindings:
         """delve-debugger output triggers Delve finding."""
         xml = _nmap_xml('10.0.1.3', 'tcp', '2345',
                         scripts={'delve-debugger': 'Delve debugger responding to DAP requests'})
-        (nmap_dir / 'nmap_results' / 'port2345.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port2345.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'Delve Go Debugger Exposed' in content
@@ -2089,7 +2088,7 @@ class TestInternalNseFindings:
         """kubelet-anon-check output triggers Kubelet Anonymous Access finding."""
         xml = _nmap_xml('10.0.1.4', 'tcp', '10250',
                         scripts={'kubelet-anon-check': 'Anonymous access enabled — /pods returned HTTP 200 without credentials'})
-        (nmap_dir / 'nmap_results' / 'port10250.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port10250.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'Kubernetes Kubelet Anonymous Access' in content
@@ -2099,7 +2098,7 @@ class TestInternalNseFindings:
         """http-title containing 'Kubernetes Dashboard' triggers k8s dashboard finding."""
         xml = _nmap_xml('10.0.1.5', 'tcp', '8001',
                         scripts={'http-title': 'Kubernetes Dashboard'})
-        (nmap_dir / 'nmap_results' / 'port8001.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port8001.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'Kubernetes Dashboard Accessible' in content
@@ -2109,7 +2108,7 @@ class TestInternalNseFindings:
         """banner containing 'ActiveMQ' triggers ActiveMQ Broker Exposed finding."""
         xml = _nmap_xml('10.0.1.6', 'tcp', '61616',
                         scripts={'banner': 'STOMP\nActiveMQ/5.15.9'})
-        (nmap_dir / 'nmap_results' / 'port61616.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port61616.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'ActiveMQ Broker Exposed' in content
@@ -2119,7 +2118,7 @@ class TestInternalNseFindings:
         """Port 5005 open but jdwp-info returns empty string — no JDWP finding."""
         xml = _nmap_xml('10.0.1.7', 'tcp', '5005',
                         scripts={'jdwp-info': ''})
-        (nmap_dir / 'nmap_results' / 'port5005.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port5005.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         findings_file = nmap_dir / 'findings.txt'
         if findings_file.exists():
@@ -2130,7 +2129,7 @@ class TestInternalNseFindings:
         # Write XML for all ports that used to trigger INTERNAL_RISK_PORTS
         for port in ('9229', '2345', '5005', '10250', '8001', '61616'):
             xml = _nmap_xml(f'10.0.2.{port[-1]}', 'tcp', port)
-            (nmap_dir / 'nmap_results' / f'port{port}.xml').write_text(xml)
+            (nmap_dir / 'nse_results' / f'port{port}.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         findings_file = nmap_dir / 'findings.txt'
         if findings_file.exists():
@@ -2182,6 +2181,43 @@ class TestBuildNmapCmd:
                                script_scan=True, target_scan='External')
         assert '--source-port' not in cmd
 
+    def test_banner_pass_never_includes_script(self):
+        """script_only=False (default) → --script never present regardless of script_scan."""
+        for port in ('22', '445', 'U:161'):
+            cmd = _build_nmap_cmd(port, '/in.txt', '/out.xml', '88',
+                                   script_scan=True, target_scan='Internal')
+            assert '--script' not in cmd, f'--script should not appear in banner pass for port {port}'
+
+    def test_script_only_uses_sn(self):
+        """script_only=True → -sn present, -sS and -sV absent."""
+        cmd = _build_nmap_cmd('22', '/in.txt', '/out.xml', '88',
+                               script_scan=True, target_scan='Internal',
+                               script_only=True)
+        assert '-sn' in cmd
+        assert '-sS' not in cmd
+        assert '-sV' not in cmd
+
+    def test_script_only_includes_script_when_port_has_scripts(self):
+        """script_only=True on a port with scripts → --script present."""
+        cmd = _build_nmap_cmd('445', '/in.txt', '/out.xml', '88',
+                               script_scan=True, target_scan='Internal',
+                               script_only=True)
+        assert '--script' in cmd
+
+    def test_script_only_smb_omits_source_port(self):
+        """script_only=True + SMB port → --source-port omitted."""
+        cmd = _build_nmap_cmd('445', '/in.txt', '/out.xml', '88',
+                               script_scan=True, target_scan='Internal',
+                               script_only=True)
+        assert '--source-port' not in cmd
+
+    def test_script_only_non_smb_keeps_source_port(self):
+        """script_only=True + non-SMB port → --source-port present."""
+        cmd = _build_nmap_cmd('22', '/in.txt', '/out.xml', '88',
+                               script_scan=True, target_scan='Internal',
+                               script_only=True)
+        assert '--source-port' in cmd
+        assert '88' in cmd
 
 
 # ── cucm-detect finding ───────────────────────────────────────────────────────
@@ -2191,7 +2227,7 @@ class TestCucmDetectFinding:
         """cucm-detect script output → HIGH 'Cisco CUCM TFTP Server Confirmed'."""
         xml = _nmap_xml('10.0.0.1', 'tcp', '6970',
                         scripts={'cucm-detect': 'Product: Cisco UCM\nConfigFileCacheList: Accessible \u2014 100 entries'})
-        (nmap_dir / 'nmap_results' / 'port6970.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port6970.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         txt = (nmap_dir / 'findings.txt').read_text()
         assert 'CUCM TFTP Server Confirmed' in txt
@@ -2200,7 +2236,7 @@ class TestCucmDetectFinding:
     def test_port_open_no_script_generates_medium_finding(self, nmap_dir):
         """Port 6970 open, no cucm-detect output → MEDIUM 'Possible Cisco CUCM'."""
         xml = _nmap_xml('10.0.0.2', 'tcp', '6970')
-        (nmap_dir / 'nmap_results' / 'port6970.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port6970.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         txt = (nmap_dir / 'findings.txt').read_text()
         assert 'Possible Cisco CUCM' in txt
@@ -2210,7 +2246,7 @@ class TestCucmDetectFinding:
         """Confirmed CUCM does not also emit the MEDIUM unconfirmed finding."""
         xml = _nmap_xml('10.0.0.3', 'tcp', '6970',
                         scripts={'cucm-detect': 'Product: Cisco UCM\nConfigFileCacheList: Accessible \u2014 50 entries'})
-        (nmap_dir / 'nmap_results' / 'port6970.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port6970.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         txt = (nmap_dir / 'findings.txt').read_text()
         assert 'Possible Cisco CUCM' not in txt
@@ -2223,7 +2259,7 @@ class TestLdapSecurityFindings:
         """ldap-signing-check returning 'Signing: NOT REQUIRED' -> HIGH finding."""
         xml = _nmap_xml('10.10.0.1', 'tcp', '389',
                         scripts={'ldap-signing-check': 'Signing: NOT REQUIRED'})
-        (nmap_dir / 'nmap_results' / 'port389.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port389.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'LDAP Signing Not Required' in content
@@ -2233,7 +2269,7 @@ class TestLdapSecurityFindings:
     def test_ldap_signing_required_no_finding(self, nmap_dir):
         """ldap-signing-check absent (signing enforced, script returned nil) -> no finding."""
         xml = _nmap_xml('10.10.0.2', 'tcp', '389')
-        (nmap_dir / 'nmap_results' / 'port389.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port389.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         findings_file = nmap_dir / 'findings.txt'
         if findings_file.exists():
@@ -2243,7 +2279,7 @@ class TestLdapSecurityFindings:
         """ldap-channel-binding-check returning 'NOT REQUIRED' -> HIGH finding."""
         xml = _nmap_xml('10.10.0.3', 'tcp', '636',
                         scripts={'ldap-channel-binding-check': 'Channel Binding: NOT REQUIRED'})
-        (nmap_dir / 'nmap_results' / 'port636.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port636.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'LDAPS Channel Binding Not Required' in content
@@ -2256,7 +2292,7 @@ class TestLdapSecurityFindings:
                                  'Anonymous bind: success\n'
                                  'Base DN: DC=pwnt,DC=lab\n'
                                  'Sample Users Found: j.smith, k.jones'})
-        (nmap_dir / 'nmap_results' / 'port389.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port389.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'LDAP Anonymous Enumeration' in content
@@ -2269,7 +2305,7 @@ class TestLdapSecurityFindings:
                                  'Anonymous bind: success\n'
                                  'Base DN: DC=pwnt,DC=lab\n'
                                  'Sample Computers Found: WS-SALES01$'})
-        (nmap_dir / 'nmap_results' / 'port389.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port389.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'LDAP Anonymous Enumeration' in content
@@ -2277,7 +2313,7 @@ class TestLdapSecurityFindings:
     def test_ldap_anon_enum_no_results_no_finding(self, nmap_dir):
         """ldap-anon-enum script absent (bind ok but 0 results) -> no finding."""
         xml = _nmap_xml('10.10.0.6', 'tcp', '389')
-        (nmap_dir / 'nmap_results' / 'port389.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port389.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         findings_file = nmap_dir / 'findings.txt'
         if findings_file.exists():
@@ -2288,7 +2324,7 @@ class TestLdapSecurityFindings:
         xml = _nmap_xml('1.2.3.4', 'tcp', '389',
                         scripts={'ldap-signing-check': 'Signing: NOT REQUIRED',
                                  'ldap-anon-enum': 'Users found: 5'})
-        (nmap_dir / 'nmap_results' / 'port389.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port389.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'External')
         # External scan only triggers the 'LDAP -- should not be internet-facing' finding
         content = (nmap_dir / 'findings.txt').read_text()
@@ -2299,7 +2335,7 @@ class TestLdapSecurityFindings:
         """Port 3268 with ldap-signing-check -> 'Global Catalog Signing Not Required'."""
         xml = _nmap_xml('10.10.0.7', 'tcp', '3268',
                         scripts={'ldap-signing-check': 'Signing: NOT REQUIRED'})
-        (nmap_dir / 'nmap_results' / 'port3268.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port3268.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'Global Catalog Signing Not Required' in content
@@ -2312,7 +2348,7 @@ class TestIPMIFindings:
         """ipmi-cipher-zero output contains VULNERABLE -> CRITICAL finding."""
         xml = _nmap_xml('10.0.1.1', 'udp', '623',
                         scripts={'ipmi-cipher-zero': 'VULNERABLE (cipher suite 0)'})
-        (nmap_dir / 'nmap_results' / 'portU:623.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'portU:623.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'IPMI Cipher Zero Authentication Bypass' in content
@@ -2323,7 +2359,7 @@ class TestIPMIFindings:
         """ipmi-cipher-zero output does not contain VULNERABLE -> no CRITICAL finding."""
         xml = _nmap_xml('10.0.1.2', 'udp', '623',
                         scripts={'ipmi-cipher-zero': 'NOT VULNERABLE'})
-        (nmap_dir / 'nmap_results' / 'portU:623.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'portU:623.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         findings_file = nmap_dir / 'findings.txt'
         if findings_file.exists():
@@ -2334,7 +2370,7 @@ class TestIPMIFindings:
         xml = _nmap_xml(
             '10.0.1.3', 'udp', '623',
             scripts={'ipmi-hashdump': 'Username: admin\nHash: $rakp$aabbcc$ddeeff'})
-        (nmap_dir / 'nmap_results' / 'portU:623.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'portU:623.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'IPMI RAKP Hash Captured' in content
@@ -2344,7 +2380,7 @@ class TestIPMIFindings:
     def test_hashdump_empty_no_finding(self, nmap_dir):
         """ipmi-hashdump absent (no hash returned) -> no HIGH finding."""
         xml = _nmap_xml('10.0.1.4', 'udp', '623')
-        (nmap_dir / 'nmap_results' / 'portU:623.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'portU:623.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         findings_file = nmap_dir / 'findings.txt'
         if findings_file.exists():
@@ -2355,7 +2391,7 @@ class TestIPMIFindings:
         xml = _nmap_xml(
             '10.0.1.5', 'udp', '623',
             scripts={'ipmi-version': 'Version: 2.0\nUser Level: Administrator'})
-        (nmap_dir / 'nmap_results' / 'portU:623.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'portU:623.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'IPMI Service Detected' in content
@@ -2371,7 +2407,7 @@ class TestVNCFindings:
         xml = _nmap_xml(
             '10.0.2.1', 'tcp', '5900',
             scripts={'vnc-info': 'Protocol version: 3.8\nSecurity types:\n  None (1)\n  VNC Authentication (2)'})
-        (nmap_dir / 'nmap_results' / 'port5900.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port5900.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'External')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'VNC No Authentication Required' in content
@@ -2383,7 +2419,7 @@ class TestVNCFindings:
         xml = _nmap_xml(
             '10.0.2.2', 'tcp', '5900',
             scripts={'vnc-info': 'Protocol version: 3.8\nSecurity types:\n  VNC Authentication (2)'})
-        (nmap_dir / 'nmap_results' / 'port5900.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port5900.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'External')
         findings_file = nmap_dir / 'findings.txt'
         if findings_file.exists():
@@ -2394,7 +2430,7 @@ class TestVNCFindings:
         xml = _nmap_xml(
             '10.0.2.3', 'tcp', '5900',
             scripts={'realvnc-auth-bypass': 'VULNERABLE\n  RealVNC 4.1.1 Authentication Bypass'})
-        (nmap_dir / 'nmap_results' / 'port5900.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port5900.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'External')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'RealVNC Authentication Bypass' in content
@@ -2406,7 +2442,7 @@ class TestVNCFindings:
         xml = _nmap_xml(
             '10.0.2.4', 'tcp', '5900',
             scripts={'realvnc-auth-bypass': 'NOT VULNERABLE'})
-        (nmap_dir / 'nmap_results' / 'port5900.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port5900.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'External')
         findings_file = nmap_dir / 'findings.txt'
         if findings_file.exists():
@@ -2417,7 +2453,7 @@ class TestVNCFindings:
         xml = _nmap_xml(
             '10.0.2.5', 'tcp', '5901',
             scripts={'vnc-info': 'Protocol version: 3.8\nSecurity types:\n  None (1)'})
-        (nmap_dir / 'nmap_results' / 'port5901.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'port5901.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'VNC No Authentication Required' in content
@@ -2433,7 +2469,7 @@ class TestIKEFindings:
         xml = _nmap_xml(
             '10.0.3.1', 'udp', '500',
             scripts={'ike-version': 'Aggressive mode: yes\n  auth: PSK\n  vendor: strongSwan'})
-        (nmap_dir / 'nmap_results' / 'portU:500.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'portU:500.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'External')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'IKE Aggressive Mode with Pre-Shared Key' in content
@@ -2445,7 +2481,7 @@ class TestIKEFindings:
         xml = _nmap_xml(
             '10.0.3.2', 'udp', '500',
             scripts={'ike-version': 'Main mode: supported\n  vendor: Cisco'})
-        (nmap_dir / 'nmap_results' / 'portU:500.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'portU:500.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'External')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'IKE/IPsec Service Detected' in content
@@ -2456,7 +2492,7 @@ class TestIKEFindings:
         xml = _nmap_xml(
             '10.0.3.3', 'udp', '500',
             scripts={'ike-version': 'Aggressive mode: yes\n  auth: RSA\n  vendor: OpenSwan'})
-        (nmap_dir / 'nmap_results' / 'portU:500.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'portU:500.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'External')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'IKE/IPsec Service Detected' in content
@@ -2465,7 +2501,7 @@ class TestIKEFindings:
     def test_ike_empty_output_no_finding(self, nmap_dir):
         """ike-version absent -> no finding at all."""
         xml = _nmap_xml('10.0.3.4', 'udp', '500')
-        (nmap_dir / 'nmap_results' / 'portU:500.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'portU:500.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'External')
         findings_file = nmap_dir / 'findings.txt'
         if findings_file.exists():
@@ -2477,7 +2513,7 @@ class TestIKEFindings:
         xml = _nmap_xml(
             '10.0.3.5', 'udp', '500',
             scripts={'ike-version': 'Main mode: supported\n  vendor: Cisco'})
-        (nmap_dir / 'nmap_results' / 'portU:500.xml').write_text(xml)
+        (nmap_dir / 'nse_results' / 'portU:500.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'External')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'Service Exposed Externally' not in content

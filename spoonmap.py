@@ -472,7 +472,7 @@ def _disc(output_path):
 
 
 # Result dirs and files written during a scan run.
-_RESULT_DIRS  = ('discovery', 'nmap_results')
+_RESULT_DIRS  = ('discovery', 'nmap_results', 'nse_results')
 _RESULT_FILES = ('all_live_hosts.txt', 'spoonmap_output.xml',
                  'spoonmap_output.json',
                  'findings.txt', 'findings.md', 'findings.json')
@@ -904,14 +904,32 @@ def create_hostname_target_file(ip_file, hostname_file, ip_to_hostname):
             outf.write(f'{hostname}\n')
 
 def _build_nmap_cmd(dest_port, input_file, output_file, source_port,
-                    script_scan=False, target_scan='Internal'):
+                    script_scan=False, target_scan='Internal', script_only=False):
     """Return the nmap command list for a single port scan.
 
     --source-port is omitted for SMB ports when scripts are active: nmap runs all
     NSE scripts concurrently; with a fixed source port every script tries to connect
     from the same (src:88, dst:445) 4-tuple and all but one fail silently.
 
+    When script_only=True, run a script-only pass (-sn, no version detection)
+    against already-known-open hosts.  The banner pass (script_only=False) never
+    adds --script regardless of script_scan.
     """
+    if script_only:
+        cmd = [
+            'nmap', '-T4', '-sn', '-Pn', '-p',
+            dest_port[2:] if 'U:' in dest_port else dest_port,
+            '--open', '--randomize-hosts',
+        ]
+        if dest_port not in _SMB_PORTS:
+            cmd += ['--source-port', source_port]
+        cmd += ['-iL', input_file, '-oX', output_file]
+        scripts = _get_scripts_for_port(dest_port, target_scan)
+        if scripts:
+            cmd += ['--script', scripts, '--script-timeout', '30s', '--host-timeout', '5m']
+        return cmd
+
+    # Banner pass — never add --script regardless of script_scan
     if 'U:' in dest_port:
         cmd = [
             'nmap', '-T4', '-sU', '-sV',
@@ -932,12 +950,6 @@ def _build_nmap_cmd(dest_port, input_file, output_file, source_port,
             cmd += ['--source-port', source_port]
 
     cmd += ['-iL', input_file, '-oX', output_file]
-
-    if script_scan:
-        scripts = _get_scripts_for_port(dest_port, target_scan)
-        if scripts:
-            cmd += ['--script', scripts, '--script-timeout', '30s', '--host-timeout', '5m']
-
     return cmd
 
 
@@ -1005,6 +1017,30 @@ def nmap_worker(work_queue, completed_count, total_count, source_port, lock,
                             start_time if start_time is not None else time.time()
                         )
 
+                # Script pass — separate invocation writing to nse_results/
+                if script_scan and not interrupt_event.is_set():
+                    scripts = _get_scripts_for_port(dest_port, target_scan)
+                    if scripts:
+                        nse_output = f'{output_path}/nse_results/port{dest_port}.xml'
+                        with lock:
+                            print(_COLOR_INFO + f'Running NSE scripts for port {dest_port}...\n' + _COLOR_RESET)
+                        nse_cmd = _build_nmap_cmd(
+                            dest_port, input_file, nse_output, source_port,
+                            script_scan=True, target_scan=target_scan,
+                            script_only=True,
+                        )
+                        nse_process = subprocess.Popen(
+                            nse_cmd,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            start_new_session=True,
+                        )
+                        while nse_process.poll() is None and not interrupt_event.is_set():
+                            threading.Event().wait(0.1)
+                        if interrupt_event.is_set() and nse_process.poll() is None:
+                            nse_process.kill()
+                        nse_process.wait()
+
             except FileNotFoundError:
                 with lock:
                     print(_COLOR_ERROR + 'Error: nmap not found. Please install nmap.' + _COLOR_RESET)
@@ -1035,15 +1071,20 @@ def nmap_scan(source_port, max_threads=5, ip_to_hostname=None,
         ip_to_hostname = {}
     # Commence NMAP banner grabbing!
     os.makedirs(output_path+"/nmap_results", exist_ok=True)
+    os.makedirs(output_path+"/nse_results", exist_ok=True)
 
     try:
         host_files = os.listdir(f'{_disc(output_path)}/live_hosts')
 
-        # Filter out files that have already been scanned
+        # Filter out files that have already been scanned (both passes must be done)
         files_to_scan = []
         for host_file in host_files:
             dest_port = ((host_file.split('.')[0])[4:])
-            if not os.path.exists(f'{output_path}/nmap_results/port{dest_port}.xml'):
+            banner_done = os.path.exists(f'{output_path}/nmap_results/port{dest_port}.xml')
+            scripts_exist = _get_scripts_for_port(dest_port, target_scan)
+            script_done = (not script_scan or not scripts_exist or
+                           os.path.exists(f'{output_path}/nse_results/port{dest_port}.xml'))
+            if not (banner_done and script_done):
                 files_to_scan.append(host_file)
 
         if not files_to_scan:
@@ -1324,7 +1365,7 @@ def _scan_extra_sql_ports(output_path, source_port):
     discovered = {}  # {host_ip: [port, ...]}
 
     for fname in ('port1433.xml', 'portU:1434.xml'):
-        fpath = f'{output_path}/nmap_results/{fname}'
+        fpath = f'{output_path}/nse_results/{fname}'
         if not os.path.exists(fpath):
             continue
         try:
@@ -1412,7 +1453,7 @@ SEVERITY_ORDER = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO']
 
 def generate_findings(output_path, target_scan, snmp_any_validated=None):
     """Parse nmap script output and write findings.txt and findings.md."""
-    nmap_dir = f'{output_path}/nmap_results'
+    nmap_dir = f'{output_path}/nse_results'
     if not os.path.exists(nmap_dir):
         return
 
