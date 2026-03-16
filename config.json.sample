@@ -19,6 +19,8 @@
     "__max_rate_internal_recommendation__" : "Default = 2000",
     "max_rate" : "2000",
     "nmap_threads" : 5,
+    "__nmap_threshold_note__": "Work-unit threshold (hosts × ports) for tool selection. When effective_hosts × port_count <= this value, nmap is used for port discovery instead of masscan. Nmap is more reliable and faster for small-to-medium scans (internal masscan caps at 200 work-units/sec due to 1000 pps + 5 retries; nmap -T4 does ~10,000/sec). Default: 5000000 (~76 hosts × full port scan, or ~5000 hosts × 1000 targeted ports). Lower to ~500000 for high-rate external setups (100k+ pps).",
+    "nmap_threshold": 5000000,
     "target_file" : "ranges.txt",
     "output_path" : "./",
     "exclusions_file" : "exclusions.txt"

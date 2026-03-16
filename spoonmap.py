@@ -572,6 +572,123 @@ def _nmap_udp_discovery(udp_port, target_file, output_path, source_port,
     return ips
 
 
+def _nmap_port_discovery(dest_ports, target_file, source_port, exclusions_file,
+                         scan_type='Full', resume=False):
+    """Run nmap -T4 port discovery in place of masscan for small target sets.
+
+    Writes live_hosts/port{N}.txt files in the same format as mass_scan() so
+    the downstream nmap_scan() banner/script phase is unaffected.
+    Returns a status_summary string matching the mass_scan() convention.
+    """
+    disc = _disc(output_path)
+    os.makedirs(f'{disc}/masscan_results', exist_ok=True)
+    os.makedirs(f'{disc}/live_hosts', exist_ok=True)
+
+    output_file = f'{disc}/masscan_results/portDirect.xml'
+    targets_mtime = os.path.getmtime(target_file) if os.path.exists(target_file) else 0
+
+    status_summary = '\nSummary'
+
+    # Resume: if output already exists and is newer than the targets file, reload from live_hosts/
+    if (resume
+            and os.path.exists(output_file)
+            and os.path.getmtime(output_file) >= targets_mtime):
+        print(_COLOR_INFO + 'Resume: skipping completed nmap port discovery' + _COLOR_RESET)
+        live_hosts_dir = f'{disc}/live_hosts'
+        if os.path.exists(live_hosts_dir):
+            for fname in sorted(os.listdir(live_hosts_dir)):
+                if not (fname.startswith('port') and fname.endswith('.txt')
+                        and not fname.endswith('_hostnames.txt')):
+                    continue
+                port_key = fname[4:-4]
+                with open(os.path.join(live_hosts_dir, fname)) as fh:
+                    ips = {line.strip() for line in fh if line.strip()}
+                if ips:
+                    status_update = f'\nHosts Found on Port {port_key}: {len(ips)}'
+                    status_summary += status_update
+                    print(_COLOR_PROGRESS + status_update + _COLOR_RESET)
+        return status_summary
+
+    # Separate TCP and UDP ports
+    tcp_ports = [p for p in dest_ports if not p.startswith('U:')]
+    udp_ports  = [p for p in dest_ports if p.startswith('U:')]
+
+    if scan_type == 'Full':
+        port_spec = '1-65535'
+        scan_flags = ['-sS']
+    elif tcp_ports and not udp_ports:
+        port_spec = ','.join(tcp_ports)
+        scan_flags = ['-sS']
+    elif udp_ports and not tcp_ports:
+        port_spec = ','.join(p[2:] for p in udp_ports)
+        scan_flags = ['-sU']
+    else:
+        port_spec = f"T:{','.join(tcp_ports)},U:{','.join(p[2:] for p in udp_ports)}"
+        scan_flags = ['-sSU']
+
+    cmd = [
+        'nmap', '-T4', *scan_flags, '-Pn',
+        '-p', port_spec,
+        '--open',
+        '--max-retries', '2',
+        '--source-port', source_port,
+        '-iL', target_file,
+        '-oX', output_file,
+    ]
+    if exclusions_file:
+        cmd += ['--excludefile', exclusions_file]
+
+    print(_COLOR_INFO + f'Nmap port discovery: scanning {port_spec} (nmap -T4)...' + _COLOR_RESET)
+
+    term_state = save_terminal_state()
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc.wait()
+    except KeyboardInterrupt:
+        proc.kill()
+        proc.wait()
+        restore_terminal_state(term_state)
+        raise
+    except FileNotFoundError:
+        print(_COLOR_ERROR + 'Error: nmap not found.' + _COLOR_RESET)
+        restore_terminal_state(term_state)
+        return status_summary
+    finally:
+        restore_terminal_state(term_state)
+
+    if not os.path.exists(output_file) or os.stat(output_file).st_size == 0:
+        return status_summary
+
+    results = {}
+    try:
+        root = etree.parse(output_file)
+        for host in root.findall('host'):
+            addr = host.find('address[@addrtype="ipv4"]')
+            if addr is None:
+                continue
+            ip = addr.attrib['addr']
+            for port_elem in host.findall('.//port'):
+                protocol = port_elem.attrib.get('protocol', 'tcp')
+                portid = port_elem.attrib.get('portid', '')
+                state_elem = port_elem.find('state')
+                if state_elem is not None and state_elem.attrib.get('state') in ('open', 'open|filtered'):
+                    port_key = f'U:{portid}' if protocol == 'udp' else portid
+                    results.setdefault(port_key, set()).add(ip)
+    except etree.ParseError as e:
+        print(_COLOR_ERROR + f'Error parsing nmap port discovery XML: {e}' + _COLOR_RESET)
+        return status_summary
+
+    for port_key, ips in results.items():
+        live_file = f'{disc}/live_hosts/port{port_key}.txt'
+        with open(live_file, 'w') as fh:
+            fh.write('\n'.join(sorted(ips)) + '\n')
+        status_update = f'\nHosts Found on Port {port_key}: {len(ips)}'
+        status_summary += status_update
+        print(_COLOR_PROGRESS + status_update + _COLOR_RESET)
+
+    return status_summary
+
+
 def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusions_file, batch_size=1, resume=False, discovery_file=None):
     status_summary = '\nSummary'
 
@@ -2686,6 +2803,7 @@ def main():
         output_path = ''
         nmap_threads = 5  # Default number of concurrent NMAP threads
         masscan_batch_size = 5  # Default number of ports per masscan invocation
+        nmap_threshold = 5_000_000  # Default work-unit threshold for tool selection
         host_discovery = None   # None = prompt user; True/False = set from config
 
 
@@ -2732,6 +2850,7 @@ def main():
             exclusions_file = config_parser['exclusions_file']
             nmap_threads = config_parser.get('nmap_threads', 5)
             masscan_batch_size = int(config_parser.get('masscan_batch_size', 5))
+            nmap_threshold = int(config_parser.get('nmap_threshold', 5_000_000))
             script_scan = config_parser.get('script_scan', 'False') == 'True'
             host_discovery = config_parser.get('host_discovery', 'True') == 'True'
             resume = resume or config_parser.get('resume', 'False').strip().lower() == 'true'
@@ -2974,12 +3093,37 @@ def main():
         else:
             discovery_file = None
 
-        status_summary = mass_scan(
-            scan_type, dest_ports, source_port, max_rate,
-            masscan_target_file,                   # always full range for probe
-            exclusions_file, masscan_batch_size,
-            resume=resume, discovery_file=discovery_file,
-        )
+        # Determine effective host count (prefer discovery file for accuracy)
+        _count_file = (discovery_file
+                       if (discovery_file and os.path.exists(discovery_file))
+                       else masscan_target_file)
+        effective_host_count = _count_hosts_in_file(_count_file) or 0
+
+        # Compute work units: hosts × ports (65535 for Full scan, else len(dest_ports))
+        _port_count = 65535 if scan_type == 'Full' else len(dest_ports)
+        work_units = effective_host_count * _port_count
+
+        if effective_host_count > 0 and work_units <= nmap_threshold:
+            print(_COLOR_INFO
+                  + f'Work units ({effective_host_count:,} hosts × {_port_count:,} ports = {work_units:,}) '
+                  + f'≤ threshold ({nmap_threshold:,}): using nmap for port discovery'
+                  + _COLOR_RESET)
+            status_summary = _nmap_port_discovery(
+                dest_ports, masscan_target_file, source_port,
+                exclusions_file, scan_type=scan_type, resume=resume,
+            )
+        else:
+            if effective_host_count > 0:
+                print(_COLOR_INFO
+                      + f'Work units ({work_units:,}) > threshold ({nmap_threshold:,}): '
+                      + f'using masscan for port discovery'
+                      + _COLOR_RESET)
+            status_summary = mass_scan(
+                scan_type, dest_ports, source_port, max_rate,
+                masscan_target_file,                   # always full range for probe
+                exclusions_file, masscan_batch_size,
+                resume=resume, discovery_file=discovery_file,
+            )
 
         # If service banners requested, send to nmap
         if banner_scan or script_scan:
