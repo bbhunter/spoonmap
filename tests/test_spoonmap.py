@@ -2188,14 +2188,26 @@ class TestBuildNmapCmd:
                                    script_scan=True, target_scan='Internal')
             assert '--script' not in cmd, f'--script should not appear in banner pass for port {port}'
 
-    def test_script_only_uses_sn(self):
-        """script_only=True → -sn present, -sS and -sV absent."""
-        cmd = _build_nmap_cmd('22', '/in.txt', '/out.xml', '88',
-                               script_scan=True, target_scan='Internal',
-                               script_only=True)
-        assert '-sn' in cmd
-        assert '-sS' not in cmd
-        assert '-sV' not in cmd
+    def test_script_only_uses_ss_not_sn(self):
+        """script_only=True → -sS for TCP, -sU for UDP; -sn and -sV absent.
+
+        -sn (no port scan) conflicts with -p (explicit port selection) and
+        causes nmap to error: 'You cannot use -F or -p when not doing a port scan'.
+        The script pass must use a real scan type so -p is accepted.
+        """
+        tcp_cmd = _build_nmap_cmd('22', '/in.txt', '/out.xml', '88',
+                                   script_scan=True, target_scan='Internal',
+                                   script_only=True)
+        assert '-sS' in tcp_cmd
+        assert '-sn' not in tcp_cmd
+        assert '-sV' not in tcp_cmd
+
+        udp_cmd = _build_nmap_cmd('U:161', '/in.txt', '/out.xml', '88',
+                                   script_scan=True, target_scan='Internal',
+                                   script_only=True)
+        assert '-sU' in udp_cmd
+        assert '-sn' not in udp_cmd
+        assert '-sV' not in udp_cmd
 
     def test_script_only_includes_script_when_port_has_scripts(self):
         """script_only=True on a port with scripts → --script present."""

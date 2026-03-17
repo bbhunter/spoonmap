@@ -1033,8 +1033,9 @@ def _build_nmap_cmd(dest_port, input_file, output_file, source_port,
     adds --script regardless of script_scan.
     """
     if script_only:
+        scan_flag = '-sU' if 'U:' in dest_port else '-sS'
         cmd = [
-            'nmap', '-T4', '-sn', '-Pn', '-p',
+            'nmap', '-T4', scan_flag, '-Pn', '-p',
             dest_port[2:] if 'U:' in dest_port else dest_port,
             '--open', '--randomize-hosts',
         ]
