@@ -78,7 +78,8 @@ You can also create a `config.json` file (based on `config.json.sample`) to skip
     "output_path": "./",
     "exclusions_file": "exclusions.txt",
     "nmap_threads": 5,
-    "masscan_batch_size": 5
+    "masscan_batch_size": 5,
+    "nmap_threshold": 5000000
 }
 ```
 
@@ -97,7 +98,7 @@ To resume an interrupted scan without any prompts, use the `--resume` flag:
 uv run spoonmap.py --resume
 ```
 
-`--resume` skips completed masscan batches whose output XML is newer than `masscan_targets.txt`, loads the pre-existing live host lists, and continues from where it left off. If `ranges.txt` was changed since the last run, any batch whose XML pre-dates the new target file is automatically re-run. nmap banner/script results are always resumed (existing `nmap_results/portN.xml` files are skipped unconditionally). Resume can also be enabled via `config.json` with `"resume": "True"`.
+`--resume` skips completed port discovery whose output XML is newer than `masscan_targets.txt`, loads the pre-existing live host lists, and continues from where it left off. If `ranges.txt` was changed since the last run, any discovery output that pre-dates the new target file is automatically re-run. nmap banner/script results are always resumed (existing `nmap_results/portN.xml` files are skipped unconditionally). Resume can also be enabled via `config.json` with `"resume": "True"`.
 
 To remove scan data non-interactively, use the `--cleanup` flag:
 
@@ -141,7 +142,8 @@ git update-index --no-skip-worktree ranges.txt
 | `exclusions_file` | Path | IPs/CIDRs passed to masscan `--excludefile` |
 | `nmap_threads` | Integer | Concurrent nmap processes (default: 5) |
 | `masscan_batch_size` | Integer | Ports per masscan invocation (default: 5) |
-| `resume` | `"True"` / `"False"` | Skip completed masscan batches on restart (default: False) |
+| `nmap_threshold` | Integer | Work-unit threshold for tool selection (default: 5,000,000 — see below) |
+| `resume` | `"True"` / `"False"` | Skip completed port discovery on restart (default: False) |
 
 ### max_rate guidance
 Rates that are too high can create a denial-of-service condition — use caution.
@@ -153,6 +155,40 @@ Rates that are too high can create a denial-of-service condition — use caution
 
 The adaptive probe phase and category/custom batched scans always use the full `max_rate`.
 Full port scans (`-p 1-65535`) are capped to half the default to avoid saturation.
+
+### Intelligent tool selection: masscan vs nmap
+
+SpooNMAP automatically selects the best port discovery tool for the job based on the size of the scan:
+
+```
+work_units = effective_host_count × port_count
+```
+
+- **nmap** is used when `work_units ≤ nmap_threshold` (default: 5,000,000)
+- **masscan** is used for larger scans where its raw speed advantage matters
+
+**Why?** Masscan's stateless TCP stack is unreliable for small target sets — it misses open ports that nmap's full 3-way handshake reliably finds. Internal masscan throughput is also capped at ~200 work-units/sec (1,000 pps ÷ 5 retries), while nmap -T4 handles ~10,000 work-units/sec across hosts in parallel.
+
+| Scenario | Masscan (internal) | Nmap -T4 |
+|---|---|---|
+| 38 hosts × 65,535 ports | ~54 hours | ~4 min |
+| 512 hosts × 65,535 ports | ~46 hours | ~56 min |
+| 512 hosts × 50 ports | ~3.5 min | ~2.5 sec |
+| 10,000 hosts × 50 ports | ~1.1 hr | ~50 sec |
+
+The default threshold of 5,000,000 covers roughly 76 hosts × full-port scan or 5,000 hosts × 1,000 targeted ports. If you have a high-rate external setup (100k+ pps), lower this to ~500,000 so masscan's speed advantage kicks in sooner.
+
+The tool selection is printed at scan time:
+
+```
+Work units (38 hosts × 65535 ports = 2,490,330) ≤ threshold (5,000,000): using nmap for port discovery
+```
+
+or:
+
+```
+Work units (50,000 hosts × 65535 ports = 3,276,750,000) > threshold (5,000,000): using masscan for port discovery
+```
 
 ### Inter-scan wait (automatic)
 When scanning small target ranges (e.g. a /24), each per-port masscan invocation completes in a fraction of a second, producing rapid back-to-back traffic bursts that can saturate the local network. SpooNMAP automatically passes `--wait N` to masscan so the process lingers after its last packet, acting as a natural cooldown between invocations.
@@ -190,7 +226,8 @@ Inter-scan wait: 29s (target ~256 hosts)
   live_hosts_combined.txt     # union of discovery + probe IPs used as scan target
   masscan_results/portN.xml   # raw masscan XML per port
   live_hosts/portN.txt        # deduplicated IPs per port
-  nmap_results/portN.xml      # nmap banner/script XML per port
+  nmap_results/portN.xml      # nmap banner (-sV) XML per port
+  nse_results/portN.xml       # nmap NSE script XML per port (script_scan only)
   all_live_hosts.txt          # union of all live IPs
   spoonmap_output.xml         # merged nmap XML (or masscan if no banner scan)
   spoonmap_output.json        # same data as JSON — list of host objects by IP
