@@ -1191,8 +1191,13 @@ def nmap_scan(source_port, max_threads=5, ip_to_hostname=None,
     os.makedirs(output_path+"/nmap_results", exist_ok=True)
     os.makedirs(output_path+"/nse_results", exist_ok=True)
 
+    live_hosts_dir = f'{_disc(output_path)}/live_hosts'
+    if not os.path.exists(live_hosts_dir):
+        print(_COLOR_INFO + 'No live hosts discovered — skipping nmap scan.' + _COLOR_RESET)
+        return
+
     try:
-        host_files = os.listdir(f'{_disc(output_path)}/live_hosts')
+        host_files = os.listdir(live_hosts_dir)
 
         # Filter out files that have already been scanned (both passes must be done)
         files_to_scan = []
