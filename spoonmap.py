@@ -471,6 +471,26 @@ def _disc(output_path):
     return os.path.join(output_path, 'discovery')
 
 
+def _port_fname(key: str) -> str:
+    """Return a filesystem-safe filename stem for a port key.
+
+    'U:631' → 'U_631'  (colon → underscore so NTFS/HGFS shares don't mangle it)
+    '445'   → '445'    (TCP keys are unchanged)
+    """
+    return key.replace(':', '_')
+
+
+def _fname_port(stem: str) -> str:
+    """Reverse of _port_fname: convert a filename stem back to a port key.
+
+    'U_631' → 'U:631'
+    '445'   → '445'
+    """
+    if stem.startswith('U_'):
+        return 'U:' + stem[2:]
+    return stem
+
+
 # Result dirs and files written during a scan run.
 _RESULT_DIRS  = ('discovery', 'nmap_results', 'nse_results')
 _RESULT_FILES = ('all_live_hosts.txt', 'spoonmap_output.xml',
@@ -509,13 +529,13 @@ def _nmap_udp_discovery(udp_port, target_file, output_path, source_port,
     Uses --open (which in nmap captures 'open' and 'open|filtered' states) so
     that protocol-specific services only detectable by NSE probes are not missed
     by the banner/script phase.  The resulting IPs are written to
-    live_hosts/portU:N.txt for consumption by nmap_scan().
+    live_hosts/portU_N.txt (colon-free for NTFS compatibility) for consumption by nmap_scan().
     """
     port_num = udp_port[2:]          # strip 'U:'
-    output_file = f'{_disc(output_path)}/masscan_results/port{udp_port}.xml'
+    output_file = f'{_disc(output_path)}/masscan_results/port{_port_fname(udp_port)}.xml'
 
     if resume and os.path.exists(output_file):
-        live_file = f'{_disc(output_path)}/live_hosts/port{udp_port}.txt'
+        live_file = f'{_disc(output_path)}/live_hosts/port{_port_fname(udp_port)}.txt'
         if os.path.exists(live_file):
             with open(live_file) as fh:
                 return {line.strip() for line in fh if line.strip()}
@@ -679,7 +699,7 @@ def _nmap_port_discovery(dest_ports, target_file, source_port, exclusions_file,
         return status_summary
 
     for port_key, ips in results.items():
-        live_file = f'{disc}/live_hosts/port{port_key}.txt'
+        live_file = f'{disc}/live_hosts/port{_port_fname(port_key)}.txt'
         with open(live_file, 'w') as fh:
             fh.write('\n'.join(sorted(ips)) + '\n')
         status_update = f'\nHosts Found on Port {port_key}: {len(ips)}'
@@ -756,7 +776,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
                                           wait_secs=wait_secs)
         os.makedirs(f'{disc}/live_hosts', exist_ok=True)
         for port_key, ips in full_results.items():
-            with open(f'{disc}/live_hosts/port{port_key}.txt', 'w') as f:
+            with open(f'{disc}/live_hosts/port{_port_fname(port_key)}.txt', 'w') as f:
                 for ip in sorted(ips):
                     f.write(f'{ip}\n')
             host_count = len(ips)
@@ -832,7 +852,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
             combined = fast_results.get(port_key, set()) | slow_results.get(port_key, set())
             if combined:
                 port_ips[port_key] = combined
-                with open(f'{disc}/live_hosts/port{port_key}.txt', 'w') as f:
+                with open(f'{disc}/live_hosts/port{_port_fname(port_key)}.txt', 'w') as f:
                     for ip in sorted(combined):
                         f.write(f'{ip}\n')
                 if port_key not in SLOW_PORTS:
@@ -913,7 +933,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
                   f'({batch_label})' + _COLOR_RESET)
             for dest_port in batch:
                 port_ips.setdefault(dest_port, set())
-                live_file = f'{disc}/live_hosts/port{dest_port}.txt'
+                live_file = f'{disc}/live_hosts/port{_port_fname(dest_port)}.txt'
                 if os.path.exists(live_file):
                     with open(live_file) as fh:
                         port_ips[dest_port].update(
@@ -939,7 +959,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
             for dest_port in batch:
                 if dest_port not in port_ips:
                     port_ips[dest_port] = set()
-                    live_host_file = f'{disc}/live_hosts/port{dest_port}.txt'
+                    live_host_file = f'{disc}/live_hosts/port{_port_fname(dest_port)}.txt'
                     if os.path.exists(live_host_file):
                         with open(live_host_file, 'r') as file:
                             port_ips[dest_port].update(line.strip() for line in file if line.strip())
@@ -953,7 +973,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
             os.makedirs(f'{disc}/live_hosts', exist_ok=True)
             for dest_port in batch:
                 if port_ips.get(dest_port):
-                    with open(f'{disc}/live_hosts/port{dest_port}.txt', 'w') as file:
+                    with open(f'{disc}/live_hosts/port{_port_fname(dest_port)}.txt', 'w') as file:
                         for ip in sorted(port_ips[dest_port]):
                             file.write(f'{ip}\n')
                     host_count = len(port_ips[dest_port])
@@ -972,7 +992,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
                 added = merged_smb - port_ips.get(smb_port, set())
                 if added:
                     port_ips[smb_port] = merged_smb
-                    with open(f'{disc}/live_hosts/port{smb_port}.txt', 'w') as _f:
+                    with open(f'{disc}/live_hosts/port{_port_fname(smb_port)}.txt', 'w') as _f:
                         for _ip in sorted(merged_smb):
                             _f.write(_ip + '\n')
                     partner = '445' if smb_port == '139' else '139'
@@ -991,7 +1011,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
         )
         if ips:
             port_ips[udp_port] = ips
-            with open(f'{disc}/live_hosts/port{udp_port}.txt', 'w') as f:
+            with open(f'{disc}/live_hosts/port{_port_fname(udp_port)}.txt', 'w') as f:
                 for ip in sorted(ips):
                     f.write(f'{ip}\n')
             host_count = len(ips)
@@ -1088,13 +1108,13 @@ def nmap_worker(work_queue, completed_count, total_count, source_port, lock,
                 work_queue.task_done()
                 break
 
-            dest_port = ((host_file.split('.')[0])[4:])
-            output_file = f'{output_path}/nmap_results/port{dest_port}.xml'
-            input_file = f'{_disc(output_path)}/live_hosts/port{dest_port}.txt'
+            dest_port = _fname_port((host_file.split('.')[0])[4:])
+            output_file = f'{output_path}/nmap_results/port{_port_fname(dest_port)}.xml'
+            input_file = f'{_disc(output_path)}/live_hosts/port{_port_fname(dest_port)}.txt'
 
             # Create hostname-based target file if we have hostname mappings
             if ip_to_hostname:
-                hostname_file = f'{_disc(output_path)}/live_hosts/port{dest_port}_hostnames.txt'
+                hostname_file = f'{_disc(output_path)}/live_hosts/port{_port_fname(dest_port)}_hostnames.txt'
                 create_hostname_target_file(input_file, hostname_file, ip_to_hostname)
                 input_file = hostname_file
 
@@ -1139,7 +1159,7 @@ def nmap_worker(work_queue, completed_count, total_count, source_port, lock,
                 if script_scan and not interrupt_event.is_set():
                     scripts = _get_scripts_for_port(dest_port, target_scan)
                     if scripts:
-                        nse_output = f'{output_path}/nse_results/port{dest_port}.xml'
+                        nse_output = f'{output_path}/nse_results/port{_port_fname(dest_port)}.xml'
                         with lock:
                             print(_COLOR_INFO + f'Running NSE scripts for port {dest_port}...\n' + _COLOR_RESET)
                         nse_cmd = _build_nmap_cmd(
@@ -1202,11 +1222,11 @@ def nmap_scan(source_port, max_threads=5, ip_to_hostname=None,
         # Filter out files that have already been scanned (both passes must be done)
         files_to_scan = []
         for host_file in host_files:
-            dest_port = ((host_file.split('.')[0])[4:])
-            banner_done = os.path.exists(f'{output_path}/nmap_results/port{dest_port}.xml')
+            dest_port = _fname_port((host_file.split('.')[0])[4:])
+            banner_done = os.path.exists(f'{output_path}/nmap_results/port{_port_fname(dest_port)}.xml')
             scripts_exist = _get_scripts_for_port(dest_port, target_scan)
             script_done = (not script_scan or not scripts_exist or
-                           os.path.exists(f'{output_path}/nse_results/port{dest_port}.xml'))
+                           os.path.exists(f'{output_path}/nse_results/port{_port_fname(dest_port)}.xml'))
             if not (banner_done and script_done):
                 files_to_scan.append(host_file)
 
@@ -1491,7 +1511,7 @@ def _scan_extra_sql_ports(output_path, source_port):
     """Scan SQL Server named instances discovered on non-standard ports."""
     discovered = {}  # {host_ip: [port, ...]}
 
-    for fname in ('port1433.xml', 'portU:1434.xml'):
+    for fname in ('port1433.xml', 'portU_1434.xml'):
         fpath = f'{output_path}/nse_results/{fname}'
         if not os.path.exists(fpath):
             continue
@@ -1596,13 +1616,15 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
                 for s in elem.findall('script')}
 
     def port_str_from_fname(fname):
-        """Derive a port string from a filename like port445.xml or portU:1434.xml."""
+        """Derive a port string from a filename like port445.xml or portU_1434.xml."""
         stem = fname.replace('.xml', '').lstrip('port')
         # Strip optional _sql or other suffixes after the port number/key
-        stem = re.sub(r'_\w+$', '', stem)
-        if stem.startswith('U:'):
-            return f'udp/{stem[2:]}'
-        return f'tcp/{stem}'
+        # UDP keys look like 'U_1434'; strip the suffix only when it follows digits.
+        stem = re.sub(r'(?<=\d)_\w+$', '', stem)
+        port_key = _fname_port(stem)   # 'U_500' → 'U:500', '445' → '445'
+        if port_key.startswith('U:'):
+            return f'udp/{port_key[2:]}'
+        return f'tcp/{port_key}'
 
     # ── collect printer IPs (port 9100 open = JetDirect = printer) ───────────
     printer_ips = set()
@@ -2738,11 +2760,11 @@ def _path_completion():
 
 
 def _filter_udp_live_hosts(output_path):
-    """Rewrite live_hosts/portU:N.txt and nmap_results/portU:N.xml to only
+    """Rewrite live_hosts/portU_N.txt and nmap_results/portU_N.xml to only
     NSE-confirmed open IPs.
 
     After nmap_scan() runs protocol-specific scripts against UDP candidates,
-    parse each nmap_results/portU:N.xml and drop any IP whose port state is
+    parse each nmap_results/portU_N.xml and drop any IP whose port state is
     still 'open|filtered' (no script response = firewall drop, not confirmed).
     Both the live_hosts file and the nmap XML are rewritten so that downstream
     aggregations (all_live_hosts.txt, spoonmap_output.xml/.json) are clean.
@@ -2754,11 +2776,11 @@ def _filter_udp_live_hosts(output_path):
 
     confirmed_counts = {}
     for fname in sorted(os.listdir(nmap_dir)):
-        if not (fname.startswith('portU:') and fname.endswith('.xml')):
+        if not (fname.startswith('portU_') and fname.endswith('.xml')):
             continue
-        port_key  = fname[4:-4]          # e.g. 'U:500'
+        port_key  = _fname_port(fname[4:-4])    # 'U_500' → 'U:500'
         nmap_xml  = os.path.join(nmap_dir, fname)
-        live_file = os.path.join(live_dir, f'port{port_key}.txt')
+        live_file = os.path.join(live_dir, f'port{_port_fname(port_key)}.txt')
         if not os.path.exists(nmap_xml) or not os.path.exists(live_file):
             continue
 
