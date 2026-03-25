@@ -204,3 +204,98 @@ class TestKubeletAnonCheckNse:
         with _StubServer(_KUBELET_PORT, _KUBELET_UNAUTH):
             output = _run_nmap(_KUBELET_PORT, _KUBELET_SCRIPT)
         assert 'Anonymous access enabled' not in output
+
+
+# ── cups-browsed-rce ──────────────────────────────────────────────────────────
+
+_CUPS_PORT   = 631
+_CUPS_SCRIPT = os.path.join(_NSE_DIR, 'cups-browsed-rce.nse')
+
+# Vulnerable: CUPS 2.0.1 (in the <= 2.0.1 range)
+_CUPS_VULN = (
+    b'HTTP/1.0 200 OK\r\n'
+    b'Server: CUPS/2.0.1 IPP/2.1\r\n'
+    b'Content-Type: text/html\r\n\r\n'
+    b'<html></html>'
+)
+# Patched: CUPS 2.1.0 (first version outside the vulnerable range)
+_CUPS_PATCHED = (
+    b'HTTP/1.0 200 OK\r\n'
+    b'Server: CUPS/2.1.0 IPP/2.1\r\n'
+    b'Content-Type: text/html\r\n\r\n'
+    b'<html></html>'
+)
+# Non-CUPS service (no Server header containing CUPS)
+_CUPS_UNRELATED = (
+    b'HTTP/1.0 200 OK\r\n'
+    b'Server: Apache/2.4.51\r\n'
+    b'Content-Type: text/html\r\n\r\n'
+    b'<html></html>'
+)
+
+
+def _cups_daemon_reachable() -> bool:
+    """Return True if a real CUPS daemon is listening on 127.0.0.1:631."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1)
+        try:
+            s.connect(('127.0.0.1', _CUPS_PORT))
+            return True
+        except OSError:
+            return False
+
+
+@pytest.mark.skipif(not _cups_daemon_reachable(),
+                    reason='no real CUPS daemon on 127.0.0.1:631')
+class TestCupsBrowsedRceNseLive:
+    """Run the script against the real local cupsd (port 631 is occupied).
+
+    This exercises the full nmap → NSE → HTTP → version-parse → verdict path
+    against a genuine CUPS installation. The daemon version may vary; these
+    tests assert shape and presence, not a specific verdict.
+    """
+
+    def test_script_fires_and_reports_version(self):
+        """Script runs against real cupsd and reports a cups_version field."""
+        output = _run_nmap(_CUPS_PORT, _CUPS_SCRIPT)
+        assert 'cups-browsed-rce' in output
+        assert 'cups_version' in output
+
+    def test_verdict_present(self):
+        """Script always emits a verdict field when CUPS is detected."""
+        output = _run_nmap(_CUPS_PORT, _CUPS_SCRIPT)
+        assert 'verdict' in output
+
+    def test_modern_cups_not_flagged_vulnerable(self):
+        """CUPS 2.4+ (installed here) must not be flagged as LIKELY VULNERABLE."""
+        output = _run_nmap(_CUPS_PORT, _CUPS_SCRIPT)
+        # Only assert LIKELY VULNERABLE is absent; NOT VULNERABLE text may vary
+        # depending on whether nmap also finds UDP 631 open.
+        assert 'LIKELY VULNERABLE' not in output
+
+
+@pytest.mark.skipif(not _port_is_free(_CUPS_PORT),
+                    reason=f'port {_CUPS_PORT} already in use — stub tests require a free port')
+class TestCupsBrowsedRceNseStub:
+    """Use a TCP stub server to exercise specific version strings and edge cases."""
+
+    def test_flags_vulnerable_version(self):
+        """Stub returns CUPS 2.0.1 banner → script reports LIKELY VULNERABLE."""
+        with _StubServer(_CUPS_PORT, _CUPS_VULN):
+            output = _run_nmap(_CUPS_PORT, _CUPS_SCRIPT)
+        assert 'cups-browsed-rce' in output
+        assert 'LIKELY VULNERABLE' in output
+        assert '2.0.1' in output
+
+    def test_not_vulnerable_for_patched_version(self):
+        """Stub returns CUPS 2.1.0 banner → script reports NOT VULNERABLE."""
+        with _StubServer(_CUPS_PORT, _CUPS_PATCHED):
+            output = _run_nmap(_CUPS_PORT, _CUPS_SCRIPT)
+        assert 'LIKELY VULNERABLE' not in output
+        assert 'NOT VULNERABLE' in output
+
+    def test_no_output_for_non_cups_service(self):
+        """Stub returns a non-CUPS banner → script produces no output."""
+        with _StubServer(_CUPS_PORT, _CUPS_UNRELATED):
+            output = _run_nmap(_CUPS_PORT, _CUPS_SCRIPT)
+        assert 'cups-browsed-rce' not in output

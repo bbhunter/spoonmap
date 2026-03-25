@@ -1351,6 +1351,8 @@ EXTERNAL_PORT_SCRIPTS = {
     'U:500': 'ike-version',
     '5900':  'vnc-info,realvnc-auth-bypass',
     '5901':  'vnc-info,realvnc-auth-bypass',
+    '631':   f'{_DIR}/nse/cups-browsed-rce.nse',
+    'U:631': f'{_DIR}/nse/cups-browsed-rce.nse',
 }
 
 # Scripts run on INTERNAL scans only (no ssl-cert — not relevant for internal assessments)
@@ -1390,6 +1392,8 @@ INTERNAL_PORT_SCRIPTS = {
     'U:500': 'ike-version',
     '5900':  'vnc-info,realvnc-auth-bypass',
     '5901':  'vnc-info,realvnc-auth-bypass',
+    '631':   f'{_DIR}/nse/cups-browsed-rce.nse',
+    'U:631': f'{_DIR}/nse/cups-browsed-rce.nse',
 }
 
 # Ports that use multiple concurrent NSE scripts; omit --source-port to prevent
@@ -1466,7 +1470,7 @@ SERVICE_CATEGORIES = {
         '389', '636'
     ],
     'Network Infrastructure': [
-        '53', '179', 'U:500', 'U:161', 'U:623'
+        '53', '179', 'U:500', 'U:161', 'U:623', 'U:631'
     ],
     'File Transfer': [
         '21', '111'
@@ -1780,6 +1784,22 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
                             'Unauthenticated access to X11 display server. Allows keystroke '
                             'logging, screen capture, and arbitrary command execution via '
                             'xterm. Restrict with xhost or firewall immediately.')
+
+                # ── cups-browsed RCE (CVE-2024-47176) ────────────────────
+                cups_out = scripts.get('cups-browsed-rce', '')
+                if cups_out and 'LIKELY VULNERABLE' in cups_out:
+                    m_ver = re.search(r'cups_version:\s*(\S+)', cups_out)
+                    cups_ver = m_ver.group(1) if m_ver else 'unknown'
+                    add('CRITICAL', ip, port_str,
+                        'CUPS RCE — cups-browsed Exposed (CVE-2024-47176)',
+                        f'CUPS {cups_ver}: cups-browsed is listening on UDP 631 and accepts '
+                        f'printer-discovery packets from untrusted networks. An attacker can '
+                        f'send a crafted UDP packet to inject a rogue printer; executing any '
+                        f'print job to that printer triggers arbitrary command execution '
+                        f'(CVE-2024-47176/47076/47175/47177). '
+                        f'Mitigate: disable cups-browsed, firewall UDP 631, or upgrade '
+                        f'cups-filters to >= 2.0.2. '
+                        f'Ref: https://www.akamai.com/blog/security-research/guidance-on-critical-cups-rce')
 
                 # ── ssl-cert — expired (External only) ───────────────────
                 if 'ssl-cert' in scripts and target_scan == 'External':
