@@ -1076,7 +1076,11 @@ def _build_nmap_cmd(dest_port, input_file, output_file, source_port,
         cmd += ['-iL', input_file, '-oX', output_file]
         scripts = _get_scripts_for_port(dest_port, target_scan)
         if scripts:
-            cmd += ['--script', scripts, '--script-timeout', '30s', '--host-timeout', '5m']
+            is_udp = 'U:' in dest_port
+            host_timeout = '90s' if is_udp else '5m'
+            cmd += ['--script', scripts, '--script-timeout', '30s', '--host-timeout', host_timeout]
+            if is_udp:
+                cmd += ['--max-retries', '1']
         return cmd
 
     # Banner pass — never add --script regardless of script_scan
