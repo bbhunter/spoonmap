@@ -666,7 +666,7 @@ def _nmap_port_discovery(dest_ports, target_file, source_port, exclusions_file,
         for line in stderr_stream:
             line = line.rstrip()
             if re.search(r'About\s+[\d.]+%\s+done', line):
-                print(_COLOR_PROGRESS + f'  [nmap] {line}' + _COLOR_RESET)
+                print(_COLOR_PROGRESS + f'  [nmap] {line}' + _COLOR_RESET, flush=True)
 
     term_state = save_terminal_state()
     try:
@@ -3176,13 +3176,13 @@ def main():
                   + f'≤ threshold ({nmap_threshold:,}): using nmap for port discovery'
                   + _COLOR_RESET)
             status_summary = _nmap_port_discovery(
-                _tcp_dest_ports, masscan_target_file, source_port,
+                _tcp_dest_ports, _count_file, source_port,
                 exclusions_file, scan_type=scan_type, resume=resume,
                 max_rate=max_rate,
             )
             # UDP ports are always discovered via nmap regardless of the TCP tool chosen.
             disc = _disc(output_path)
-            udp_target = masscan_target_file
+            udp_target = _count_file
             for udp_port in _udp_dest_ports:
                 os.makedirs(f'{disc}/live_hosts', exist_ok=True)
                 ips = _nmap_udp_discovery(
