@@ -593,7 +593,7 @@ def _nmap_udp_discovery(udp_port, target_file, output_path, source_port,
 
 
 def _nmap_port_discovery(dest_ports, target_file, source_port, exclusions_file,
-                         scan_type='Full', resume=False):
+                         scan_type='Full', resume=False, max_rate=None):
     """Run nmap -T4 port discovery in place of masscan for small target sets.
 
     Writes live_hosts/port{N}.txt files in the same format as mass_scan() so
@@ -636,6 +636,12 @@ def _nmap_port_discovery(dest_ports, target_file, source_port, exclusions_file,
         port_spec = ','.join(dest_ports)
     scan_flags = ['-sS']
 
+    try:
+        with open(target_file) as _tf:
+            _target_count = sum(1 for ln in _tf if ln.strip())
+    except OSError:
+        _target_count = 0
+
     cmd = [
         'nmap', '-T4', *scan_flags, '-Pn',
         '-p', port_spec,
@@ -644,16 +650,32 @@ def _nmap_port_discovery(dest_ports, target_file, source_port, exclusions_file,
         '--source-port', source_port,
         '-iL', target_file,
         '-oX', output_file,
+        '--stats-every', '30s',
     ]
+    if max_rate is not None:
+        cmd += ['--max-rate', str(max_rate)]
     if exclusions_file:
         cmd += ['--excludefile', exclusions_file]
 
-    print(_COLOR_INFO + f'Nmap port discovery: scanning {port_spec} (nmap -T4)...' + _COLOR_RESET)
+    print(_COLOR_INFO
+          + f'Nmap port discovery: scanning {port_spec} across {_target_count:,} target(s)'
+          + ' — progress every 30 s ...'
+          + _COLOR_RESET)
+
+    def _progress_reader(stderr_stream):
+        for line in stderr_stream:
+            line = line.rstrip()
+            if re.search(r'About\s+[\d.]+%\s+done', line):
+                print(_COLOR_PROGRESS + f'  [nmap] {line}' + _COLOR_RESET)
 
     term_state = save_terminal_state()
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, text=True)
+        _t = threading.Thread(target=_progress_reader, args=(proc.stderr,), daemon=True)
+        _t.start()
         proc.wait()
+        _t.join()
     except KeyboardInterrupt:
         proc.kill()
         proc.wait()
@@ -3152,6 +3174,7 @@ def main():
             status_summary = _nmap_port_discovery(
                 _tcp_dest_ports, masscan_target_file, source_port,
                 exclusions_file, scan_type=scan_type, resume=resume,
+                max_rate=max_rate,
             )
             # UDP ports are always discovered via nmap regardless of the TCP tool chosen.
             disc = _disc(output_path)
