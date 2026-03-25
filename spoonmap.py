@@ -620,7 +620,7 @@ def _nmap_port_discovery(dest_ports, target_file, source_port, exclusions_file,
                 if not (fname.startswith('port') and fname.endswith('.txt')
                         and not fname.endswith('_hostnames.txt')):
                     continue
-                port_key = fname[4:-4]
+                port_key = _fname_port(fname[4:-4])
                 with open(os.path.join(live_hosts_dir, fname)) as fh:
                     ips = {line.strip() for line in fh if line.strip()}
                 if ips:
@@ -629,22 +629,12 @@ def _nmap_port_discovery(dest_ports, target_file, source_port, exclusions_file,
                     print(_COLOR_PROGRESS + status_update + _COLOR_RESET)
         return status_summary
 
-    # Separate TCP and UDP ports
-    tcp_ports = [p for p in dest_ports if not p.startswith('U:')]
-    udp_ports  = [p for p in dest_ports if p.startswith('U:')]
-
+    # UDP ports are handled separately via _nmap_udp_discovery(); only TCP here.
     if scan_type == 'Full':
         port_spec = '1-65535'
-        scan_flags = ['-sS']
-    elif tcp_ports and not udp_ports:
-        port_spec = ','.join(tcp_ports)
-        scan_flags = ['-sS']
-    elif udp_ports and not tcp_ports:
-        port_spec = ','.join(p[2:] for p in udp_ports)
-        scan_flags = ['-sU']
     else:
-        port_spec = f"T:{','.join(tcp_ports)},U:{','.join(p[2:] for p in udp_ports)}"
-        scan_flags = ['-sSU']
+        port_spec = ','.join(dest_ports)
+    scan_flags = ['-sS']
 
     cmd = [
         'nmap', '-T4', *scan_flags, '-Pn',
@@ -3147,19 +3137,39 @@ def main():
                        else masscan_target_file)
         effective_host_count = _count_hosts_in_file(_count_file) or 0
 
-        # Compute work units: hosts × ports (65535 for Full scan, else len(dest_ports))
-        _port_count = 65535 if scan_type == 'Full' else len(dest_ports)
+        # Compute work units using TCP ports only — UDP is always handled via
+        # _nmap_udp_discovery() regardless of which discovery tool is chosen.
+        _tcp_dest_ports = [p for p in dest_ports if not p.startswith('U:')]
+        _udp_dest_ports = [p for p in dest_ports if p.startswith('U:')]
+        _port_count = 65535 if scan_type == 'Full' else len(_tcp_dest_ports)
         work_units = effective_host_count * _port_count
 
         if effective_host_count > 0 and work_units <= nmap_threshold:
             print(_COLOR_INFO
-                  + f'Work units ({effective_host_count:,} hosts × {_port_count:,} ports = {work_units:,}) '
+                  + f'Work units ({effective_host_count:,} hosts × {_port_count:,} TCP ports = {work_units:,}) '
                   + f'≤ threshold ({nmap_threshold:,}): using nmap for port discovery'
                   + _COLOR_RESET)
             status_summary = _nmap_port_discovery(
-                dest_ports, masscan_target_file, source_port,
+                _tcp_dest_ports, masscan_target_file, source_port,
                 exclusions_file, scan_type=scan_type, resume=resume,
             )
+            # UDP ports are always discovered via nmap regardless of the TCP tool chosen.
+            disc = _disc(output_path)
+            udp_target = masscan_target_file
+            for udp_port in _udp_dest_ports:
+                os.makedirs(f'{disc}/live_hosts', exist_ok=True)
+                ips = _nmap_udp_discovery(
+                    udp_port, udp_target, output_path,
+                    source_port, exclusions_file, resume=resume,
+                )
+                if ips:
+                    with open(f'{disc}/live_hosts/port{_port_fname(udp_port)}.txt', 'w') as f:
+                        for ip in sorted(ips):
+                            f.write(f'{ip}\n')
+                    status_summary += f'\nHosts Found on Port {udp_port}: {len(ips)}'
+                    print(_COLOR_PROGRESS + f'\nHosts Found on Port {udp_port}: {len(ips)}' + _COLOR_RESET)
+                else:
+                    print(_COLOR_INFO + f'No hosts found on UDP port {udp_port[2:]}' + _COLOR_RESET)
         else:
             if effective_host_count > 0:
                 print(_COLOR_INFO
