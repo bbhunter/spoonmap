@@ -662,17 +662,17 @@ def _nmap_port_discovery(dest_ports, target_file, source_port, exclusions_file,
           + ' — progress every 30 s ...'
           + _COLOR_RESET)
 
-    def _progress_reader(stderr_stream):
-        for line in stderr_stream:
+    def _progress_reader(stdout_stream):
+        for line in stdout_stream:
             line = line.rstrip()
             if re.search(r'About\s+[\d.]+%\s+done', line):
                 print(_COLOR_PROGRESS + f'  [nmap] {line}' + _COLOR_RESET, flush=True)
 
     term_state = save_terminal_state()
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.PIPE, text=True)
-        _t = threading.Thread(target=_progress_reader, args=(proc.stderr,), daemon=True)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True)
+        _t = threading.Thread(target=_progress_reader, args=(proc.stdout,), daemon=True)
         _t.start()
         proc.wait()
         _t.join()
