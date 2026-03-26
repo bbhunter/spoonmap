@@ -255,15 +255,13 @@ def _parse_nmap_sn_xml(xml_file):
 
 
 def _host_discovery(target_file, output_path, max_rate, exclusions_file,
-                    scan_type='Internal', resume=False):
-    """Run masscan --ping then masscan TCP SYN probe; union results; write live_hosts_discovery.txt.
+                    scan_type='Internal', resume=False, source_port='88'):
+    """Run host discovery and write live_hosts_discovery.txt.
 
-    Uses --open on the TCP SYN scan so only SYN-ACK responders (real open ports) are reported.
-    Immune to proxy-ARP and virtualised-switch RST proxying, which cause nmap -sn to report
-    false positives (nmap treats TCP RST as "host up").
+    Uses nmap -sn for target sets ≤ HOST_DISCOVERY_NMAP_THRESHOLD hosts (default: /16).
+    Falls back to masscan (ICMP ping + TCP SYN) for larger target sets where raw speed matters.
 
-    Returns live_hosts_discovery.txt path, or None if 0 hosts found
-    (probe will scan the full target range anyway on ICMP-blocked networks).
+    Returns live_hosts_discovery.txt path, or None if 0 hosts found.
     """
     disc = _disc(output_path)
     os.makedirs(disc, exist_ok=True)
@@ -275,11 +273,96 @@ def _host_discovery(target_file, output_path, max_rate, exclusions_file,
         print(_COLOR_INFO + f'Resume: skipping host discovery ({count} hosts cached)' + _COLOR_RESET)
         return discovery_file
 
+    target_count = _count_hosts_in_file(target_file) or 0
+    tcp_ports = (DISCOVERY_TCP_PORTS_INTERNAL
+                 if scan_type == 'Internal'
+                 else DISCOVERY_TCP_PORTS_EXTERNAL)
+
+    if target_count <= HOST_DISCOVERY_NMAP_THRESHOLD:
+        live_ips = _nmap_host_discovery(
+            target_file, disc, source_port, exclusions_file, tcp_ports)
+    else:
+        print(_COLOR_INFO
+              + f'Host discovery: {target_count:,} targets > {HOST_DISCOVERY_NMAP_THRESHOLD:,} '
+              + '— using masscan for speed'
+              + _COLOR_RESET)
+        live_ips = _masscan_host_discovery(
+            target_file, disc, max_rate, exclusions_file, tcp_ports)
+
+    total = len(live_ips)
+    print(_COLOR_PROGRESS + f'Host discovery total: {total} unique live host(s)' + _COLOR_RESET)
+
+    if not live_ips:
+        print(_COLOR_ERROR
+              + 'Warning: host discovery found 0 live hosts — probe will scan full target range.'
+              + _COLOR_RESET)
+        return None
+
+    with open(discovery_file, 'w') as fh:
+        for ip in sorted(live_ips, key=lambda x: tuple(int(o) for o in x.split('.'))):
+            fh.write(ip + '\n')
+
+    return discovery_file
+
+
+def _nmap_host_discovery(target_file, disc, source_port, exclusions_file, tcp_ports):
+    """Run nmap -sn (ICMP echo + TCP SYN/ACK probes); return set of live IPs."""
+    output_xml = os.path.join(disc, 'discovery_nmap.xml')
+    cmd = [
+        'nmap', '-sn', '-T4',
+        '-PE',                       # ICMP echo
+        f'-PS{tcp_ports}',           # TCP SYN to discovery ports
+        f'-PA{tcp_ports}',           # TCP ACK to discovery ports (bypasses stateful firewalls)
+        '--source-port', source_port,
+        '-iL', target_file,
+        '-oX', output_xml,
+    ]
+    if exclusions_file:
+        cmd += ['--excludefile', exclusions_file]
+
+    print(_COLOR_INFO + 'Host discovery: running nmap -sn...' + _COLOR_RESET)
+    term_state = save_terminal_state()
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc.wait()
+    except KeyboardInterrupt:
+        proc.kill()
+        proc.wait()
+        restore_terminal_state(term_state)
+        raise
+    except FileNotFoundError:
+        print(_COLOR_ERROR + 'Error: nmap not found.' + _COLOR_RESET)
+        restore_terminal_state(term_state)
+        return set()
+    finally:
+        restore_terminal_state(term_state)
+
+    live_ips = set()
+    if not os.path.exists(output_xml) or os.stat(output_xml).st_size == 0:
+        return live_ips
+    try:
+        root = etree.parse(output_xml)
+        for host in root.findall('host'):
+            status = host.find('status')
+            if status is None or status.attrib.get('state') != 'up':
+                continue
+            addr = host.find('address[@addrtype="ipv4"]')
+            if addr is not None:
+                live_ips.add(addr.attrib['addr'])
+    except etree.ParseError as e:
+        print(_COLOR_ERROR + f'Error parsing nmap discovery XML: {e}' + _COLOR_RESET)
+
+    print(_COLOR_PROGRESS + f'Host discovery (nmap -sn): {len(live_ips)} host(s)' + _COLOR_RESET)
+    return live_ips
+
+
+def _masscan_host_discovery(target_file, disc, max_rate, exclusions_file, tcp_ports):
+    """Run masscan ICMP ping + TCP SYN probe; return set of live IPs."""
     masscan_xml     = os.path.join(disc, 'discovery_masscan.xml')
     masscan_tcp_xml = os.path.join(disc, 'discovery_masscan_tcp.xml')
     live_ips = set()
 
-    # ── masscan ICMP ping ──────────────────────────────────────────────────────
+    # ICMP ping
     print(_COLOR_INFO + 'Host discovery: running masscan --ping...' + _COLOR_RESET)
     masscan_cmd = [
         'masscan', '--ping',
@@ -309,13 +392,7 @@ def _host_discovery(target_file, output_path, max_rate, exclusions_file,
     live_ips.update(_parse_masscan_ping_xml(masscan_xml))
     print(_COLOR_PROGRESS + f'Host discovery (masscan ping): {len(live_ips)} host(s)' + _COLOR_RESET)
 
-    # ── masscan TCP SYN probe ──────────────────────────────────────────────────
-    # Uses --open: only SYN-ACK responders (real open ports) are reported.
-    # Immune to proxy-ARP and virtualised-switch RST proxying, which cause
-    # nmap -sn to report false positives (nmap treats RST as "host up").
-    tcp_ports = (DISCOVERY_TCP_PORTS_INTERNAL
-                 if scan_type == 'Internal'
-                 else DISCOVERY_TCP_PORTS_EXTERNAL)
+    # TCP SYN probe
     print(_COLOR_INFO + 'Host discovery: running masscan TCP SYN probe...' + _COLOR_RESET)
     masscan_tcp_cmd = [
         'masscan',
@@ -348,20 +425,7 @@ def _host_discovery(target_file, output_path, max_rate, exclusions_file,
     print(_COLOR_PROGRESS + f'Host discovery (masscan TCP): {len(tcp_ips)} host(s)' + _COLOR_RESET)
     live_ips.update(tcp_ips)
 
-    total = len(live_ips)
-    print(_COLOR_PROGRESS + f'Host discovery total: {total} unique live host(s)' + _COLOR_RESET)
-
-    if not live_ips:
-        print(_COLOR_ERROR
-              + 'Warning: host discovery found 0 live hosts — probe will scan full target range.'
-              + _COLOR_RESET)
-        return None          # probe always uses full target range
-
-    with open(discovery_file, 'w') as fh:
-        for ip in sorted(live_ips, key=lambda x: tuple(int(o) for o in x.split('.'))):
-            fh.write(ip + '\n')
-
-    return discovery_file
+    return live_ips
 
 
 def _run_masscan_batch(batch, rate, output_file, target_file, source_port, exclusions_file, wait_secs=2):
@@ -1347,6 +1411,11 @@ EXTERNAL_PROBE_PORT_PRIORITY = [
 # on virtualised networks where the hypervisor answers every ARP request).
 DISCOVERY_TCP_PORTS_INTERNAL = '22,80,135,139,443,445,3389'
 DISCOVERY_TCP_PORTS_EXTERNAL = '22,80,443,8080,8443'
+
+# Host-count threshold for host discovery tool selection.
+# nmap -sn is more accurate (full handshake awareness, multi-probe ICMP+SYN+ACK).
+# masscan is used only for target sets larger than this to preserve speed at scale.
+HOST_DISCOVERY_NMAP_THRESHOLD = 65_536  # /16 or smaller → nmap; larger → masscan
 
 # Ports scanned solo (one per masscan invocation) regardless of batch_size.
 # These services have low traffic density and responses are easily crowded out
@@ -3152,7 +3221,7 @@ def main():
         if host_discovery:
             discovery_file = _host_discovery(
                 masscan_target_file, output_path, max_rate, exclusions_file,
-                scan_type=target_scan, resume=resume,
+                scan_type=target_scan, resume=resume, source_port=source_port,
             )
         else:
             discovery_file = None
