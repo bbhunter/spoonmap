@@ -30,7 +30,7 @@ uv run pytest tests/test_spoonmap.py::TestGenerateFindings  # single class
 The entire tool is a single script: `spoonmap.py`. Execution flow:
 
 1. `main()` — loads `config.json` if present, otherwise runs interactive prompts to collect: scan type, banner scan flag, internal/external target, max rate, output path, target file, exclusions file
-2. `preprocess_targets()` — reads the target file; resolves hostnames via DNS to IPs (masscan requires IPs); writes `discovery/masscan_targets.txt` and `discovery/ip_hostname_map.json`
+2. `preprocess_targets()` — reads the target file; resolves hostnames via DNS to IPs; writes `discovery/resolved_targets.txt` and `discovery/ip_hostname_map.json`
 3. `mass_scan()` — iterates over each port, runs masscan as a subprocess, parses XML output, deduplicates IPs per port using in-memory sets, writes `discovery/live_hosts/port<N>.txt`
 4. `nmap_scan()` — if banner scanning is enabled, uses a thread pool (`Queue` + worker threads, default 5 threads) to run nmap concurrently against each `discovery/live_hosts/port<N>.txt`; workers skip ports already present in `nmap_results/`
 5. `main()` — aggregates all live hosts into `all_live_hosts.txt` and merges all per-port XML into `spoonmap_output.xml`; if `script_scan` is enabled, calls `generate_findings()` to produce `findings.txt` / `findings.md`
@@ -42,7 +42,7 @@ Pass `--cleanup [dir]` to remove prior scan output non-interactively (reads `out
 ```
 <output_path>/
   discovery/
-    masscan_targets.txt       # IPs-only target list for masscan
+    resolved_targets.txt      # resolved IPs/CIDRs (input to host discovery)
     ip_hostname_map.json      # hostname → IP mapping
     live_hosts_discovery.txt  # hosts found during host-discovery phase
     masscan_results/portN.xml # raw masscan XML per port

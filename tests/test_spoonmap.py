@@ -1711,13 +1711,13 @@ class TestMassScanResume:
         path.write_text('<?xml version="1.0"?><nmaprun></nmaprun>')
 
     def test_completed_batch_skipped_when_resume_true(self, tmp_path):
-        """A batch whose XML is newer than masscan_targets.txt is skipped when resume=True."""
+        """A batch whose XML is newer than resolved_targets.txt is skipped when resume=True."""
         spoonmap.output_path = str(tmp_path)
         batch_xml = tmp_path / 'discovery' / 'masscan_results' / 'batch_0.xml'
         batch_xml.parent.mkdir(parents=True)
         self._write_batch_xml(batch_xml)
 
-        targets_file = tmp_path / 'discovery' / 'masscan_targets.txt'
+        targets_file = tmp_path / 'discovery' / 'resolved_targets.txt'
         targets_file.parent.mkdir(parents=True, exist_ok=True)
         targets_file.write_text('10.0.0.1\n')
         # Make batch XML newer than targets file
@@ -1743,7 +1743,7 @@ class TestMassScanResume:
         batch_xml.parent.mkdir(parents=True)
         self._write_batch_xml(batch_xml)
 
-        targets_file = tmp_path / 'discovery' / 'masscan_targets.txt'
+        targets_file = tmp_path / 'discovery' / 'resolved_targets.txt'
         targets_file.parent.mkdir(parents=True, exist_ok=True)
         targets_file.write_text('10.0.0.1\n')
         import os
@@ -1770,7 +1770,7 @@ class TestMassScanResume:
         live_dir.mkdir(parents=True)
         (live_dir / 'port80.txt').write_text('10.0.0.1\n10.0.0.2\n')
 
-        targets_file = tmp_path / 'discovery' / 'masscan_targets.txt'
+        targets_file = tmp_path / 'discovery' / 'resolved_targets.txt'
         targets_file.parent.mkdir(parents=True, exist_ok=True)
         targets_file.write_text('10.0.0.1\n')
         import os, time as _time
@@ -1793,7 +1793,7 @@ class TestMassScanResume:
         batch0_xml = results_dir / 'batch_0.xml'
         self._write_batch_xml(batch0_xml)
 
-        targets_file = tmp_path / 'discovery' / 'masscan_targets.txt'
+        targets_file = tmp_path / 'discovery' / 'resolved_targets.txt'
         targets_file.parent.mkdir(parents=True, exist_ok=True)
         targets_file.write_text('10.0.0.1\n')
         import os, time as _time
@@ -1818,13 +1818,13 @@ class TestMassScanResume:
         )
 
     def test_batch_not_skipped_when_targets_file_is_newer(self, tmp_path):
-        """If masscan_targets.txt is newer than batch XML, the batch re-runs."""
+        """If resolved_targets.txt is newer than batch XML, the batch re-runs."""
         spoonmap.output_path = str(tmp_path)
         batch_xml = tmp_path / 'discovery' / 'masscan_results' / 'batch_0.xml'
         batch_xml.parent.mkdir(parents=True)
         self._write_batch_xml(batch_xml)
 
-        targets_file = tmp_path / 'discovery' / 'masscan_targets.txt'
+        targets_file = tmp_path / 'discovery' / 'resolved_targets.txt'
         targets_file.parent.mkdir(parents=True, exist_ok=True)
         targets_file.write_text('10.0.0.1\n')
 

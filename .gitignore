@@ -4,7 +4,7 @@ __pycache__/
 
 # generated scan output
 all_live_hosts.txt
-masscan_targets.txt
+resolved_targets.txt
 ip_hostname_map.json
 masscan_results/
 live_hosts/

@@ -163,14 +163,14 @@ def resolve_hostname(hostname):
 def preprocess_targets(target_file, output_path):
     """
     Preprocess the target file to separate hostnames from IPs.
-    Creates a temporary file with IPs for masscan and a mapping file for NMAP.
+    Creates a resolved-IP target file and a hostname mapping file.
 
     Args:
         target_file: Path to the original target file
         output_path: Directory for output files
 
     Returns:
-        Tuple of (masscan_target_file, ip_to_hostname_map)
+        Tuple of (resolved_target_file, ip_to_hostname_map)
     """
     ip_to_hostname = {}
     masscan_targets = []
@@ -197,9 +197,9 @@ def preprocess_targets(target_file, output_path):
                 # It's already an IP or CIDR, add as-is
                 masscan_targets.append(line)
 
-    # Create temporary file for masscan with IPs
+    # Write resolved IP list (used by both nmap and masscan paths)
     os.makedirs(_disc(output_path), exist_ok=True)
-    masscan_file = os.path.join(_disc(output_path), 'masscan_targets.txt')
+    masscan_file = os.path.join(_disc(output_path), 'resolved_targets.txt')
     with open(masscan_file, 'w') as f:
         for target in masscan_targets:
             f.write(f'{target}\n')
@@ -210,7 +210,7 @@ def preprocess_targets(target_file, output_path):
         json.dump(ip_to_hostname, f, indent=2)
 
     print(_COLOR_INFO + f'Resolved {len(ip_to_hostname)} hostnames to IPs' + _COLOR_RESET)
-    print(_COLOR_INFO + f'Masscan target file: {masscan_file}' + _COLOR_RESET)
+    print(_COLOR_INFO + f'Target file: {masscan_file}' + _COLOR_RESET)
 
     return masscan_file, ip_to_hostname
 
@@ -825,7 +825,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
     disc = _disc(output_path)
     if scan_type == 'Full':
         output_file = f'{disc}/masscan_results/portFull.xml'
-        full_targets_file = f'{disc}/masscan_targets.txt'
+        full_targets_file = f'{disc}/resolved_targets.txt'
         full_targets_mtime = os.path.getmtime(full_targets_file) if os.path.exists(full_targets_file) else 0
         if (resume
                 and os.path.exists(output_file)
@@ -994,7 +994,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
     total_batches = len(batches)
     scan_start_time = time.time()
 
-    targets_file = f'{disc}/masscan_targets.txt'
+    targets_file = f'{disc}/resolved_targets.txt'
     targets_mtime = os.path.getmtime(targets_file) if os.path.exists(targets_file) else 0
 
     for batch_idx, batch in enumerate(batches):
