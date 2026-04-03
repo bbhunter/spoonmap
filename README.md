@@ -1,7 +1,7 @@
 # SpooNMAP
 
 ## Dependencies
-This script is a wrapper for masscan (fast port discovery) and nmap (service banner grabbing / NSE scripts). Install both from your favourite package manager or from source.
+This script is a wrapper for masscan and nmap. nmap handles host discovery and (for smaller scans) port discovery, service banner grabbing, and NSE scripts. Masscan is used for large-scale port discovery where raw speed matters. Install both from your favourite package manager or from source.
 
 Python 3.6+ is required (uses f-strings).
 
@@ -61,7 +61,7 @@ Please enter the full path for the file containing target hosts (default: /opt/s
 
 Would you like to exclude any hosts? (default: No)
 
-Run host discovery (masscan ping + TCP SYN probe) before scanning (default: Yes)?
+Run host discovery (nmap -sn) before port scanning (default: Yes)?
 ```
 
 You can also create a `config.json` file (based on `config.json.sample`) to skip all prompts:
@@ -134,7 +134,7 @@ git update-index --no-skip-worktree ranges.txt
 | `dest_ports` | Array of port strings | Overrides `scan_categories`; use `U:` prefix for UDP |
 | `banner_scan` | `"True"` / `"False"` | Runs nmap -sV against discovered hosts |
 | `script_scan` | `"True"` / `"False"` | Runs NSE security scripts (implies `banner_scan`) |
-| `host_discovery` | `"True"` / `"False"` | Run masscan ping + TCP SYN host discovery before port scanning; narrows target set (default: True) |
+| `host_discovery` | `"True"` / `"False"` | Run host discovery before port scanning to narrow the target set (default: True); uses nmap -sn for ≤ 65,536 targets, masscan for larger ranges |
 | `target_scan` | `"External"` / `"Internal"` | External → source port 53; Internal → source port 88 |
 | `max_rate` | Packets/second string | See rate guidance below |
 | `target_file` | Path | One IP, CIDR, or hostname per line; `ranges.txt` is committed as a blank placeholder (see below) |
@@ -156,7 +156,19 @@ Rates that are too high can create a denial-of-service condition — use caution
 The adaptive probe phase and category/custom batched scans always use the full `max_rate`.
 Full port scans (`-p 1-65535`) are capped to half the default to avoid saturation.
 
-### Intelligent tool selection: masscan vs nmap
+### Host discovery: nmap -sn vs masscan
+
+SpooNMAP defaults to **nmap -sn** for host discovery because nmap's full TCP/IP stack is significantly more accurate than masscan's stateless probes — particularly on networks with stateful firewalls or rate-limited ICMP.
+
+nmap probes each target with ICMP echo (`-PE`), TCP SYN (`-PS`), and TCP ACK (`-PA`) simultaneously, then uses the OS stack to interpret the responses. Masscan's stateless approach misses hosts that drop TCP RSTs, generate out-of-order responses, or require retransmission.
+
+For target sets larger than **65,536 hosts** (a /16), SpooNMAP falls back to masscan automatically, where its raw throughput advantage outweighs the accuracy trade-off:
+
+```
+Host discovery: 200,000 targets > 65,536 — using masscan for speed
+```
+
+### Intelligent tool selection: masscan vs nmap (port discovery)
 
 SpooNMAP automatically selects the best port discovery tool for the job based on the size of the scan:
 
@@ -218,22 +230,23 @@ Inter-scan wait: 29s (target ~256 hosts)
 
 ```
 <output_path>/
-  resolved_targets.txt        # resolved IPs/CIDRs (input to host discovery)
-  ip_hostname_map.json        # hostname → resolved IP mapping
-  discovery_masscan.xml       # raw masscan --ping XML (host_discovery only)
-  discovery_masscan_tcp.xml   # raw masscan TCP SYN probe XML (host_discovery only)
-  live_hosts_discovery.txt    # hosts found by discovery phase (host_discovery only)
-  live_hosts_combined.txt     # union of discovery + probe IPs used as scan target
-  masscan_results/portN.xml   # raw masscan XML per port
-  live_hosts/portN.txt        # deduplicated IPs per port
-  nmap_results/portN.xml      # nmap banner (-sV) XML per port
-  nse_results/portN.xml       # nmap NSE script XML per port (script_scan only)
-  all_live_hosts.txt          # union of all live IPs
-  spoonmap_output.xml         # merged nmap XML (or masscan if no banner scan)
-  spoonmap_output.json        # same data as JSON — list of host objects by IP
-  findings.txt                # severity-sorted findings report (script_scan only)
-  findings.md                 # same report in Markdown table format
-  findings.json               # same report as a JSON array (script_scan only)
+  discovery/
+    resolved_targets.txt        # resolved IPs/CIDRs (input to host discovery)
+    ip_hostname_map.json        # hostname → resolved IP mapping
+    discovery_nmap.xml          # nmap -sn XML (host_discovery, small/medium target sets)
+    discovery_masscan.xml       # masscan --ping XML (host_discovery, large target sets only)
+    discovery_masscan_tcp.xml   # masscan TCP SYN probe XML (host_discovery, large target sets only)
+    live_hosts_discovery.txt    # live IPs found by host discovery phase
+    masscan_results/portN.xml   # raw masscan XML per port (masscan port discovery path)
+    live_hosts/portN.txt        # deduplicated IPs per port
+  nmap_results/portN.xml        # nmap banner (-sV) XML per port
+  nse_results/portN.xml         # nmap NSE script XML per port (script_scan only)
+  all_live_hosts.txt            # union of all live IPs
+  spoonmap_output.xml           # merged nmap XML (or masscan if no banner scan)
+  spoonmap_output.json          # same data as JSON — list of host objects by IP
+  findings.txt                  # severity-sorted findings report (script_scan only)
+  findings.md                   # same report in Markdown table format
+  findings.json                 # same report as a JSON array (script_scan only)
 ```
 
 `spoonmap_output.json` consolidates hosts across all per-port files, merging ports for the same IP:
