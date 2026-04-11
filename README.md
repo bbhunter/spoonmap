@@ -61,7 +61,7 @@ Please enter the full path for the file containing target hosts (default: /opt/s
 
 Would you like to exclude any hosts? (default: No)
 
-Run host discovery (nmap -sn) before port scanning (default: Yes)?
+Run host discovery before port scanning (default: Yes)?
 ```
 
 You can also create a `config.json` file (based on `config.json.sample`) to skip all prompts:
@@ -134,8 +134,8 @@ git update-index --no-skip-worktree ranges.txt
 | `dest_ports` | Array of port strings | Overrides `scan_categories`; use `U:` prefix for UDP |
 | `banner_scan` | `"True"` / `"False"` | Runs nmap -sV against discovered hosts |
 | `script_scan` | `"True"` / `"False"` | Runs NSE security scripts (implies `banner_scan`) |
-| `host_discovery` | `"True"` / `"False"` | Run host discovery before port scanning to narrow the target set (default: True); uses nmap -sn for ≤ 65,536 targets, masscan for larger ranges |
-| `target_scan` | `"External"` / `"Internal"` | External → source port 53; Internal → source port 88 |
+| `host_discovery` | `"True"` / `"False"` | Run host discovery before port scanning to narrow the target set (default: True); External scans always run the dual masscan calibration probe regardless of this setting |
+| `target_scan` | `"External"` / `"Internal"` | External → source port 53 (unless calibration shows it hurts — see below); Internal → source port 88 |
 | `max_rate` | Packets/second string | See rate guidance below |
 | `target_file` | Path | One IP, CIDR, or hostname per line; `ranges.txt` is committed as a blank placeholder (see below) |
 | `output_path` | Path | Directory for all output; relative paths resolve to script dir |
@@ -156,17 +156,35 @@ Rates that are too high can create a denial-of-service condition — use caution
 The adaptive probe phase and category/custom batched scans always use the full `max_rate`.
 Full port scans (`-p 1-65535`) are capped to half the default to avoid saturation.
 
-### Host discovery: nmap -sn vs masscan
+### Host discovery
 
-SpooNMAP defaults to **nmap -sn** for host discovery because nmap's full TCP/IP stack is significantly more accurate than masscan's stateless probes — particularly on networks with stateful firewalls or rate-limited ICMP.
+#### External scans
 
-nmap probes each target with ICMP echo (`-PE`), TCP SYN (`-PS`), and TCP ACK (`-PA`) simultaneously, then uses the OS stack to interpret the responses. Masscan's stateless approach misses hosts that drop TCP RSTs, generate out-of-order responses, or require retransmission.
+External host discovery runs three sweeps and takes the union:
 
-For target sets larger than **65,536 hosts** (a /16), SpooNMAP falls back to masscan automatically, where its raw throughput advantage outweighs the accuracy trade-off:
+1. **masscan sweep with `-g 53`** (source port 53) — bypasses stateless firewall rules that pass DNS responses through
+2. **masscan sweep without source port** — catches hosts that filter responses destined for port 53
+3. **nmap -sn** with ICMP echo + TCP SYN/ACK probes
+
+Both masscan sweeps cover `DISCOVERY_MASSCAN_PORTS_EXTERNAL` — a curated set of commonly-open ports chosen to maximise host visibility without triggering IDS noise.
+
+After both sweeps complete, SpooNMAP compares host counts. If the no-source-port sweep found more hosts, source port 53 is dropped for all subsequent port scans:
+
+```
+No-source-port sweep found more hosts (21) than source-port-53 (9) — dropping --source-port 53 for port scans.
+```
+
+This calibration runs even when `host_discovery` is `False`, so the source-port decision is always data-driven.
+
+#### Internal scans
+
+Internal host discovery uses **nmap -sn** for target sets up to **65,536 hosts** (a /16), and falls back to masscan for larger ranges:
 
 ```
 Host discovery: 200,000 targets > 65,536 — using masscan for speed
 ```
+
+nmap probes each target with ICMP echo (`-PE`), TCP SYN (`-PS`), and TCP ACK (`-PA`) simultaneously. Masscan's stateless approach is less accurate on internal networks with stateful firewalls or rate-limited ICMP, but its raw throughput wins for very large target sets.
 
 ### Intelligent tool selection: masscan vs nmap (port discovery)
 
@@ -233,9 +251,10 @@ Inter-scan wait: 29s (target ~256 hosts)
   discovery/
     resolved_targets.txt        # resolved IPs/CIDRs (input to host discovery)
     ip_hostname_map.json        # hostname → resolved IP mapping
-    discovery_nmap.xml          # nmap -sn XML (host_discovery, small/medium target sets)
-    discovery_masscan.xml       # masscan --ping XML (host_discovery, large target sets only)
-    discovery_masscan_tcp.xml   # masscan TCP SYN probe XML (host_discovery, large target sets only)
+    discovery_masscan_sp53.xml  # masscan sweep with source port 53 (external scans)
+    discovery_masscan_nosp.xml  # masscan sweep without source port (external scans)
+    discovery_nmap.xml          # nmap -sn XML (external host_discovery; internal small/medium sets)
+    discovery_masscan.xml       # masscan ICMP+TCP XML (internal host_discovery, large target sets only)
     live_hosts_discovery.txt    # live IPs found by host discovery phase
     masscan_results/portN.xml   # raw masscan XML per port (masscan port discovery path)
     live_hosts/portN.txt        # deduplicated IPs per port
