@@ -657,7 +657,7 @@ def _nmap_udp_discovery(udp_port, target_file, output_path, source_port,
 
 
 def _nmap_port_discovery(dest_ports, target_file, source_port, exclusions_file,
-                         scan_type='Full', resume=False, max_rate=None):
+                         scan_type='Full', resume=False, max_rate=None, total_hosts=None):
     """Run nmap -T4 port discovery in place of masscan for small target sets.
 
     Writes live_hosts/port{N}.txt files in the same format as mass_scan() so
@@ -729,6 +729,7 @@ def _nmap_port_discovery(dest_ports, target_file, source_port, exclusions_file,
     def _progress_reader(stdout_stream):
         segment = 0
         cumulative = 0
+        first_group_size = None
         for line in stdout_stream:
             line = line.rstrip()
             m_group = re.search(r'Scanning\s+(\d+)\s+hosts?\s+\[(\d+)\s+ports?(?:/host)?\]', line)
@@ -738,8 +739,15 @@ def _nmap_port_discovery(dest_ports, target_file, source_port, exclusions_file,
                 group_ports = int(m_group.group(2))
                 start_host = cumulative + 1
                 cumulative += group_hosts
+                if first_group_size is None:
+                    first_group_size = group_hosts
+                if total_hosts and first_group_size:
+                    est_total = -(-total_hosts // first_group_size)
+                    group_label = f'{segment} of ~{est_total}'
+                else:
+                    group_label = str(segment)
                 print(_COLOR_INFO
-                      + f'[nmap] Scan group {segment}: '
+                      + f'[nmap] Scan group {group_label}: '
                       + f'{group_hosts:,} hosts [{group_ports} ports] (hosts {start_host:,}-{cumulative:,})'
                       + _COLOR_RESET, flush=True)
                 continue
@@ -3261,7 +3269,7 @@ def main():
             status_summary = _nmap_port_discovery(
                 _tcp_dest_ports, _count_file, source_port,
                 exclusions_file, scan_type=scan_type, resume=resume,
-                max_rate=max_rate,
+                max_rate=max_rate, total_hosts=effective_host_count,
             )
             # UDP ports are always discovered via nmap regardless of the TCP tool chosen.
             disc = _disc(output_path)
