@@ -729,7 +729,6 @@ def _nmap_port_discovery(dest_ports, target_file, source_port, exclusions_file,
     def _progress_reader(stdout_stream):
         segment = 0
         cumulative = 0
-        first_group_size = None
         for line in stdout_stream:
             line = line.rstrip()
             m_group = re.search(r'Scanning\s+(\d+)\s+hosts?\s+\[(\d+)\s+ports?(?:/host)?\]', line)
@@ -739,18 +738,9 @@ def _nmap_port_discovery(dest_ports, target_file, source_port, exclusions_file,
                 group_ports = int(m_group.group(2))
                 start_host = cumulative + 1
                 cumulative += group_hosts
-                if first_group_size is None:
-                    first_group_size = group_hosts
-                if _target_count and first_group_size:
-                    est_total = -(-_target_count // first_group_size)  # ceiling division
-                    total_str = f'~{est_total}'
-                else:
-                    total_str = '?'
-                total_display = _target_count if _target_count else '?'
-                host_range = f'hosts {start_host:,}-{cumulative:,} of {total_display:,}' if _target_count else f'hosts {start_host:,}-{cumulative:,}'
                 print(_COLOR_INFO
-                      + f'[nmap] Scan group {segment}/{total_str}: '
-                      + f'{group_hosts:,} hosts [{group_ports} ports] ({host_range})'
+                      + f'[nmap] Scan group {segment}: '
+                      + f'{group_hosts:,} hosts [{group_ports} ports] (hosts {start_host:,}-{cumulative:,})'
                       + _COLOR_RESET, flush=True)
                 continue
             if re.search(r'About\s+[\d.]+%\s+done', line):
