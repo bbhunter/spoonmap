@@ -254,17 +254,15 @@ def _parse_nmap_sn_xml(xml_file):
     return ips
 
 
-def _dual_external_host_discovery(target_file, disc, max_rate,
-                                   exclusions_file, source_port):
-    """Masscan TCP SYN sweep ×2 (with/without source port 53) + nmap -sn.
+def _calibrate_external_source_port(target_file, disc, max_rate, exclusions_file):
+    """Run dual masscan sweep to decide whether --source-port 53 helps or hurts.
 
-    Two masscan passes catch complementary host populations: source port 53 bypasses
-    stateless firewall rules that pass DNS responses; no source port catches hosts
-    that filter responses destined for port 53.
+    Sweeps DISCOVERY_MASSCAN_PORTS_EXTERNAL twice — once with -g 53 and once
+    without — then compares host counts.  Returns '' when the no-source-port
+    sweep found more hosts (drop source port 53), or '53' otherwise.
 
-    Returns (live_ips, effective_source_port).  effective_source_port is '' when the
-    no-source-port sweep found more hosts — meaning source port 53 is hurting results
-    and should be dropped for subsequent port scans.  Otherwise returns '53'.
+    Also returns the two sweep IP sets so callers can reuse them without
+    re-scanning: (effective_source_port, sp53_ips, nosp_ips).
     """
     tcp_port_str = DISCOVERY_MASSCAN_PORTS_EXTERNAL
     sweep_results = {}
@@ -274,7 +272,7 @@ def _dual_external_host_discovery(target_file, disc, max_rate,
         ('no source port', [],           'discovery_masscan_nosp.xml'),
     ]:
         xml_file = os.path.join(disc, xml_name)
-        print(_COLOR_INFO + f'Host discovery: masscan sweep ({label})...' + _COLOR_RESET)
+        print(_COLOR_INFO + f'Masscan sweep ({label})...' + _COLOR_RESET)
         masscan_cmd = [
             'masscan', '-p', tcp_port_str, '--open',
             *extra_args,
@@ -303,25 +301,42 @@ def _dual_external_host_discovery(target_file, disc, max_rate,
             restore_terminal_state(term_state)
         sweep_ips = _parse_masscan_ping_xml(xml_file)
         sweep_results[label] = sweep_ips
-        print(_COLOR_PROGRESS + f'Host discovery (masscan {label}): {len(sweep_ips)} host(s)' + _COLOR_RESET)
+        print(_COLOR_PROGRESS + f'Masscan ({label}): {len(sweep_ips)} host(s)' + _COLOR_RESET)
 
-    sp53_count = len(sweep_results.get('source port 53', set()))
-    nosp_count = len(sweep_results.get('no source port', set()))
+    sp53_ips = sweep_results.get('source port 53', set())
+    nosp_ips = sweep_results.get('no source port', set())
 
-    if nosp_count > sp53_count:
+    if len(nosp_ips) > len(sp53_ips):
         effective_source_port = ''
         print(_COLOR_INFO
-              + f'No-source-port sweep found more hosts ({nosp_count}) than source-port-53 ({sp53_count})'
+              + f'No-source-port sweep found more hosts ({len(nosp_ips)}) than source-port-53 ({len(sp53_ips)})'
               + ' — dropping --source-port 53 for port scans.'
               + _COLOR_RESET)
     else:
         effective_source_port = '53'
 
+    return effective_source_port, sp53_ips, nosp_ips
+
+
+def _dual_external_host_discovery(target_file, disc, max_rate,
+                                   exclusions_file, source_port):
+    """Masscan TCP SYN sweep ×2 (with/without source port 53) + nmap -sn.
+
+    Two masscan passes catch complementary host populations: source port 53 bypasses
+    stateless firewall rules that pass DNS responses; no source port catches hosts
+    that filter responses destined for port 53.
+
+    Returns (live_ips, effective_source_port).  effective_source_port is '' when the
+    no-source-port sweep found more hosts — meaning source port 53 is hurting results
+    and should be dropped for subsequent port scans.  Otherwise returns '53'.
+    """
+    effective_source_port, sp53_ips, nosp_ips = _calibrate_external_source_port(
+        target_file, disc, max_rate, exclusions_file)
+
     nmap_ips = _nmap_host_discovery(
         target_file, disc, effective_source_port, exclusions_file, DISCOVERY_TCP_PORTS_EXTERNAL)
 
-    masscan_ips = sweep_results.get('source port 53', set()) | sweep_results.get('no source port', set())
-    return masscan_ips | nmap_ips, effective_source_port
+    return sp53_ips | nosp_ips | nmap_ips, effective_source_port
 
 
 def _host_discovery(target_file, output_path, max_rate, exclusions_file,
@@ -3337,6 +3352,11 @@ def main():
             )
         else:
             discovery_file = None
+            if target_scan == 'External':
+                disc = _disc(output_path)
+                os.makedirs(disc, exist_ok=True)
+                source_port, _, _ = _calibrate_external_source_port(
+                    masscan_target_file, disc, max_rate, exclusions_file)
 
         # Determine effective host count (prefer discovery file for accuracy)
         _count_file = (discovery_file
