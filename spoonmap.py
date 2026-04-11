@@ -256,24 +256,27 @@ def _parse_nmap_sn_xml(xml_file):
 
 def _dual_external_host_discovery(target_file, disc, max_rate,
                                    exclusions_file, source_port):
-    """Masscan TCP SYN sweep (curated safe ports) + nmap -sn; return union of live IPs.
+    """Masscan TCP SYN sweep (one port at a time) + nmap -sn; return union of live IPs.
 
-    Uses DISCOVERY_MASSCAN_PORTS_EXTERNAL — a fixed list of common, IDS-safe ports —
-    rather than dest_ports, so scanning sensitive categories (BGP/179, Cisco/4786,
-    Docker/2375, etc.) does not trigger dynamic IP blocks before the real scan runs.
+    Scans each port individually (3 SYNs per host) rather than all ports in one
+    sweep to avoid per-source SYN rate limiters on external hosts that drop packets
+    when burst size exceeds a small threshold (~3 SYNs).
     """
-    masscan_ports_xml = os.path.join(disc, 'discovery_masscan_ports.xml')
-    tcp_port_str = DISCOVERY_MASSCAN_PORTS_EXTERNAL
-
+    ports = [p.strip() for p in DISCOVERY_MASSCAN_PORTS_EXTERNAL.split(',') if p.strip()]
+    total = len(ports)
     masscan_ips = set()
-    if tcp_port_str:
-        print(_COLOR_INFO + 'Host discovery: running masscan port sweep (external)...' + _COLOR_RESET)
+
+    for idx, port in enumerate(ports, start=1):
+        xml_file = os.path.join(disc, f'discovery_masscan_port{port}.xml')
+        print(_COLOR_INFO
+              + f'Host discovery: masscan port {port} ({idx} of {total})...'
+              + _COLOR_RESET)
         masscan_cmd = [
-            'masscan', '-p', tcp_port_str, '--open',
+            'masscan', '-p', port, '--open',
             '--max-rate', max_rate,
             '--retries', '2',
             '-iL', target_file,
-            '-oX', masscan_ports_xml,
+            '-oX', xml_file,
             '--wait', '3',
         ]
         if exclusions_file:
@@ -290,10 +293,13 @@ def _dual_external_host_discovery(target_file, disc, max_rate,
         except FileNotFoundError:
             print(_COLOR_ERROR + 'Error: masscan not found. Please install masscan.' + _COLOR_RESET)
             restore_terminal_state(term_state)
+            break
         finally:
             restore_terminal_state(term_state)
-        masscan_ips = _parse_masscan_ping_xml(masscan_ports_xml)
-        print(_COLOR_PROGRESS + f'Host discovery (masscan ports): {len(masscan_ips)} host(s)' + _COLOR_RESET)
+        port_ips = _parse_masscan_ping_xml(xml_file)
+        masscan_ips |= port_ips
+
+    print(_COLOR_PROGRESS + f'Host discovery (masscan ports): {len(masscan_ips)} host(s)' + _COLOR_RESET)
 
     nmap_ips = _nmap_host_discovery(
         target_file, disc, source_port, exclusions_file, DISCOVERY_TCP_PORTS_EXTERNAL)
@@ -1487,11 +1493,12 @@ EXTERNAL_PROBE_PORT_PRIORITY = [
 DISCOVERY_TCP_PORTS_INTERNAL = '22,80,135,139,443,445,3389'
 DISCOVERY_TCP_PORTS_EXTERNAL = '22,80,443,8080,8443'
 
-# Safe/common ports for the external masscan host-discovery sweep. These are
-# universally expected scan targets that avoid IDS-triggering ports such as
-# BGP (179), Cisco Smart Install (4786), Docker API (2375), and debug ports.
+# Ports for the external masscan host-discovery sweep. Scanned one at a time
+# (3 SYNs per host per port) to avoid per-source SYN rate limiters that drop
+# hosts when burst size exceeds ~3 packets. Avoids dangerous IDS-triggering
+# ports like Cisco Smart Install (4786), Docker API (2375), and debug ports.
 DISCOVERY_MASSCAN_PORTS_EXTERNAL = (
-    '22,25,80,110,143,443,445,587,993,995,1433,3306,3389,5432,8080,8443'
+    '22,25,80,110,143,179,443,445,587,993,995,1433,3306,3389,5432,8080,8443'
 )
 
 # Host-count threshold for host discovery tool selection.
