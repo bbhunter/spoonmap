@@ -3278,13 +3278,6 @@ def main():
 
         if host_discovery is None:
             disc_default = 'y'
-            if target_scan == 'External':
-                print(_COLOR_ERROR
-                      + 'WARNING: Host discovery is often inaccurate against Internet targets. '
-                      + 'ICMP and TCP SYN probes are frequently blocked by firewalls and ISPs, '
-                      + 'causing live hosts to appear unreachable. Consider disabling host '
-                      + 'discovery (answer No) to scan all targets directly.'
-                      + _COLOR_RESET)
             disc_choice = input(
                 '\nRun host discovery (nmap -sn; masscan for large ranges) before scanning '
                 '(default: Yes)? '
