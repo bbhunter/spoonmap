@@ -255,19 +255,15 @@ def _parse_nmap_sn_xml(xml_file):
 
 
 def _dual_external_host_discovery(target_file, disc, max_rate,
-                                   exclusions_file, source_port, dest_ports):
-    """Masscan TCP SYN sweep over dest_ports + nmap -sn; return union of live IPs.
+                                   exclusions_file, source_port):
+    """Masscan TCP SYN sweep (curated safe ports) + nmap -sn; return union of live IPs.
 
-    Discovery port list is capped at the union of all SERVICE_CATEGORIES TCP ports
-    (~59 ports) so a full-port-scan selection never triggers a 65535-port sweep.
+    Uses DISCOVERY_MASSCAN_PORTS_EXTERNAL — a fixed list of common, IDS-safe ports —
+    rather than dest_ports, so scanning sensitive categories (BGP/179, Cisco/4786,
+    Docker/2375, etc.) does not trigger dynamic IP blocks before the real scan runs.
     """
     masscan_ports_xml = os.path.join(disc, 'discovery_masscan_ports.xml')
-
-    all_cat_tcp = {p for cat in SERVICE_CATEGORIES.values() for p in cat
-                   if not p.upper().startswith('U:')}
-    tcp_candidates = {p for p in (dest_ports or []) if not p.upper().startswith('U:')}
-    discovery_tcp = tcp_candidates & all_cat_tcp or all_cat_tcp
-    tcp_port_str = ','.join(sorted(discovery_tcp, key=lambda x: int(x)))
+    tcp_port_str = DISCOVERY_MASSCAN_PORTS_EXTERNAL
 
     masscan_ips = set()
     if tcp_port_str:
@@ -306,12 +302,11 @@ def _dual_external_host_discovery(target_file, disc, max_rate,
 
 
 def _host_discovery(target_file, output_path, max_rate, exclusions_file,
-                    scan_type='Internal', resume=False, source_port='88',
-                    dest_ports=None):
+                    scan_type='Internal', resume=False, source_port='88'):
     """Run host discovery and write live_hosts_discovery.txt.
 
-    External scans run both a masscan TCP SYN sweep (dest_ports capped at all
-    category ports) and nmap -sn, then take the union for best coverage.
+    External scans run both a masscan TCP SYN sweep (curated safe ports) and
+    nmap -sn, then take the union for best coverage.
     Internal scans use nmap -sn for ≤ HOST_DISCOVERY_NMAP_THRESHOLD hosts,
     masscan ICMP+TCP for larger sets.
 
@@ -335,7 +330,7 @@ def _host_discovery(target_file, output_path, max_rate, exclusions_file,
     if scan_type == 'External':
         live_ips = _dual_external_host_discovery(
             target_file, disc, max_rate, exclusions_file,
-            source_port, dest_ports)
+            source_port)
     elif target_count <= HOST_DISCOVERY_NMAP_THRESHOLD:
         live_ips = _nmap_host_discovery(
             target_file, disc, source_port, exclusions_file, tcp_ports)
@@ -1491,6 +1486,13 @@ EXTERNAL_PROBE_PORT_PRIORITY = [
 # on virtualised networks where the hypervisor answers every ARP request).
 DISCOVERY_TCP_PORTS_INTERNAL = '22,80,135,139,443,445,3389'
 DISCOVERY_TCP_PORTS_EXTERNAL = '22,80,443,8080,8443'
+
+# Safe/common ports for the external masscan host-discovery sweep. These are
+# universally expected scan targets that avoid IDS-triggering ports such as
+# BGP (179), Cisco Smart Install (4786), Docker API (2375), and debug ports.
+DISCOVERY_MASSCAN_PORTS_EXTERNAL = (
+    '22,25,80,110,143,443,445,587,993,995,1433,3306,3389,5432,8080,8443'
+)
 
 # Host-count threshold for host discovery tool selection.
 # nmap -sn is more accurate (full handshake awareness, multi-probe ICMP+SYN+ACK).
@@ -3311,7 +3313,6 @@ def main():
             discovery_file = _host_discovery(
                 masscan_target_file, output_path, max_rate, exclusions_file,
                 scan_type=target_scan, resume=resume, source_port=source_port,
-                dest_ports=dest_ports,
             )
         else:
             discovery_file = None
