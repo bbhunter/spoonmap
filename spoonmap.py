@@ -256,14 +256,18 @@ def _parse_nmap_sn_xml(xml_file):
 
 def _dual_external_host_discovery(target_file, disc, max_rate,
                                    exclusions_file, source_port):
-    """Masscan TCP SYN sweep ×2 (with/without source port 53) + nmap -sn; return union.
+    """Masscan TCP SYN sweep ×2 (with/without source port 53) + nmap -sn.
 
     Two masscan passes catch complementary host populations: source port 53 bypasses
     stateless firewall rules that pass DNS responses; no source port catches hosts
     that filter responses destined for port 53.
+
+    Returns (live_ips, effective_source_port).  effective_source_port is '' when the
+    no-source-port sweep found more hosts — meaning source port 53 is hurting results
+    and should be dropped for subsequent port scans.  Otherwise returns '53'.
     """
     tcp_port_str = DISCOVERY_MASSCAN_PORTS_EXTERNAL
-    masscan_ips = set()
+    sweep_results = {}
 
     for label, extra_args, xml_name in [
         ('source port 53', ['-g', '53'], 'discovery_masscan_sp53.xml'),
@@ -298,13 +302,26 @@ def _dual_external_host_discovery(target_file, disc, max_rate,
         finally:
             restore_terminal_state(term_state)
         sweep_ips = _parse_masscan_ping_xml(xml_file)
-        masscan_ips |= sweep_ips
+        sweep_results[label] = sweep_ips
         print(_COLOR_PROGRESS + f'Host discovery (masscan {label}): {len(sweep_ips)} host(s)' + _COLOR_RESET)
 
-    nmap_ips = _nmap_host_discovery(
-        target_file, disc, source_port, exclusions_file, DISCOVERY_TCP_PORTS_EXTERNAL)
+    sp53_count = len(sweep_results.get('source port 53', set()))
+    nosp_count = len(sweep_results.get('no source port', set()))
 
-    return masscan_ips | nmap_ips
+    if nosp_count > sp53_count:
+        effective_source_port = ''
+        print(_COLOR_INFO
+              + f'No-source-port sweep found more hosts ({nosp_count}) than source-port-53 ({sp53_count})'
+              + ' — dropping --source-port 53 for port scans.'
+              + _COLOR_RESET)
+    else:
+        effective_source_port = '53'
+
+    nmap_ips = _nmap_host_discovery(
+        target_file, disc, effective_source_port, exclusions_file, DISCOVERY_TCP_PORTS_EXTERNAL)
+
+    masscan_ips = sweep_results.get('source port 53', set()) | sweep_results.get('no source port', set())
+    return masscan_ips | nmap_ips, effective_source_port
 
 
 def _host_discovery(target_file, output_path, max_rate, exclusions_file,
@@ -316,7 +333,9 @@ def _host_discovery(target_file, output_path, max_rate, exclusions_file,
     Internal scans use nmap -sn for ≤ HOST_DISCOVERY_NMAP_THRESHOLD hosts,
     masscan ICMP+TCP for larger sets.
 
-    Returns live_hosts_discovery.txt path, or None if 0 hosts found.
+    Returns (live_hosts_discovery.txt path or None, effective_source_port).
+    For External scans, effective_source_port may differ from source_port if the
+    no-source-port masscan sweep found more hosts.
     """
     disc = _disc(output_path)
     os.makedirs(disc, exist_ok=True)
@@ -326,15 +345,16 @@ def _host_discovery(target_file, output_path, max_rate, exclusions_file,
         with open(discovery_file) as fh:
             count = sum(1 for line in fh if line.strip())
         print(_COLOR_INFO + f'Resume: skipping host discovery ({count} hosts cached)' + _COLOR_RESET)
-        return discovery_file
+        return discovery_file, source_port
 
     target_count = _count_hosts_in_file(target_file) or 0
     tcp_ports = (DISCOVERY_TCP_PORTS_INTERNAL
                  if scan_type == 'Internal'
                  else DISCOVERY_TCP_PORTS_EXTERNAL)
 
+    effective_source_port = source_port
     if scan_type == 'External':
-        live_ips = _dual_external_host_discovery(
+        live_ips, effective_source_port = _dual_external_host_discovery(
             target_file, disc, max_rate, exclusions_file,
             source_port)
     elif target_count <= HOST_DISCOVERY_NMAP_THRESHOLD:
@@ -355,13 +375,13 @@ def _host_discovery(target_file, output_path, max_rate, exclusions_file,
         print(_COLOR_ERROR
               + 'Warning: host discovery found 0 live hosts — probe will scan full target range.'
               + _COLOR_RESET)
-        return None
+        return None, effective_source_port
 
     with open(discovery_file, 'w') as fh:
         for ip in sorted(live_ips, key=lambda x: tuple(int(o) for o in x.split('.'))):
             fh.write(ip + '\n')
 
-    return discovery_file
+    return discovery_file, effective_source_port
 
 
 def _nmap_host_discovery(target_file, disc, source_port, exclusions_file, tcp_ports):
@@ -372,7 +392,7 @@ def _nmap_host_discovery(target_file, disc, source_port, exclusions_file, tcp_po
         '-PE',                       # ICMP echo
         f'-PS{tcp_ports}',           # TCP SYN to discovery ports
         f'-PA{tcp_ports}',           # TCP ACK to discovery ports (bypasses stateful firewalls)
-        '--source-port', source_port,
+        *(['--source-port', source_port] if source_port else []),
         '-iL', target_file,
         '-oX', output_xml,
     ]
@@ -494,7 +514,7 @@ def _run_masscan_batch(batch, rate, output_file, target_file, source_port, exclu
         '-p', ','.join(batch),
         '--open',
         '--max-rate', rate,
-        '--source-port', source_port,
+        *(['--source-port', source_port] if source_port else []),
         '-iL', target_file,
         '-oX', output_file,
         '--retries', '4',
@@ -671,7 +691,7 @@ def _nmap_udp_discovery(udp_port, target_file, output_path, source_port,
         '--max-retries', '2',
         '--host-timeout', '30s',
         '--min-rate', '500',
-        '--source-port', source_port,
+        *(['--source-port', source_port] if source_port else []),
         '-iL', target_file,
         '-oX', output_file,
     ]
@@ -770,7 +790,7 @@ def _nmap_port_discovery(dest_ports, target_file, source_port, exclusions_file,
         '-p', port_spec,
         '--open',
         '--max-retries', '2',
-        '--source-port', source_port,
+        *(['--source-port', source_port] if source_port else []),
         '-iL', target_file,
         '-oX', output_file,
         '--stats-every', '30s',
@@ -884,7 +904,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
     # (no cap — category/custom batched scans always use full max_rate)
 
     # Full scans cover all 65535 ports in one invocation — cap to avoid saturation.
-    full_scan_rate = str(min(int(max_rate), 10000 if source_port == '53' else 1000))
+    full_scan_rate = str(min(int(max_rate), 10000 if scan_type == 'External' else 1000))
 
     # Calculate --wait to prevent inter-scan saturation on small target ranges.
     # Use discovery file when available — its host count reflects the actual probe target.
@@ -942,7 +962,7 @@ def mass_scan(scan_type, dest_ports, source_port, max_rate, target_file, exclusi
             print(_COLOR_PROGRESS + status_update + _COLOR_RESET)
         return status_summary
 
-    probe_priority = EXTERNAL_PROBE_PORT_PRIORITY if source_port == '53' else PROBE_PORT_PRIORITY
+    probe_priority = EXTERNAL_PROBE_PORT_PRIORITY if scan_type == 'External' else PROBE_PORT_PRIORITY
     probe_ports = _select_probe_ports(tcp_ports, max_ports=batch_size, priority=probe_priority)
     probe_set = set(probe_ports)
     remaining_ports = [p for p in tcp_ports if p not in probe_set]
@@ -1216,7 +1236,7 @@ def _build_nmap_cmd(dest_port, input_file, output_file, source_port,
             dest_port[2:] if 'U:' in dest_port else dest_port,
             '--open', '--randomize-hosts',
         ]
-        if dest_port not in _SMB_PORTS:
+        if source_port and dest_port not in _SMB_PORTS:
             cmd += ['--source-port', source_port]
         cmd += ['-iL', input_file, '-oX', output_file]
         scripts = _get_scripts_for_port(dest_port, target_scan)
@@ -1235,7 +1255,7 @@ def _build_nmap_cmd(dest_port, input_file, output_file, source_port,
             '--version-intensity', '0',
             '-Pn', '-p', dest_port[2:],
             '--open', '--randomize-hosts',
-            '--source-port', source_port,
+            *(['--source-port', source_port] if source_port else []),
         ]
     else:
         cmd = [
@@ -1245,7 +1265,7 @@ def _build_nmap_cmd(dest_port, input_file, output_file, source_port,
             '--open', '--randomize-hosts',
         ]
         # Skip --source-port for SMB when scripts run to avoid 4-tuple collision
-        if not (script_scan and dest_port in _SMB_PORTS):
+        if source_port and not (script_scan and dest_port in _SMB_PORTS):
             cmd += ['--source-port', source_port]
 
     cmd += ['-iL', input_file, '-oX', output_file]
@@ -1715,7 +1735,8 @@ def _scan_extra_sql_ports(output_path, source_port):
             try:
                 proc = subprocess.Popen([
                     'nmap', '-T4', '-sS', '-sV', '--version-intensity', '0',
-                    '-Pn', '-p', port, '--source-port', source_port,
+                    '-Pn', '-p', port,
+                    *(['--source-port', source_port] if source_port else []),
                     ip, '-oX', out_file
                 ])
                 proc.wait()
@@ -3317,7 +3338,7 @@ def main():
         masscan_target_file, ip_to_hostname = preprocess_targets(target_file, output_path)
 
         if host_discovery:
-            discovery_file = _host_discovery(
+            discovery_file, source_port = _host_discovery(
                 masscan_target_file, output_path, max_rate, exclusions_file,
                 scan_type=target_scan, resume=resume, source_port=source_port,
             )
