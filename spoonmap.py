@@ -254,12 +254,65 @@ def _parse_nmap_sn_xml(xml_file):
     return ips
 
 
+def _dual_external_host_discovery(target_file, disc, max_rate,
+                                   exclusions_file, source_port, dest_ports):
+    """Masscan TCP SYN sweep over dest_ports + nmap -sn; return union of live IPs.
+
+    Discovery port list is capped at the union of all SERVICE_CATEGORIES TCP ports
+    (~59 ports) so a full-port-scan selection never triggers a 65535-port sweep.
+    """
+    masscan_ports_xml = os.path.join(disc, 'discovery_masscan_ports.xml')
+
+    all_cat_tcp = {p for cat in SERVICE_CATEGORIES.values() for p in cat
+                   if not p.upper().startswith('U:')}
+    tcp_candidates = {p for p in (dest_ports or []) if not p.upper().startswith('U:')}
+    discovery_tcp = tcp_candidates & all_cat_tcp or all_cat_tcp
+    tcp_port_str = ','.join(sorted(discovery_tcp, key=lambda x: int(x)))
+
+    masscan_ips = set()
+    if tcp_port_str:
+        print(_COLOR_INFO + 'Host discovery: running masscan port sweep (external)...' + _COLOR_RESET)
+        masscan_cmd = [
+            'masscan', '-p', tcp_port_str, '--open',
+            '--max-rate', max_rate,
+            '-iL', target_file,
+            '-oX', masscan_ports_xml,
+            '--wait', '3',
+        ]
+        if exclusions_file:
+            masscan_cmd.extend(['--excludefile', exclusions_file])
+        term_state = save_terminal_state()
+        try:
+            proc = subprocess.Popen(masscan_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc.wait()
+        except KeyboardInterrupt:
+            proc.kill()
+            proc.wait()
+            restore_terminal_state(term_state)
+            raise
+        except FileNotFoundError:
+            print(_COLOR_ERROR + 'Error: masscan not found. Please install masscan.' + _COLOR_RESET)
+            restore_terminal_state(term_state)
+        finally:
+            restore_terminal_state(term_state)
+        masscan_ips = _parse_masscan_ping_xml(masscan_ports_xml)
+        print(_COLOR_PROGRESS + f'Host discovery (masscan ports): {len(masscan_ips)} host(s)' + _COLOR_RESET)
+
+    nmap_ips = _nmap_host_discovery(
+        target_file, disc, source_port, exclusions_file, DISCOVERY_TCP_PORTS_EXTERNAL)
+
+    return masscan_ips | nmap_ips
+
+
 def _host_discovery(target_file, output_path, max_rate, exclusions_file,
-                    scan_type='Internal', resume=False, source_port='88'):
+                    scan_type='Internal', resume=False, source_port='88',
+                    dest_ports=None):
     """Run host discovery and write live_hosts_discovery.txt.
 
-    Uses nmap -sn for target sets ≤ HOST_DISCOVERY_NMAP_THRESHOLD hosts (default: /16).
-    Falls back to masscan (ICMP ping + TCP SYN) for larger target sets where raw speed matters.
+    External scans run both a masscan TCP SYN sweep (dest_ports capped at all
+    category ports) and nmap -sn, then take the union for best coverage.
+    Internal scans use nmap -sn for ≤ HOST_DISCOVERY_NMAP_THRESHOLD hosts,
+    masscan ICMP+TCP for larger sets.
 
     Returns live_hosts_discovery.txt path, or None if 0 hosts found.
     """
@@ -278,7 +331,11 @@ def _host_discovery(target_file, output_path, max_rate, exclusions_file,
                  if scan_type == 'Internal'
                  else DISCOVERY_TCP_PORTS_EXTERNAL)
 
-    if target_count <= HOST_DISCOVERY_NMAP_THRESHOLD:
+    if scan_type == 'External':
+        live_ips = _dual_external_host_discovery(
+            target_file, disc, max_rate, exclusions_file,
+            source_port, dest_ports)
+    elif target_count <= HOST_DISCOVERY_NMAP_THRESHOLD:
         live_ips = _nmap_host_discovery(
             target_file, disc, source_port, exclusions_file, tcp_ports)
     else:
@@ -3084,7 +3141,7 @@ def main():
                 # Warn if UDP ports are in scope — open|filtered won't be confirmed
                 udp_in_scope = any(p.startswith('U:') for p in dest_ports)
                 if udp_in_scope:
-                    print(_COLOR_WARNING
+                    print(_COLOR_ERROR
                           + 'Warning: UDP ports are in scope but banner_scan is disabled. '
                           + 'open|filtered hosts will not be confirmed via NSE scripts, '
                           + 'which may significantly inflate host counts.'
@@ -3253,6 +3310,7 @@ def main():
             discovery_file = _host_discovery(
                 masscan_target_file, output_path, max_rate, exclusions_file,
                 scan_type=target_scan, resume=resume, source_port=source_port,
+                dest_ports=dest_ports,
             )
         else:
             discovery_file = None
