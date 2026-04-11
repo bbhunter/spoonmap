@@ -10,6 +10,7 @@
     "__script_scan_choices__" : "True, False",
     "script_scan" : "False",
     "__host_discovery_choices__" : "True, False",
+    "__host_discovery_warning__": "WARNING: Host discovery is often inaccurate against Internet/external targets. ICMP and TCP SYN probes are frequently blocked by firewalls and ISPs, causing live hosts to appear unreachable. Consider setting host_discovery to False when scanning external targets to avoid missing live hosts.",
     "host_discovery" : "True",
     "__resume_choices__" : "True, False",
     "resume" : "False",
