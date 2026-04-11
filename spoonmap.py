@@ -732,7 +732,7 @@ def _nmap_port_discovery(dest_ports, target_file, source_port, exclusions_file,
         first_group_size = None
         for line in stdout_stream:
             line = line.rstrip()
-            m_group = re.search(r'Scanning\s+(\d+)\s+hosts?\s+\[(\d+)\s+ports?\]', line)
+            m_group = re.search(r'Scanning\s+(\d+)\s+hosts?\s+\[(\d+)\s+ports?(?:/host)?\]', line)
             if m_group:
                 segment += 1
                 group_hosts = int(m_group.group(1))
@@ -746,7 +746,8 @@ def _nmap_port_discovery(dest_ports, target_file, source_port, exclusions_file,
                     total_str = f'~{est_total}'
                 else:
                     total_str = '?'
-                host_range = f'hosts {start_host:,}\u2013{cumulative:,} of {_target_count:,}'
+                total_display = _target_count if _target_count else '?'
+                host_range = f'hosts {start_host:,}-{cumulative:,} of {total_display:,}' if _target_count else f'hosts {start_host:,}-{cumulative:,}'
                 print(_COLOR_INFO
                       + f'[nmap] Scan group {segment}/{total_str}: '
                       + f'{group_hosts:,} hosts [{group_ports} ports] ({host_range})'
