@@ -275,6 +275,7 @@ def _dual_external_host_discovery(target_file, disc, max_rate,
         masscan_cmd = [
             'masscan', '-p', tcp_port_str, '--open',
             '--max-rate', max_rate,
+            '--retries', '1',
             '-iL', target_file,
             '-oX', masscan_ports_xml,
             '--wait', '3',
