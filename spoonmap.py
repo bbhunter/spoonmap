@@ -707,7 +707,7 @@ def _nmap_port_discovery(dest_ports, target_file, source_port, exclusions_file,
         _target_count = 0
 
     cmd = [
-        'nmap', '-T4', *scan_flags, '-Pn',
+        'nmap', '-T4', *scan_flags, '-Pn', '-v',
         '-p', port_spec,
         '--open',
         '--max-retries', '2',
@@ -727,8 +727,31 @@ def _nmap_port_discovery(dest_ports, target_file, source_port, exclusions_file,
           + _COLOR_RESET)
 
     def _progress_reader(stdout_stream):
+        segment = 0
+        cumulative = 0
+        first_group_size = None
         for line in stdout_stream:
             line = line.rstrip()
+            m_group = re.search(r'Scanning\s+(\d+)\s+hosts?\s+\[(\d+)\s+ports?\]', line)
+            if m_group:
+                segment += 1
+                group_hosts = int(m_group.group(1))
+                group_ports = int(m_group.group(2))
+                start_host = cumulative + 1
+                cumulative += group_hosts
+                if first_group_size is None:
+                    first_group_size = group_hosts
+                if _target_count and first_group_size:
+                    est_total = -(-_target_count // first_group_size)  # ceiling division
+                    total_str = f'~{est_total}'
+                else:
+                    total_str = '?'
+                host_range = f'hosts {start_host:,}\u2013{cumulative:,} of {_target_count:,}'
+                print(_COLOR_INFO
+                      + f'[nmap] Scan group {segment}/{total_str}: '
+                      + f'{group_hosts:,} hosts [{group_ports} ports] ({host_range})'
+                      + _COLOR_RESET, flush=True)
+                continue
             if re.search(r'About\s+[\d.]+%\s+done', line):
                 print(_COLOR_PROGRESS + f'  [nmap] {line}' + _COLOR_RESET, flush=True)
 
@@ -3169,7 +3192,7 @@ def main():
         if host_discovery is None:
             disc_default = 'y'
             disc_choice = input(
-                '\nRun host discovery (masscan ping + nmap -sn) before scanning '
+                '\nRun host discovery (nmap -sn; masscan for large ranges) before scanning '
                 '(default: Yes)? '
             ) or disc_default
             host_discovery = disc_choice[0].lower() == 'y'
@@ -3179,7 +3202,7 @@ def main():
         print(f'Service Banner: {banner_scan}')
         print(f'NSE Script Scanning: {script_scan}')
         print(f'Source Port: {source_port}')
-        print(f'Masscan Max Packet Rate (pps): {max_rate}')
+        print(f'Max Packet Rate (pps): {max_rate}')
         print(f'Target File: {target_file}')
         print(f'Exclusions File: {exclusions_file}')
         print(f'NMAP Concurrent Threads: {nmap_threads}')
