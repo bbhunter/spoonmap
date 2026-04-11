@@ -3237,6 +3237,8 @@ def main():
                 else:
                     print(_COLOR_INFO + 'Appending to previous results.' + _COLOR_RESET)
 
+        scan_start_time = time.time()
+
         # Preprocess targets to handle hostnames
         masscan_target_file, ip_to_hostname = preprocess_targets(target_file, output_path)
 
@@ -3374,6 +3376,12 @@ def main():
 
         else:
             status_summary += '\nNo hosts found.'
+
+        elapsed = int(time.time() - scan_start_time)
+        h, remainder = divmod(elapsed, 3600)
+        m, s = divmod(remainder, 60)
+        elapsed_str = (f'{h}h {m}m {s}s' if h else f'{m}m {s}s' if m else f'{s}s')
+        status_summary += f'\nTotal Scan Time: {elapsed_str}'
 
         # Print Summary
         print(_COLOR_RESULT + status_summary + _COLOR_RESET)
