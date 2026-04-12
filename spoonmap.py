@@ -404,6 +404,8 @@ def _nmap_host_discovery(target_file, disc, source_port, exclusions_file, tcp_po
     output_xml = os.path.join(disc, 'discovery_nmap.xml')
     cmd = [
         'nmap', '-sn', '-T4',
+        '--min-parallelism', '256',
+        '--max-retries', '1',
         '-PE',                       # ICMP echo
         f'-PS{tcp_ports}',           # TCP SYN to discovery ports
         f'-PA{tcp_ports}',           # TCP ACK to discovery ports (bypasses stateful firewalls)
@@ -451,18 +453,17 @@ def _nmap_host_discovery(target_file, disc, source_port, exclusions_file, tcp_po
 
 
 def _masscan_host_discovery(target_file, disc, max_rate, exclusions_file, tcp_ports):
-    """Run masscan ICMP ping + TCP SYN probe; return set of live IPs."""
-    masscan_xml     = os.path.join(disc, 'discovery_masscan.xml')
-    masscan_tcp_xml = os.path.join(disc, 'discovery_masscan_tcp.xml')
-    live_ips = set()
+    """Run masscan ICMP ping + TCP SYN probe in a single pass; return set of live IPs."""
+    combined_xml = os.path.join(disc, 'discovery_masscan.xml')
 
-    # ICMP ping
-    print(_COLOR_INFO + 'Host discovery: running masscan --ping...' + _COLOR_RESET)
+    print(_COLOR_INFO + 'Host discovery: running masscan (ICMP + TCP SYN)...' + _COLOR_RESET)
     masscan_cmd = [
         'masscan', '--ping',
+        '-p', tcp_ports,
+        '--open',
         '--max-rate', max_rate,
         '-iL', target_file,
-        '-oX', masscan_xml,
+        '-oX', combined_xml,
         '--wait', '3',
     ]
     if exclusions_file:
@@ -483,42 +484,9 @@ def _masscan_host_discovery(target_file, disc, max_rate, exclusions_file, tcp_po
         quit(1)
     finally:
         restore_terminal_state(term_state)
-    live_ips.update(_parse_masscan_ping_xml(masscan_xml))
-    print(_COLOR_PROGRESS + f'Host discovery (masscan ping): {len(live_ips)} host(s)' + _COLOR_RESET)
 
-    # TCP SYN probe
-    print(_COLOR_INFO + 'Host discovery: running masscan TCP SYN probe...' + _COLOR_RESET)
-    masscan_tcp_cmd = [
-        'masscan',
-        '-p', tcp_ports,
-        '--open',
-        '--max-rate', max_rate,
-        '-iL', target_file,
-        '-oX', masscan_tcp_xml,
-        '--wait', '3',
-    ]
-    if exclusions_file:
-        masscan_tcp_cmd.extend(['--excludefile', exclusions_file])
-    term_state = save_terminal_state()
-    try:
-        proc = subprocess.Popen(masscan_tcp_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        proc.wait()
-    except KeyboardInterrupt:
-        print(f'Killing PID {proc.pid}...')
-        proc.kill()
-        proc.wait()
-        restore_terminal_state(term_state)
-        raise
-    except FileNotFoundError:
-        print(_COLOR_ERROR + 'Error: masscan not found. Please install masscan.' + _COLOR_RESET)
-        restore_terminal_state(term_state)
-        quit(1)
-    finally:
-        restore_terminal_state(term_state)
-    tcp_ips = _parse_masscan_ping_xml(masscan_tcp_xml)
-    print(_COLOR_PROGRESS + f'Host discovery (masscan TCP): {len(tcp_ips)} host(s)' + _COLOR_RESET)
-    live_ips.update(tcp_ips)
-
+    live_ips = _parse_masscan_ping_xml(combined_xml)
+    print(_COLOR_PROGRESS + f'Host discovery (masscan): {len(live_ips)} host(s)' + _COLOR_RESET)
     return live_ips
 
 
@@ -1525,7 +1493,7 @@ EXTERNAL_PROBE_PORT_PRIORITY = [
 
 # TCP ports used for host discovery probes (replace ARP which produces proxy-ARP false positives
 # on virtualised networks where the hypervisor answers every ARP request).
-DISCOVERY_TCP_PORTS_INTERNAL = '22,80,135,139,443,445,3389'
+DISCOVERY_TCP_PORTS_INTERNAL = '22,80,443,445,3389'
 DISCOVERY_TCP_PORTS_EXTERNAL = '22,80,443,8080,8443'
 
 # Ports for the external masscan host-discovery sweep. Swept twice — once with
