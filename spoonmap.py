@@ -891,7 +891,6 @@ def _nmap_port_discovery(dest_ports, target_file, source_port, exclusions_file,
     def _progress_reader(stdout_stream):
         segment = 0
         cumulative = 0
-        first_group_size = None
         for line in stdout_stream:
             line = line.rstrip()
             m_group = re.search(r'Scanning\s+(\d+)\s+hosts?\s+\[(\d+)\s+ports?(?:/host)?\]', line)
@@ -901,10 +900,11 @@ def _nmap_port_discovery(dest_ports, target_file, source_port, exclusions_file,
                 group_ports = int(m_group.group(2))
                 start_host = cumulative + 1
                 cumulative += group_hosts
-                if first_group_size is None:
-                    first_group_size = group_hosts
-                if total_hosts and first_group_size:
-                    est_total = -(-total_hosts // first_group_size)
+                if total_hosts and group_hosts:
+                    # Re-estimate each group using the current batch size as the denominator.
+                    # max() ensures the displayed total never falls below the current segment
+                    # when nmap shrinks batch sizes mid-scan.
+                    est_total = max(segment, -(-total_hosts // group_hosts))
                     group_label = f'{segment} of ~{est_total}'
                 else:
                     group_label = str(segment)
