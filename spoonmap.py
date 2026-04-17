@@ -318,6 +318,83 @@ def _calibrate_external_source_port(target_file, disc, max_rate, exclusions_file
     return effective_source_port, sp53_ips, nosp_ips
 
 
+def _calibrate_internal_source_port(target_file, disc, max_rate, exclusions_file,
+                                     target_count):
+    """Run dual masscan sweep to decide whether --source-port 88 helps or hurts.
+
+    Sweeps DISCOVERY_MASSCAN_PORTS_INTERNAL twice — once with -g 88 (Kerberos)
+    and once without — then compares host counts.  Source port 88 bypasses
+    Windows Firewall rules in domain-joined environments that allow Kerberos
+    traffic; the no-source-port pass catches hosts that don't treat port 88
+    specially.
+
+    For target sets larger than INTERNAL_DISCOVERY_STATE_CEILING the port list
+    is trimmed to DISCOVERY_TCP_PORTS_INTERNAL (5 ports) to keep peak firewall
+    state table entries bounded.  Rate is capped to INTERNAL_DISCOVERY_MAX_RATE
+    regardless of the user's max_rate, because discovery hits all ports
+    simultaneously and inline enterprise firewalls track each SYN separately.
+
+    Returns (effective_source_port, sp88_ips, nosp_ips).
+    """
+    if target_count > INTERNAL_DISCOVERY_STATE_CEILING:
+        tcp_port_str = DISCOVERY_TCP_PORTS_INTERNAL
+    else:
+        tcp_port_str = DISCOVERY_MASSCAN_PORTS_INTERNAL
+
+    capped_rate = str(min(int(max_rate), INTERNAL_DISCOVERY_MAX_RATE))
+    sweep_results = {}
+
+    for label, extra_args, xml_name in [
+        ('source port 88', ['-g', '88'], 'discovery_masscan_sp88.xml'),
+        ('no source port', [],           'discovery_masscan_nosp_internal.xml'),
+    ]:
+        xml_file = os.path.join(disc, xml_name)
+        print(_COLOR_INFO + f'Masscan sweep ({label})...' + _COLOR_RESET)
+        masscan_cmd = [
+            'masscan', '-p', tcp_port_str, '--open',
+            *extra_args,
+            '--max-rate', capped_rate,
+            '--retries', '1',
+            '-iL', target_file,
+            '-oX', xml_file,
+            '--wait', '3',
+        ]
+        if exclusions_file:
+            masscan_cmd.extend(['--excludefile', exclusions_file])
+        term_state = save_terminal_state()
+        try:
+            proc = subprocess.Popen(masscan_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc.wait()
+        except KeyboardInterrupt:
+            proc.kill()
+            proc.wait()
+            restore_terminal_state(term_state)
+            raise
+        except FileNotFoundError:
+            print(_COLOR_ERROR + 'Error: masscan not found. Please install masscan.' + _COLOR_RESET)
+            restore_terminal_state(term_state)
+            break
+        finally:
+            restore_terminal_state(term_state)
+        sweep_ips = _parse_masscan_ping_xml(xml_file)
+        sweep_results[label] = sweep_ips
+        print(_COLOR_PROGRESS + f'Masscan ({label}): {len(sweep_ips)} host(s)' + _COLOR_RESET)
+
+    sp88_ips = sweep_results.get('source port 88', set())
+    nosp_ips = sweep_results.get('no source port', set())
+
+    if len(nosp_ips) > len(sp88_ips):
+        effective_source_port = ''
+        print(_COLOR_INFO
+              + f'No-source-port sweep found more hosts ({len(nosp_ips)}) than source-port-88 ({len(sp88_ips)})'
+              + ' — dropping --source-port 88 for port scans.'
+              + _COLOR_RESET)
+    else:
+        effective_source_port = '88'
+
+    return effective_source_port, sp88_ips, nosp_ips
+
+
 def _dual_external_host_discovery(target_file, disc, max_rate,
                                    exclusions_file, source_port):
     """Masscan TCP SYN sweep ×2 (with/without source port 53) + nmap -sn.
@@ -339,14 +416,45 @@ def _dual_external_host_discovery(target_file, disc, max_rate,
     return sp53_ips | nosp_ips | nmap_ips, effective_source_port
 
 
+def _dual_internal_host_discovery(target_file, disc, max_rate,
+                                   exclusions_file, source_port, target_count):
+    """Masscan TCP SYN sweep ×2 (with/without source port 88) + optional nmap -sn.
+
+    Two masscan passes catch complementary host populations: source port 88
+    (Kerberos) bypasses Windows Firewall rules in domain-joined environments;
+    no source port catches hosts that don't treat port 88 specially.
+
+    For target sets ≤ HOST_DISCOVERY_NMAP_THRESHOLD an additional nmap -sn pass
+    is run and unioned for maximum coverage (ICMP echo + TCP SYN + TCP ACK).
+    The TCP ACK probes in nmap can reach hosts that a stateful firewall would
+    block SYN to, since ACK looks like return traffic.  For larger target sets
+    nmap -sn is too slow and the two masscan sweeps are sufficient.
+
+    Returns (live_ips, effective_source_port).
+    """
+    effective_source_port, sp88_ips, nosp_ips = _calibrate_internal_source_port(
+        target_file, disc, max_rate, exclusions_file, target_count)
+
+    if target_count <= HOST_DISCOVERY_NMAP_THRESHOLD:
+        nmap_ips = _nmap_host_discovery(
+            target_file, disc, effective_source_port, exclusions_file,
+            DISCOVERY_TCP_PORTS_INTERNAL)
+        return sp88_ips | nosp_ips | nmap_ips, effective_source_port
+
+    return sp88_ips | nosp_ips, effective_source_port
+
+
 def _host_discovery(target_file, output_path, max_rate, exclusions_file,
                     scan_type='Internal', resume=False, source_port='88'):
     """Run host discovery and write live_hosts_discovery.txt.
 
     External scans run both a masscan TCP SYN sweep (curated safe ports) and
     nmap -sn, then take the union for best coverage.
-    Internal scans use nmap -sn for ≤ HOST_DISCOVERY_NMAP_THRESHOLD hosts,
-    masscan ICMP+TCP for larger sets.
+    Internal scans run dual masscan TCP SYN sweeps (with/without source port 88)
+    to calibrate the optimal source port, then union with an nmap -sn pass for
+    target sets ≤ HOST_DISCOVERY_NMAP_THRESHOLD.  The masscan port list is
+    trimmed to 5 ports for target sets > INTERNAL_DISCOVERY_STATE_CEILING to
+    keep peak firewall state table entries bounded regardless of range size.
 
     Returns (live_hosts_discovery.txt path or None, effective_source_port).
     For External scans, effective_source_port may differ from source_port if the
@@ -363,25 +471,16 @@ def _host_discovery(target_file, output_path, max_rate, exclusions_file,
         return discovery_file, source_port
 
     target_count = _count_hosts_in_file(target_file) or 0
-    tcp_ports = (DISCOVERY_TCP_PORTS_INTERNAL
-                 if scan_type == 'Internal'
-                 else DISCOVERY_TCP_PORTS_EXTERNAL)
 
     effective_source_port = source_port
     if scan_type == 'External':
         live_ips, effective_source_port = _dual_external_host_discovery(
             target_file, disc, max_rate, exclusions_file,
             source_port)
-    elif target_count <= HOST_DISCOVERY_NMAP_THRESHOLD:
-        live_ips = _nmap_host_discovery(
-            target_file, disc, source_port, exclusions_file, tcp_ports)
-    else:
-        print(_COLOR_INFO
-              + f'Host discovery: {target_count:,} targets > {HOST_DISCOVERY_NMAP_THRESHOLD:,} '
-              + '— using masscan for speed'
-              + _COLOR_RESET)
-        live_ips = _masscan_host_discovery(
-            target_file, disc, max_rate, exclusions_file, tcp_ports)
+    else:  # Internal
+        live_ips, effective_source_port = _dual_internal_host_discovery(
+            target_file, disc, max_rate, exclusions_file,
+            source_port, target_count)
 
     total = len(live_ips)
     print(_COLOR_PROGRESS + f'Host discovery total: {total} unique live host(s)' + _COLOR_RESET)
@@ -462,6 +561,7 @@ def _masscan_host_discovery(target_file, disc, max_rate, exclusions_file, tcp_po
         '-p', tcp_ports,
         '--open',
         '--max-rate', max_rate,
+        '--retries', '1',
         '-iL', target_file,
         '-oX', combined_xml,
         '--wait', '3',
@@ -1503,6 +1603,26 @@ DISCOVERY_TCP_PORTS_EXTERNAL = '22,80,443,8080,8443'
 DISCOVERY_MASSCAN_PORTS_EXTERNAL = (
     '22,25,80,110,143,179,443,445,587,993,995,1433,3306,3389,5432,8080,8443'
 )
+
+# Ports for the internal masscan host-discovery sweep. Broader than the
+# DISCOVERY_TCP_PORTS_INTERNAL (5 ports) to catch ICMP-blocking hosts, but
+# narrower than external (17 ports) to limit firewall state table pressure.
+# Covers near-universal Windows services (135 RPC, 445 SMB, 3389 RDP, 5985
+# WinRM) and common cross-platform services (22, 80, 443, 1433, 3306, 8080).
+DISCOVERY_MASSCAN_PORTS_INTERNAL = '22,80,135,443,445,1433,3306,3389,5985,8080'
+
+# Rate cap for internal discovery masscan sweeps.  Discovery probes hit all
+# ports simultaneously across every target; at 1000 pps with a typical 60-second
+# firewall half-open timeout the peak concurrent state table entries are bounded
+# at ~60K — safe for any enterprise inline firewall regardless of range size.
+# The user's full max_rate still applies to port scanning.
+INTERNAL_DISCOVERY_MAX_RATE = 1000
+
+# Target count above which the internal discovery port list is trimmed from 10
+# to 5 ports (DISCOVERY_TCP_PORTS_INTERNAL).  A /14 (262,144 hosts) × 10 ports
+# pushes total packet count high; at the INTERNAL_DISCOVERY_MAX_RATE cap the
+# rate-bound state ceiling still holds, but trimming reduces scan duration.
+INTERNAL_DISCOVERY_STATE_CEILING = 262_144  # /14 — trim ports above this count
 
 # Host-count threshold for host discovery tool selection.
 # nmap -sn is more accurate (full handshake awareness, multi-probe ICMP+SYN+ACK).
@@ -3325,6 +3445,12 @@ def main():
                 os.makedirs(disc, exist_ok=True)
                 source_port, _, _ = _calibrate_external_source_port(
                     masscan_target_file, disc, max_rate, exclusions_file)
+            elif target_scan == 'Internal':
+                disc = _disc(output_path)
+                os.makedirs(disc, exist_ok=True)
+                target_count = _count_hosts_in_file(masscan_target_file) or 0
+                source_port, _, _ = _calibrate_internal_source_port(
+                    masscan_target_file, disc, max_rate, exclusions_file, target_count)
 
         # Determine effective host count (prefer discovery file for accuracy)
         _count_file = (discovery_file

@@ -9,12 +9,19 @@ import xml.etree.ElementTree as etree
 
 import spoonmap
 from spoonmap import (
+    DISCOVERY_MASSCAN_PORTS_INTERNAL,
+    DISCOVERY_TCP_PORTS_INTERNAL,
     EXTERNAL_PROBE_PORT_PRIORITY,
     EXTERNAL_SENSITIVE_PORTS,
+    HOST_DISCOVERY_NMAP_THRESHOLD,
+    INTERNAL_DISCOVERY_MAX_RATE,
+    INTERNAL_DISCOVERY_STATE_CEILING,
     SLOW_PORTS,
     INTERNAL_PORT_SCRIPTS,
     PROBE_PORT_PRIORITY,
     _build_nmap_cmd,
+    _calibrate_internal_source_port,
+    _dual_internal_host_discovery,
     _merge_host_xml,
     _filter_udp_live_hosts,
     _nmap_udp_discovery,
@@ -3098,3 +3105,304 @@ class TestFilterUdpLiveHosts:
             status_summary = '\n'.join(updated)
 
         assert 'U:500' not in status_summary
+
+
+# ── _calibrate_internal_source_port ──────────────────────────────────────────
+
+def _masscan_ping_xml(*ips):
+    """Minimal masscan XML for host-discovery tests."""
+    hosts = ''.join(
+        f'<host><address addr="{ip}" addrtype="ipv4"/></host>'
+        for ip in ips
+    )
+    return f'<?xml version="1.0"?><nmaprun>{hosts}</nmaprun>'
+
+
+class TestCalibrateInternalSourcePort:
+    """Unit tests for _calibrate_internal_source_port()."""
+
+    def _make_mock_proc(self):
+        mock_proc = MagicMock()
+        mock_proc.wait.return_value = 0
+        mock_proc.pid = 99999
+        return mock_proc
+
+    def _write_xml(self, path, *ips):
+        path.write_text(_masscan_ping_xml(*ips))
+
+    def test_returns_sp88_when_sweeps_equal(self, tmp_path):
+        """source port 88 is kept when both sweeps find the same number of hosts."""
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('10.0.0.0/24\n')
+
+        def fake_popen(cmd, **kwargs):
+            # Write XML for whichever output file masscan was asked to create.
+            out_idx = cmd.index('-oX') + 1
+            xml_path = disc / cmd[out_idx].split('/')[-1]
+            self._write_xml(xml_path, '10.0.0.1')
+            return self._make_mock_proc()
+
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            eff_sp, sp88_ips, nosp_ips = _calibrate_internal_source_port(
+                str(targets), str(disc), '1000', None, 256)
+
+        assert eff_sp == '88'
+        assert '10.0.0.1' in sp88_ips
+        assert '10.0.0.1' in nosp_ips
+
+    def test_drops_sp88_when_nosp_finds_more(self, tmp_path):
+        """effective_source_port becomes '' when no-source-port sweep finds more hosts."""
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('10.0.0.0/24\n')
+
+        call_count = [0]
+
+        def fake_popen(cmd, **kwargs):
+            out_idx = cmd.index('-oX') + 1
+            xml_path = disc / cmd[out_idx].split('/')[-1]
+            # First call = sp88 (1 host), second call = nosp (3 hosts)
+            if call_count[0] == 0:
+                self._write_xml(xml_path, '10.0.0.1')
+            else:
+                self._write_xml(xml_path, '10.0.0.1', '10.0.0.2', '10.0.0.3')
+            call_count[0] += 1
+            return self._make_mock_proc()
+
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            eff_sp, sp88_ips, nosp_ips = _calibrate_internal_source_port(
+                str(targets), str(disc), '1000', None, 256)
+
+        assert eff_sp == ''
+        assert len(nosp_ips) == 3
+        assert len(sp88_ips) == 1
+
+    def test_trims_ports_above_state_ceiling(self, tmp_path):
+        """Port list is DISCOVERY_TCP_PORTS_INTERNAL (5 ports) for large target counts."""
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('10.0.0.0/8\n')
+
+        captured_cmds = []
+
+        def fake_popen(cmd, **kwargs):
+            captured_cmds.append(cmd)
+            out_idx = cmd.index('-oX') + 1
+            xml_path = disc / cmd[out_idx].split('/')[-1]
+            self._write_xml(xml_path)
+            return self._make_mock_proc()
+
+        large_count = INTERNAL_DISCOVERY_STATE_CEILING + 1
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            _calibrate_internal_source_port(
+                str(targets), str(disc), '1000', None, large_count)
+
+        for cmd in captured_cmds:
+            p_idx = cmd.index('-p') + 1
+            port_str = cmd[p_idx]
+            assert port_str == DISCOVERY_TCP_PORTS_INTERNAL
+            assert port_str != DISCOVERY_MASSCAN_PORTS_INTERNAL
+
+    def test_uses_broad_ports_below_state_ceiling(self, tmp_path):
+        """Port list is DISCOVERY_MASSCAN_PORTS_INTERNAL (10 ports) for normal target counts."""
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('10.0.0.0/24\n')
+
+        captured_cmds = []
+
+        def fake_popen(cmd, **kwargs):
+            captured_cmds.append(cmd)
+            out_idx = cmd.index('-oX') + 1
+            xml_path = disc / cmd[out_idx].split('/')[-1]
+            self._write_xml(xml_path)
+            return self._make_mock_proc()
+
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            _calibrate_internal_source_port(
+                str(targets), str(disc), '1000', None, 256)
+
+        for cmd in captured_cmds:
+            p_idx = cmd.index('-p') + 1
+            assert cmd[p_idx] == DISCOVERY_MASSCAN_PORTS_INTERNAL
+
+    def test_caps_rate_to_internal_max(self, tmp_path):
+        """Rate is capped to INTERNAL_DISCOVERY_MAX_RATE even when user passes a higher rate."""
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('10.0.0.0/24\n')
+
+        captured_cmds = []
+
+        def fake_popen(cmd, **kwargs):
+            captured_cmds.append(cmd)
+            out_idx = cmd.index('-oX') + 1
+            xml_path = disc / cmd[out_idx].split('/')[-1]
+            self._write_xml(xml_path)
+            return self._make_mock_proc()
+
+        user_rate = str(INTERNAL_DISCOVERY_MAX_RATE * 10)  # 10× the cap
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            _calibrate_internal_source_port(
+                str(targets), str(disc), user_rate, None, 256)
+
+        for cmd in captured_cmds:
+            rate_idx = cmd.index('--max-rate') + 1
+            assert int(cmd[rate_idx]) <= INTERNAL_DISCOVERY_MAX_RATE
+
+    def test_respects_user_rate_below_cap(self, tmp_path):
+        """Rate below INTERNAL_DISCOVERY_MAX_RATE is passed through unchanged."""
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('10.0.0.0/24\n')
+
+        captured_cmds = []
+
+        def fake_popen(cmd, **kwargs):
+            captured_cmds.append(cmd)
+            out_idx = cmd.index('-oX') + 1
+            xml_path = disc / cmd[out_idx].split('/')[-1]
+            self._write_xml(xml_path)
+            return self._make_mock_proc()
+
+        user_rate = str(INTERNAL_DISCOVERY_MAX_RATE // 2)  # half the cap
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            _calibrate_internal_source_port(
+                str(targets), str(disc), user_rate, None, 256)
+
+        for cmd in captured_cmds:
+            rate_idx = cmd.index('--max-rate') + 1
+            assert int(cmd[rate_idx]) == int(user_rate)
+
+    def test_uses_retries_1(self, tmp_path):
+        """Each masscan sweep uses --retries 1."""
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('10.0.0.0/24\n')
+
+        captured_cmds = []
+
+        def fake_popen(cmd, **kwargs):
+            captured_cmds.append(cmd)
+            out_idx = cmd.index('-oX') + 1
+            xml_path = disc / cmd[out_idx].split('/')[-1]
+            self._write_xml(xml_path)
+            return self._make_mock_proc()
+
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            _calibrate_internal_source_port(
+                str(targets), str(disc), '1000', None, 256)
+
+        for cmd in captured_cmds:
+            assert '--retries' in cmd
+            retries_idx = cmd.index('--retries') + 1
+            assert cmd[retries_idx] == '1'
+
+
+# ── _dual_internal_host_discovery ─────────────────────────────────────────────
+
+class TestDualInternalHostDiscovery:
+    """Unit tests for _dual_internal_host_discovery()."""
+
+    def test_unions_all_three_sets_for_small_targets(self, tmp_path):
+        """For small target counts, returns union of sp88 + nosp + nmap IPs."""
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('10.0.0.1\n')
+
+        sp88_ips = {'10.0.0.1'}
+        nosp_ips = {'10.0.0.2'}
+        nmap_ips = {'10.0.0.3'}
+
+        with patch('spoonmap._calibrate_internal_source_port',
+                   return_value=('88', sp88_ips, nosp_ips)), \
+             patch('spoonmap._nmap_host_discovery', return_value=nmap_ips):
+            live_ips, eff_sp = _dual_internal_host_discovery(
+                str(targets), str(disc), '1000', None, '88',
+                HOST_DISCOVERY_NMAP_THRESHOLD)
+
+        assert live_ips == {'10.0.0.1', '10.0.0.2', '10.0.0.3'}
+        assert eff_sp == '88'
+
+    def test_skips_nmap_for_large_targets(self, tmp_path):
+        """For large target counts, only the two masscan sweep sets are returned."""
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('10.0.0.0/8\n')
+
+        sp88_ips = {'10.0.0.1'}
+        nosp_ips = {'10.0.0.2'}
+
+        with patch('spoonmap._calibrate_internal_source_port',
+                   return_value=('88', sp88_ips, nosp_ips)) as mock_cal, \
+             patch('spoonmap._nmap_host_discovery') as mock_nmap:
+            live_ips, eff_sp = _dual_internal_host_discovery(
+                str(targets), str(disc), '1000', None, '88',
+                HOST_DISCOVERY_NMAP_THRESHOLD + 1)
+
+        mock_nmap.assert_not_called()
+        assert live_ips == {'10.0.0.1', '10.0.0.2'}
+
+    def test_propagates_effective_source_port(self, tmp_path):
+        """effective_source_port from calibration is returned and passed to nmap."""
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('10.0.0.1\n')
+
+        with patch('spoonmap._calibrate_internal_source_port',
+                   return_value=('', {'10.0.0.1'}, {'10.0.0.2'})), \
+             patch('spoonmap._nmap_host_discovery', return_value=set()) as mock_nmap:
+            _, eff_sp = _dual_internal_host_discovery(
+                str(targets), str(disc), '1000', None, '88',
+                HOST_DISCOVERY_NMAP_THRESHOLD)
+
+        assert eff_sp == ''
+        # nmap should be called with the effective (empty) source port
+        call_args = mock_nmap.call_args
+        assert call_args[0][2] == ''  # source_port positional arg
+
+    def test_deduplicates_ips_across_sweeps(self, tmp_path):
+        """IPs found by both sweeps are deduplicated in the union."""
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('10.0.0.1\n10.0.0.2\n')
+
+        shared_ip = '10.0.0.1'
+        sp88_ips = {shared_ip, '10.0.0.3'}
+        nosp_ips = {shared_ip, '10.0.0.4'}
+
+        with patch('spoonmap._calibrate_internal_source_port',
+                   return_value=('88', sp88_ips, nosp_ips)), \
+             patch('spoonmap._nmap_host_discovery', return_value=set()):
+            live_ips, _ = _dual_internal_host_discovery(
+                str(targets), str(disc), '1000', None, '88',
+                HOST_DISCOVERY_NMAP_THRESHOLD)
+
+        assert live_ips == {shared_ip, '10.0.0.3', '10.0.0.4'}
+        assert len(live_ips) == 3  # no duplicate
