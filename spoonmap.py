@@ -3082,6 +3082,13 @@ def _filter_udp_live_hosts(output_path):
         if not os.path.exists(nmap_xml) or not os.path.exists(live_file):
             continue
 
+        # Preserve the nmap XML prologue (<?xml?> + <!DOCTYPE nmaprun>) before
+        # parsing — ElementTree silently drops it, which breaks Metasploit import.
+        with open(nmap_xml) as fh:
+            raw = fh.read()
+        nmaprun_pos = raw.find('<nmaprun')
+        prologue = raw[:nmaprun_pos] if nmaprun_pos >= 0 else ''
+
         confirmed = set()
         try:
             tree = etree.parse(nmap_xml)
@@ -3114,13 +3121,15 @@ def _filter_udp_live_hosts(output_path):
             for ip in sorted(confirmed):
                 fh.write(ip + '\n')
 
-        # Rewrite nmap XML — remove open|filtered host entries so spoonmap_output.* is clean
+        # Rewrite nmap XML — remove open|filtered host entries so spoonmap_output.* is clean.
+        # Write prologue first so Metasploit's importer sees <?xml?> + <!DOCTYPE nmaprun>.
         for host in root_elem.findall('host'):
             addr = host.find('address[@addrtype="ipv4"]')
             if addr is None or addr.attrib['addr'] not in confirmed:
                 root_elem.remove(host)
-        with open(nmap_xml, 'wb') as fh:
-            tree.write(fh)
+        with open(nmap_xml, 'w') as fh:
+            fh.write(prologue)
+            tree.write(fh, encoding='unicode')
 
     return confirmed_counts
 

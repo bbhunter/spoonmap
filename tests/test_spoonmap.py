@@ -3106,6 +3106,33 @@ class TestFilterUdpLiveHosts:
 
         assert 'U:500' not in status_summary
 
+    def test_rewrite_preserves_xml_declaration_and_doctype(self, tmp_path):
+        """Rewritten UDP XML retains <?xml?> + <!DOCTYPE nmaprun> so Metasploit can import it."""
+        nmap_dir = tmp_path / 'nmap_results'
+        live_dir = tmp_path / 'discovery' / 'live_hosts'
+        nmap_dir.mkdir()
+        live_dir.mkdir(parents=True)
+        prologue = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<!DOCTYPE nmaprun PUBLIC "-//IDN nmap.org//DTD Nmap XML 1.04//EN"'
+            ' "https://svn.nmap.org/nmap/docs/nmap.dtd">\n'
+        )
+        xml = (
+            prologue
+            + '<nmaprun><host><address addr="10.0.0.1" addrtype="ipv4"/>'
+            '<ports><port protocol="udp" portid="500">'
+            '<state state="open"/></port></ports></host></nmaprun>'
+        )
+        # Use correct underscore-form filename so _filter_udp_live_hosts picks it up
+        (nmap_dir / 'portU_500.xml').write_text(xml)
+        (live_dir / 'portU_500.txt').write_text('10.0.0.1\n')
+
+        _filter_udp_live_hosts(str(tmp_path))
+
+        rewritten = (nmap_dir / 'portU_500.xml').read_text()
+        assert rewritten.startswith('<?xml'), 'XML declaration must be first line'
+        assert '<!DOCTYPE nmaprun' in rewritten, 'DOCTYPE required for Metasploit import'
+
 
 # ── _calibrate_internal_source_port ──────────────────────────────────────────
 
