@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import resource
 import shutil
 import socket
 import subprocess
@@ -27,6 +28,20 @@ _COLOR_PROGRESS = '\x1b[38;5;118m'   # neon lime green — completion status / r
 _COLOR_RESULT   = '\x1b[38;5;226m'   # electric yellow — output paths / final summary
 _COLOR_ERROR    = '\x1b[38;5;198m'   # hot pink        — errors and warnings
 _COLOR_RESET    = '\x1b[0m'
+
+
+def _raise_fd_limit():
+    """Raise RLIMIT_NOFILE to 65535 (or the hard limit, whichever is lower).
+
+    Called as preexec_fn in every masscan subprocess so libpcap can open raw
+    sockets without hitting the default 1024-descriptor soft limit
+    ("accept: Too many open files").
+    """
+    try:
+        _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (min(65535, hard), hard))
+    except (ValueError, resource.error):
+        pass  # already at hard limit or no permission; masscan will error on its own
 
 
 def verify_python_version():
@@ -286,7 +301,8 @@ def _calibrate_external_source_port(target_file, disc, max_rate, exclusions_file
             masscan_cmd.extend(['--excludefile', exclusions_file])
         term_state = save_terminal_state()
         try:
-            proc = subprocess.Popen(masscan_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc = subprocess.Popen(masscan_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    preexec_fn=_raise_fd_limit)
             proc.wait()
         except KeyboardInterrupt:
             proc.kill()
@@ -363,7 +379,8 @@ def _calibrate_internal_source_port(target_file, disc, max_rate, exclusions_file
             masscan_cmd.extend(['--excludefile', exclusions_file])
         term_state = save_terminal_state()
         try:
-            proc = subprocess.Popen(masscan_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc = subprocess.Popen(masscan_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    preexec_fn=_raise_fd_limit)
             proc.wait()
         except KeyboardInterrupt:
             proc.kill()
@@ -570,7 +587,8 @@ def _masscan_host_discovery(target_file, disc, max_rate, exclusions_file, tcp_po
         masscan_cmd.extend(['--excludefile', exclusions_file])
     term_state = save_terminal_state()
     try:
-        proc = subprocess.Popen(masscan_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen(masscan_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                preexec_fn=_raise_fd_limit)
         proc.wait()
     except KeyboardInterrupt:
         print(f'Killing PID {proc.pid}...')
@@ -614,6 +632,7 @@ def _run_masscan_batch(batch, rate, output_file, target_file, source_port, exclu
             masscan_cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            preexec_fn=_raise_fd_limit,
         )
         masscan_process.wait()
     except KeyboardInterrupt:
