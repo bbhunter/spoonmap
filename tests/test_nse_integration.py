@@ -299,3 +299,135 @@ class TestCupsBrowsedRceNseStub:
         with _StubServer(_CUPS_PORT, _CUPS_UNRELATED):
             output = _run_nmap(_CUPS_PORT, _CUPS_SCRIPT)
         assert 'cups-browsed-rce' not in output
+
+
+# ── ollama-detect ─────────────────────────────────────────────────────────────
+
+_OLLAMA_PORT   = 11434
+_OLLAMA_SCRIPT = os.path.join(_NSE_DIR, 'ollama-detect.nse')
+
+_OLLAMA_VALID = (
+    b'HTTP/1.0 200 OK\r\n'
+    b'Content-Type: application/json\r\n\r\n'
+    b'{"models":[{"name":"llama2","size":3825819519},{"name":"mistral","size":4109854208}]}'
+)
+_OLLAMA_INVALID = (
+    b'HTTP/1.0 200 OK\r\n'
+    b'Content-Type: text/html\r\n\r\n'
+    b'<html><body>Welcome</body></html>'
+)
+
+
+@pytest.mark.skipif(not _port_is_free(_OLLAMA_PORT),
+                    reason=f'port {_OLLAMA_PORT} already in use — stub tests require a free port')
+class TestOllamaDetectNse:
+    def test_detects_ollama_api(self):
+        """Stub returns valid /api/tags body → script reports unauthenticated access."""
+        with _StubServer(_OLLAMA_PORT, _OLLAMA_VALID):
+            output = _run_nmap(_OLLAMA_PORT, _OLLAMA_SCRIPT)
+        assert 'Ollama API accessible' in output
+
+    def test_no_output_for_non_ollama_service(self):
+        """Stub returns plain HTML → script produces no output."""
+        with _StubServer(_OLLAMA_PORT, _OLLAMA_INVALID):
+            output = _run_nmap(_OLLAMA_PORT, _OLLAMA_SCRIPT)
+        assert 'ollama-detect' not in output
+
+
+# ── openai-api-detect ─────────────────────────────────────────────────────────
+
+_OPENAI_PORT   = 1234
+_OPENAI_SCRIPT = os.path.join(_NSE_DIR, 'openai-api-detect.nse')
+
+_OPENAI_VALID = (
+    b'HTTP/1.0 200 OK\r\n'
+    b'Content-Type: application/json\r\n\r\n'
+    b'{"object":"list","data":[{"id":"Mistral-7B","object":"model"}]}'
+)
+_OPENAI_INVALID = (
+    b'HTTP/1.0 200 OK\r\n'
+    b'Content-Type: application/json\r\n\r\n'
+    b'{"status":"ok"}'
+)
+
+
+@pytest.mark.skipif(not _port_is_free(_OPENAI_PORT),
+                    reason=f'port {_OPENAI_PORT} already in use — stub tests require a free port')
+class TestOpenaiApiDetectNse:
+    def test_detects_openai_compatible_api(self):
+        """Stub returns valid /v1/models body → script reports unauthenticated access."""
+        with _StubServer(_OPENAI_PORT, _OPENAI_VALID):
+            output = _run_nmap(_OPENAI_PORT, _OPENAI_SCRIPT)
+        assert 'OpenAI-compatible LLM API accessible' in output
+
+    def test_no_output_for_generic_json_service(self):
+        """Stub returns generic JSON without the three-string fingerprint → no output."""
+        with _StubServer(_OPENAI_PORT, _OPENAI_INVALID):
+            output = _run_nmap(_OPENAI_PORT, _OPENAI_SCRIPT)
+        assert 'openai-api-detect' not in output
+
+
+# ── gradio-detect ─────────────────────────────────────────────────────────────
+
+_GRADIO_PORT   = 7860
+_GRADIO_SCRIPT = os.path.join(_NSE_DIR, 'gradio-detect.nse')
+
+_GRADIO_VALID = (
+    b'HTTP/1.0 200 OK\r\n'
+    b'Content-Type: application/json\r\n\r\n'
+    b'{"version":"3.50.2","gradio_version":"3.50.2"}'
+)
+_GRADIO_INVALID = (
+    b'HTTP/1.0 200 OK\r\n'
+    b'Content-Type: application/json\r\n\r\n'
+    b'{"version":"1.0","app":"flask"}'
+)
+
+
+@pytest.mark.skipif(not _port_is_free(_GRADIO_PORT),
+                    reason=f'port {_GRADIO_PORT} already in use — stub tests require a free port')
+class TestGradioDetectNse:
+    def test_detects_gradio_ui(self):
+        """Stub returns valid /info body with version+gradio → script reports access."""
+        with _StubServer(_GRADIO_PORT, _GRADIO_VALID):
+            output = _run_nmap(_GRADIO_PORT, _GRADIO_SCRIPT)
+        assert 'Gradio web UI accessible' in output
+
+    def test_no_output_for_non_gradio_service(self):
+        """Stub returns JSON with version but no 'gradio' key → no output."""
+        with _StubServer(_GRADIO_PORT, _GRADIO_INVALID):
+            output = _run_nmap(_GRADIO_PORT, _GRADIO_SCRIPT)
+        assert 'gradio-detect' not in output
+
+
+# ── koboldcpp-detect ──────────────────────────────────────────────────────────
+
+_KOBOLD_PORT   = 5001
+_KOBOLD_SCRIPT = os.path.join(_NSE_DIR, 'koboldcpp-detect.nse')
+
+_KOBOLD_VALID = (
+    b'HTTP/1.0 200 OK\r\n'
+    b'Content-Type: application/json\r\n\r\n'
+    b'{"result":"llama-2-7b-chat.Q4_K_M.gguf"}'
+)
+_KOBOLD_INVALID = (
+    b'HTTP/1.0 200 OK\r\n'
+    b'Content-Type: text/html\r\n\r\n'
+    b'<html><body>Service</body></html>'
+)
+
+
+@pytest.mark.skipif(not _port_is_free(_KOBOLD_PORT),
+                    reason=f'port {_KOBOLD_PORT} already in use — stub tests require a free port')
+class TestKoboldcppDetectNse:
+    def test_detects_koboldcpp_api(self):
+        """Stub returns valid /api/v1/model body → script reports unauthenticated access."""
+        with _StubServer(_KOBOLD_PORT, _KOBOLD_VALID):
+            output = _run_nmap(_KOBOLD_PORT, _KOBOLD_SCRIPT)
+        assert 'KoboldCpp API accessible' in output
+
+    def test_no_output_for_non_kobold_service(self):
+        """Stub returns plain HTML → script produces no output."""
+        with _StubServer(_KOBOLD_PORT, _KOBOLD_INVALID):
+            output = _run_nmap(_KOBOLD_PORT, _KOBOLD_SCRIPT)
+        assert 'koboldcpp-detect' not in output

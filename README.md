@@ -310,9 +310,9 @@ Inter-scan wait: 29s (target ~256 hosts)
 
 When `script_scan` is enabled, nmap runs targeted NSE scripts against relevant ports. Scripts are chosen based on scan type (External vs Internal):
 
-**External scans** run: `ftp-anon`, `ssh-auth-methods`, `ssh2-enum-algos`, `*-ntlm-info`, `ssl-cert`, `ms-sql-ntlm-info`, `rdp-ntlm-info`, `docker-version`, `snmp-brute`, `snmp-sysdescr`, `ajp-headers`, `x11-access`, `dameware-detect` (custom, 6129), `cucm-detect` (custom, 6970), `ipmi-version`, `ipmi-cipher-zero`, `ipmi-hashdump` (custom, U:623), `ike-version` (U:500), `vnc-info`, `realvnc-auth-bypass` (5900, 5901)
+**External scans** run: `ftp-anon`, `ssh-auth-methods`, `ssh2-enum-algos`, `*-ntlm-info`, `ssl-cert`, `ms-sql-ntlm-info`, `rdp-ntlm-info`, `docker-version`, `snmp-brute`, `snmp-sysdescr`, `ajp-headers`, `x11-access`, `dameware-detect` (custom, 6129), `cucm-detect` (custom, 6970), `ipmi-version`, `ipmi-cipher-zero`, `ipmi-hashdump` (custom, U:623), `ike-version` (U:500), `vnc-info`, `realvnc-auth-bypass` (5900, 5901), `ollama-detect` (custom, 11434), `openai-api-detect` (custom, 1234/1337/3000/8000), `gradio-detect` (custom, 7860), `koboldcpp-detect` (custom, 5001)
 
-**Internal scans** run: `ftp-anon`, `rpcinfo`, `nfs-showmount`, `nfs-ls`, `smb-security-mode`, `smb2-security-mode`, `smb-vuln-ms17-010`, `smb-vuln-ms08-067`, `smb-double-pulsar-backdoor`, `smb-vuln-cve-2017-7494`, `rmi-dumpregistry`, `ms-sql-info`, `docker-version`, `snmp-brute`, `snmp-sysdescr`, `ajp-headers`, `x11-access`, `jdwp-info` (5005), `http-title` (8001), `banner` (61616), `dameware-detect` (custom, 6129), `cucm-detect` (custom, 6970), `nodejs-inspector` (custom, 9229), `kubelet-anon-check` (custom, 10250), `delve-debugger` (custom, 2345), `ipmi-version`, `ipmi-cipher-zero`, `ipmi-hashdump` (custom, U:623), `ike-version` (U:500), `vnc-info`, `realvnc-auth-bypass` (5900, 5901)
+**Internal scans** run: `ftp-anon`, `rpcinfo`, `nfs-showmount`, `nfs-ls`, `smb-security-mode`, `smb2-security-mode`, `smb-vuln-ms17-010`, `smb-vuln-ms08-067`, `smb-double-pulsar-backdoor`, `smb-vuln-cve-2017-7494`, `rmi-dumpregistry`, `ms-sql-info`, `docker-version`, `snmp-brute`, `snmp-sysdescr`, `ajp-headers`, `x11-access`, `jdwp-info` (5005), `http-title` (8001), `banner` (61616), `dameware-detect` (custom, 6129), `cucm-detect` (custom, 6970), `nodejs-inspector` (custom, 9229), `kubelet-anon-check` (custom, 10250), `delve-debugger` (custom, 2345), `ipmi-version`, `ipmi-cipher-zero`, `ipmi-hashdump` (custom, U:623), `ike-version` (U:500), `vnc-info`, `realvnc-auth-bypass` (5900, 5901), `ollama-detect` (custom, 11434), `openai-api-detect` (custom, 1234/1337/3000/8000), `gradio-detect` (custom, 7860), `koboldcpp-detect` (custom, 5001)
 
 Port 9100 (JetDirect raw printing protocol) is included in the Specialized category. Hosts with port 9100 open are identified as printers; SNMP default community string and anonymous FTP findings are suppressed for these hosts to reduce noise.
 
@@ -347,6 +347,10 @@ After scanning, `generate_findings()` parses all nmap XML results and produces s
 | HIGH | AJP Connector exposed (8009, Ghostcat CVE-2020-1938) |
 | HIGH | X11 Display accessible (6000, confirmed by `x11-access`) |
 | HIGH | ActiveMQ broker exposed (61616, CVE-2023-46604) |
+| HIGH | Ollama LLM API Unauthenticated (11434, custom NSE — external scan only at HIGH) |
+| HIGH | OpenAI-Compatible LLM API Unauthenticated (1234/1337/3000/8000, custom NSE — external scan only at HIGH) |
+| HIGH | Gradio LLM Web UI Accessible (7860, custom NSE — external scan only at HIGH) |
+| HIGH | KoboldCpp LLM API Unauthenticated (5001, custom NSE — external scan only at HIGH) |
 | HIGH | SNMP Default Community String — read-write, non-network device (non-printer hosts only) |
 | HIGH | Kubernetes Dashboard Accessible (8001, confirmed by `http-title`) |
 | HIGH | IPMI RAKP Hash Captured — offline cracking with hashcat mode 7300 |
@@ -358,6 +362,10 @@ After scanning, `generate_findings()` parses all nmap XML results and produces s
 | MEDIUM | Java RMI registry exposed |
 | MEDIUM | Expired TLS certificate (external scan only) |
 | MEDIUM | Possible Cisco CUCM TFTP (Unconfirmed) (6970 open, NSE did not confirm) |
+| MEDIUM | Ollama LLM API Unauthenticated (11434, custom NSE — internal scan) |
+| MEDIUM | OpenAI-Compatible LLM API Unauthenticated (1234/1337/3000/8000, custom NSE — internal scan) |
+| MEDIUM | Gradio LLM Web UI Accessible (7860, custom NSE — internal scan) |
+| MEDIUM | KoboldCpp LLM API Unauthenticated (5001, custom NSE — internal scan) |
 | LOW | SNMP Default Community String — read-only, non-network device (non-printer hosts only) |
 | INFO | IPMI Service Detected |
 | INFO | IKE/IPsec Service Detected (U:500) |
@@ -390,6 +398,11 @@ On Internal scans, if `ms-sql-info` discovers SQL Server named instances on non-
 | U:500 | IKE/IPsec VPN | Aggressive Mode + PSK auto-detected (HIGH); ike-version identifies vendor/mode |
 | U:623 | IPMI / BMC | Cipher Zero auto-detected (CRITICAL); RAKP hash captured for offline crack (HIGH) |
 | 5900, 5901 | VNC | No-auth auto-detected (CRITICAL); realvnc-auth-bypass checked (HIGH) |
+| 11434 | Ollama LLM Runtime | Custom NSE (`ollama-detect`) probes `/api/tags` and `/api/version`; unauthenticated access exposes model inventory and full inference API |
+| 1234, 1337 | LM Studio / OpenAI-compat API | Custom NSE (`openai-api-detect`) probes `/v1/models`; unauthenticated access exposes models and inference |
+| 3000, 8000 | OpenAI-compatible LLM API | Custom NSE (`openai-api-detect`) probes `/v1/models` with three-string fingerprint to avoid false positives on generic web apps |
+| 7860 | Gradio / text-generation-webui | Custom NSE (`gradio-detect`) probes `/info` (fallback: `/`); unauthenticated access to LLM web UI |
+| 5001 | KoboldCpp | Custom NSE (`koboldcpp-detect`) probes `/api/v1/model`; unauthenticated inference API exposes loaded model |
 
 ### References
 

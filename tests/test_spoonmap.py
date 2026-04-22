@@ -2131,6 +2131,79 @@ class TestInternalNseFindings:
         if findings_file.exists():
             assert 'JDWP Java Debugger Exposed' not in findings_file.read_text()
 
+    # ── AI / Local LLM findings ───────────────────────────────────────────────
+
+    def test_ollama_internal_medium(self, nmap_dir):
+        """ollama-detect output on internal scan → MEDIUM finding."""
+        xml = _nmap_xml('10.0.2.1', 'tcp', '11434',
+                        scripts={'ollama-detect': 'Ollama API accessible without authentication \u2014 models: llama2 (version: 0.1.33)'})
+        (nmap_dir / 'nse_results' / 'port11434.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'Ollama LLM API Unauthenticated' in content
+        assert 'MEDIUM' in content
+        assert '10.0.2.1' in content
+
+    def test_ollama_external_high(self, nmap_dir):
+        """ollama-detect output on external scan → HIGH finding."""
+        xml = _nmap_xml('1.2.3.4', 'tcp', '11434',
+                        scripts={'ollama-detect': 'Ollama API accessible without authentication \u2014 models: llama2 (version: 0.1.33)'})
+        (nmap_dir / 'nse_results' / 'port11434.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'Ollama LLM API Unauthenticated' in content
+        assert 'HIGH' in content
+
+    def test_openai_api_internal_medium(self, nmap_dir):
+        """openai-api-detect output on internal scan → MEDIUM finding."""
+        xml = _nmap_xml('10.0.2.2', 'tcp', '1234',
+                        scripts={'openai-api-detect': 'OpenAI-compatible LLM API accessible without authentication \u2014 product: LM Studio, models: Mistral-7B'})
+        (nmap_dir / 'nse_results' / 'port1234.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'OpenAI-Compatible LLM API Unauthenticated' in content
+        assert 'MEDIUM' in content
+
+    def test_openai_api_external_high(self, nmap_dir):
+        """openai-api-detect output on external scan → HIGH finding."""
+        xml = _nmap_xml('1.2.3.5', 'tcp', '1234',
+                        scripts={'openai-api-detect': 'OpenAI-compatible LLM API accessible without authentication \u2014 product: LM Studio, models: Mistral-7B'})
+        (nmap_dir / 'nse_results' / 'port1234.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'OpenAI-Compatible LLM API Unauthenticated' in content
+        assert 'HIGH' in content
+
+    def test_gradio_internal_medium(self, nmap_dir):
+        """gradio-detect output on internal scan → MEDIUM finding."""
+        xml = _nmap_xml('10.0.2.3', 'tcp', '7860',
+                        scripts={'gradio-detect': 'Gradio web UI accessible \u2014 version: 3.50.2'})
+        (nmap_dir / 'nse_results' / 'port7860.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'Gradio LLM Web UI Accessible' in content
+        assert 'MEDIUM' in content
+
+    def test_koboldcpp_internal_medium(self, nmap_dir):
+        """koboldcpp-detect output on internal scan → MEDIUM finding."""
+        xml = _nmap_xml('10.0.2.4', 'tcp', '5001',
+                        scripts={'koboldcpp-detect': 'KoboldCpp API accessible without authentication \u2014 model: llama-2-7b-chat.Q4_K_M.gguf'})
+        (nmap_dir / 'nse_results' / 'port5001.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'KoboldCpp LLM API Unauthenticated' in content
+        assert 'MEDIUM' in content
+
+    def test_llm_no_finding_for_empty_output(self, nmap_dir):
+        """ollama-detect with empty output → no finding generated."""
+        xml = _nmap_xml('10.0.2.5', 'tcp', '11434',
+                        scripts={'ollama-detect': ''})
+        (nmap_dir / 'nse_results' / 'port11434.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        findings_file = nmap_dir / 'findings.txt'
+        if findings_file.exists():
+            assert 'Ollama LLM API Unauthenticated' not in findings_file.read_text()
+
     def test_high_risk_service_detected_never_fires(self, nmap_dir):
         """The old 'High-Risk Service Detected' title must never appear in output."""
         # Write XML for all ports that used to trigger INTERNAL_RISK_PORTS

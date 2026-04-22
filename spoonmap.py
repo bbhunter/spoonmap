@@ -1689,6 +1689,14 @@ EXTERNAL_PORT_SCRIPTS = {
     '5901':  'vnc-info,realvnc-auth-bypass',
     '631':   f'{_DIR}/nse/cups-browsed-rce.nse',
     'U:631': f'{_DIR}/nse/cups-browsed-rce.nse',
+    # AI / Local LLM
+    '11434': f'{_DIR}/nse/ollama-detect.nse',
+    '1234':  f'{_DIR}/nse/openai-api-detect.nse',
+    '1337':  f'{_DIR}/nse/openai-api-detect.nse',
+    '3000':  f'{_DIR}/nse/openai-api-detect.nse',
+    '5001':  f'{_DIR}/nse/koboldcpp-detect.nse',
+    '7860':  f'{_DIR}/nse/gradio-detect.nse',
+    '8000':  f'{_DIR}/nse/openai-api-detect.nse',
 }
 
 # Scripts run on INTERNAL scans only (no ssl-cert — not relevant for internal assessments)
@@ -1730,6 +1738,14 @@ INTERNAL_PORT_SCRIPTS = {
     '5901':  'vnc-info,realvnc-auth-bypass',
     '631':   f'{_DIR}/nse/cups-browsed-rce.nse',
     'U:631': f'{_DIR}/nse/cups-browsed-rce.nse',
+    # AI / Local LLM
+    '11434': f'{_DIR}/nse/ollama-detect.nse',
+    '1234':  f'{_DIR}/nse/openai-api-detect.nse',
+    '1337':  f'{_DIR}/nse/openai-api-detect.nse',
+    '3000':  f'{_DIR}/nse/openai-api-detect.nse',
+    '5001':  f'{_DIR}/nse/koboldcpp-detect.nse',
+    '7860':  f'{_DIR}/nse/gradio-detect.nse',
+    '8000':  f'{_DIR}/nse/openai-api-detect.nse',
 }
 
 # Ports that use multiple concurrent NSE scripts; omit --source-port to prevent
@@ -2365,6 +2381,29 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
                         'Verify the version is patched against CVE-2023-46604 (RCE, CVSS 10.0). '
                         'Broker should not be reachable from general workstations.')
 
+                # ── AI / Local LLM — unauthenticated API access ───────────────
+                sev_llm = 'HIGH' if target_scan == 'External' else 'MEDIUM'
+
+                ollama_out = scripts.get('ollama-detect', '')
+                if ollama_out.strip():
+                    detail = ollama_out.strip()[:200]
+                    add(sev_llm, ip, port_str, 'Ollama LLM API Unauthenticated', detail)
+
+                openai_out = scripts.get('openai-api-detect', '')
+                if openai_out.strip():
+                    detail = openai_out.strip()[:200]
+                    add(sev_llm, ip, port_str, 'OpenAI-Compatible LLM API Unauthenticated', detail)
+
+                gradio_out = scripts.get('gradio-detect', '')
+                if gradio_out.strip():
+                    detail = gradio_out.strip()[:200]
+                    add(sev_llm, ip, port_str, 'Gradio LLM Web UI Accessible', detail)
+
+                kobold_out = scripts.get('koboldcpp-detect', '')
+                if kobold_out.strip():
+                    detail = kobold_out.strip()[:200]
+                    add(sev_llm, ip, port_str, 'KoboldCpp LLM API Unauthenticated', detail)
+
             # ── host-level scripts (smb-security-mode, ms-sql-info, etc.) ────
             # These NSE scripts use hostrule and appear under <hostscript>,
             # not inside a <port> element.
@@ -2843,6 +2882,42 @@ _FINDING_REPRO = {
             '|   Base DN: DC=corp,DC=local\n'
             '|   Sample Users Found: j.smith, m.carter, r.johnson, t.williams, k.brown\n'
             '|_  Sample Computers Found: WS-SALES01$, WS-DEV03$, SRV-FILE02$'
+        ),
+    },
+    'Ollama LLM API Unauthenticated': {
+        'flags': '--script spoonmap/nse/ollama-detect.nse',
+        'sample': (
+            'PORT      STATE SERVICE\n'
+            '11434/tcp open  ollama\n'
+            '| ollama-detect:\n'
+            '|_  Ollama API accessible without authentication \u2014 models: llama2, mistral (version: 0.1.33)'
+        ),
+    },
+    'OpenAI-Compatible LLM API Unauthenticated': {
+        'flags': '--script spoonmap/nse/openai-api-detect.nse',
+        'sample': (
+            'PORT     STATE SERVICE\n'
+            '1234/tcp open  openai-api\n'
+            '| openai-api-detect:\n'
+            '|_  OpenAI-compatible LLM API accessible without authentication \u2014 product: LM Studio, models: TheBloke/Mistral-7B'
+        ),
+    },
+    'Gradio LLM Web UI Accessible': {
+        'flags': '--script spoonmap/nse/gradio-detect.nse',
+        'sample': (
+            'PORT     STATE SERVICE\n'
+            '7860/tcp open  gradio\n'
+            '| gradio-detect:\n'
+            '|_  Gradio web UI accessible \u2014 version: 3.50.2'
+        ),
+    },
+    'KoboldCpp LLM API Unauthenticated': {
+        'flags': '--script spoonmap/nse/koboldcpp-detect.nse',
+        'sample': (
+            'PORT     STATE SERVICE\n'
+            '5001/tcp open  koboldcpp\n'
+            '| koboldcpp-detect:\n'
+            '|_  KoboldCpp API accessible without authentication \u2014 model: llama-2-7b-chat.Q4_K_M.gguf'
         ),
     },
 }
