@@ -1787,6 +1787,11 @@ EXTERNAL_SENSITIVE_PORTS = [
     ('61616', 'HIGH',     'ActiveMQ — message broker should not be internet-facing'),
     ('8009',  'HIGH',     'AJP Connector — Tomcat AJP should never be internet-facing (CVE-2020-1938)'),
     ('6000',  'HIGH',     'X11 Display — remote X11 access allows keystroke/screen capture'),
+    ('11434', 'HIGH',     'Ollama — local LLM API; unauthenticated by default, should not be internet-facing'),
+    ('1234',  'HIGH',     'LM Studio — local LLM API; unauthenticated by default, should not be internet-facing'),
+    ('7860',  'HIGH',     'text-generation-webui (Gradio) — LLM UI; no auth by default, should not be internet-facing'),
+    ('5001',  'HIGH',     'KoboldCpp — local LLM API; no auth by default, should not be internet-facing'),
+    ('1337',  'HIGH',     'Jan — local LLM API; no auth by default, should not be internet-facing'),
 ]
 
 SERVICE_CATEGORIES = {
@@ -1819,6 +1824,9 @@ SERVICE_CATEGORIES = {
     ],
     'Containers & Debuggers': [
         '2377', '10250', '8001', '9229', '2345', '5005', '61616', '8009', '6000'
+    ],
+    'AI / Local LLM': [
+        '11434', '1234', '7860', '5000', '5001', '1337', '3000', '8000', '8080',
     ],
 }
 
