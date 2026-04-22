@@ -33,12 +33,13 @@ Service Categories (comma-separated numbers, default: All)
 	(3) Remote Management  [22, 23, 3389, 5900, 5901, 6129, 1723, 5985, 5986]
 	(4) Email        [25, 110, 143, 465, 587, 993, 995]
 	(5) LDAP         [389, 636]
-	(6) Network Infrastructure  [53, 179, U:500, U:161, U:623]
+	(6) Network Infrastructure  [53, 179, U:500, U:161, U:623, U:631]
 	(7) File Transfer      [21, 111]
 	(8) SMB          [445, 135, 139, U:137]
 	(9) Specialized  [1090, 3300, 4786, 6970, 2375, 4243, 9100]
 	(10) Containers & Debuggers  [2377, 10250, 8001, 9229, 2345, 5005, 61616, 8009, 6000]
-	(11) Full Port Scan  [1-65535]
+	(11) AI / Local LLM  [11434, 1234, 7860, 5000, 5001, 1337, 3000, 8000, 8080]
+	(12) Full Port Scan  [1-65535]
 	(c) Custom Port Scan  [enter your own comma-separated ports]
 
 (The Full Port Scan number increments automatically with the number of categories.)
@@ -134,7 +135,7 @@ git update-index --no-skip-worktree ranges.txt
 | `dest_ports` | Array of port strings | Overrides `scan_categories`; use `U:` prefix for UDP |
 | `banner_scan` | `"True"` / `"False"` | Runs nmap -sV against discovered hosts |
 | `script_scan` | `"True"` / `"False"` | Runs NSE security scripts (implies `banner_scan`) |
-| `host_discovery` | `"True"` / `"False"` | Run host discovery before port scanning to narrow the target set (default: True); External scans always run the dual masscan calibration probe regardless of this setting |
+| `host_discovery` | `"True"` / `"False"` | Run host discovery before port scanning to narrow the target set (default: True); both External and Internal scans always run the dual masscan calibration probe regardless of this setting |
 | `target_scan` | `"External"` / `"Internal"` | External → source port 53 (unless calibration shows it hurts — see below); Internal → source port 88 |
 | `max_rate` | Packets/second string | See rate guidance below |
 | `target_file` | Path | One IP, CIDR, or hostname per line; `ranges.txt` is committed as a blank placeholder (see below) |
@@ -178,13 +179,23 @@ This calibration runs even when `host_discovery` is `False`, so the source-port 
 
 #### Internal scans
 
-Internal host discovery uses **nmap -sn** for target sets up to **65,536 hosts** (a /16), and falls back to masscan for larger ranges:
+Internal host discovery mirrors the external dual-sweep pattern, with three adaptations for the smaller state tables of inline enterprise firewalls:
+
+1. **masscan sweep with `-g 88`** (source port 88 / Kerberos) — bypasses Windows Firewall rules on domain-joined networks that permit Kerberos traffic through
+2. **masscan sweep without source port** — catches hosts that filter traffic to port 88
+3. **nmap -sn** with ICMP echo + TCP SYN/ACK probes (target sets ≤ 65,536 hosts only)
+
+Both masscan sweeps cover a 10-port list tuned for internal services: `22, 80, 135, 443, 445, 1433, 3306, 3389, 5985, 8080`. For very large ranges (> 262,144 hosts), the list trims to 5 ports to keep peak firewall state entries within safe bounds.
+
+The sweep rate is capped to **1,000 pps** regardless of `max_rate`. At 1,000 pps and a typical 60-second firewall half-open timeout, peak concurrent state entries stay at ~60,000 — safe for enterprise inline firewalls carrying production traffic.
+
+After both sweeps complete, SpooNMAP compares host counts. If the no-source-port sweep found more hosts, source port 88 is dropped for all subsequent port scans:
 
 ```
-Host discovery: 200,000 targets > 65,536 — using masscan for speed
+No-source-port sweep found more hosts (21) than source-port-88 (9) — dropping --source-port 88 for port scans.
 ```
 
-nmap probes each target with ICMP echo (`-PE`), TCP SYN (`-PS`), and TCP ACK (`-PA`) simultaneously. Masscan's stateless approach is less accurate on internal networks with stateful firewalls or rate-limited ICMP, but its raw throughput wins for very large target sets.
+This calibration runs even when `host_discovery` is `False`, so the source-port decision is always data-driven.
 
 ### Intelligent tool selection: masscan vs nmap (port discovery)
 
@@ -251,10 +262,12 @@ Inter-scan wait: 29s (target ~256 hosts)
   discovery/
     resolved_targets.txt        # resolved IPs/CIDRs (input to host discovery)
     ip_hostname_map.json        # hostname → resolved IP mapping
-    discovery_masscan_sp53.xml  # masscan sweep with source port 53 (external scans)
-    discovery_masscan_nosp.xml  # masscan sweep without source port (external scans)
-    discovery_nmap.xml          # nmap -sn XML (external host_discovery; internal small/medium sets)
-    discovery_masscan.xml       # masscan ICMP+TCP XML (internal host_discovery, large target sets only)
+    discovery_masscan_sp53.xml          # masscan sweep with source port 53 (external scans)
+    discovery_masscan_nosp.xml          # masscan sweep without source port (external scans)
+    discovery_masscan_sp88.xml          # masscan sweep with source port 88 (internal scans)
+    discovery_masscan_nosp_internal.xml # masscan sweep without source port (internal scans)
+    discovery_nmap.xml                  # nmap -sn XML (external; internal sets ≤ 65,536 hosts)
+    discovery_masscan.xml               # legacy masscan XML (large internal sets, pre-dual-sweep)
     live_hosts_discovery.txt    # live IPs found by host discovery phase
     masscan_results/portN.xml   # raw masscan XML per port (masscan port discovery path)
     live_hosts/portN.txt        # deduplicated IPs per port

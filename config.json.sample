@@ -1,5 +1,5 @@
 {
-    "__scan_categories_choices__": "All, Full, Web, Database, Remote Management, Email, LDAP, Network Infrastructure, File Transfer, SMB, Specialized, Containers & Debuggers",
+    "__scan_categories_choices__": "All, Full, Web, Database, Remote Management, Email, LDAP, Network Infrastructure, File Transfer, SMB, Specialized, Containers & Debuggers, AI / Local LLM",
     "scan_categories": ["Web", "Database"],
     "__dest_ports_note__": "Optional: overrides scan_categories with an explicit port list. Use U: prefix for UDP (e.g. U:53).",
     "dest_ports": [],
@@ -10,6 +10,7 @@
     "__script_scan_choices__" : "True, False",
     "script_scan" : "False",
     "__host_discovery_choices__" : "True, False",
+    "__host_discovery_note__": "Even when False, both External and Internal scans run a dual masscan calibration probe (source-port vs no-source-port sweep) to determine the optimal source port for port scanning. External: source port 53 (DNS). Internal: source port 88 (Kerberos — bypasses Windows Firewall in domain environments). Whichever sweep finds more hosts wins. Internal discovery rate is always capped at 1000 pps regardless of max_rate to protect enterprise firewall state tables (~60K concurrent entries max).",
     "host_discovery" : "True",
     "__resume_choices__" : "True, False",
     "resume" : "False",
