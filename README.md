@@ -212,7 +212,7 @@ work_units = effective_host_count × port_count
 
 | Scenario | Masscan (internal) | Nmap -T4 |
 |---|---|---|
-| 38 hosts × 65,535 ports | ~54 hours | ~4 min |
+| 38 hosts × 65,535 ports | ~3.5 hours | ~4 min |
 | 512 hosts × 65,535 ports | ~46 hours | ~56 min |
 | 512 hosts × 50 ports | ~3.5 min | ~2.5 sec |
 | 10,000 hosts × 50 ports | ~1.1 hr | ~50 sec |
