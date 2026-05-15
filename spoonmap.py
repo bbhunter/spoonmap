@@ -938,11 +938,12 @@ def _nmap_port_discovery(dest_ports, target_file, source_port, exclusions_file,
     term_state = save_terminal_state()
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, text=True)
+                                stderr=subprocess.PIPE, text=True)
         _t = threading.Thread(target=_progress_reader, args=(proc.stdout,), daemon=True)
         _t.start()
         proc.wait()
         _t.join()
+        stderr_output = proc.stderr.read()
     except KeyboardInterrupt:
         proc.kill()
         proc.wait()
@@ -954,6 +955,14 @@ def _nmap_port_discovery(dest_ports, target_file, source_port, exclusions_file,
         return status_summary
     finally:
         restore_terminal_state(term_state)
+
+    if proc.returncode != 0:
+        print(_COLOR_ERROR + f'Error: nmap port discovery exited with code {proc.returncode}.'
+              + (' Run as root/sudo for SYN scan (-sS).' if 'root' in stderr_output.lower() or 'privilege' in stderr_output.lower() else '')
+              + _COLOR_RESET)
+        if stderr_output.strip():
+            print(_COLOR_ERROR + stderr_output.strip() + _COLOR_RESET)
+        return status_summary
 
     if not os.path.exists(output_file) or os.stat(output_file).st_size == 0:
         return status_summary
@@ -1514,7 +1523,10 @@ def nmap_scan(source_port, max_threads=5, ip_to_hostname=None,
                 files_to_scan.append(host_file)
 
         if not files_to_scan:
-            print(_COLOR_INFO + 'All ports have already been scanned.' + _COLOR_RESET)
+            if not host_files:
+                print(_COLOR_INFO + 'No open ports found in port discovery — skipping banner scan.' + _COLOR_RESET)
+            else:
+                print(_COLOR_INFO + 'All ports have already been scanned.' + _COLOR_RESET)
             return
 
         print(_COLOR_INFO + f'Starting NMAP scans with {max_threads} concurrent threads...' + _COLOR_RESET)
