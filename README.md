@@ -161,41 +161,21 @@ Full port scans (`-p 1-65535`) are capped to half the default to avoid saturatio
 
 #### External scans
 
-External host discovery runs three sweeps and takes the union:
+External host discovery runs two sweeps and takes the union:
 
-1. **masscan sweep with `-g 53`** (source port 53) — bypasses stateless firewall rules that pass DNS responses through
-2. **masscan sweep without source port** — catches hosts that filter responses destined for port 53
-3. **nmap -sn** with ICMP echo + TCP SYN/ACK probes
-
-Both masscan sweeps cover `DISCOVERY_MASSCAN_PORTS_EXTERNAL` — a curated set of commonly-open ports chosen to maximise host visibility without triggering IDS noise.
-
-After both sweeps complete, SpooNMAP compares host counts. If the no-source-port sweep found more hosts, source port 53 is dropped for all subsequent port scans:
-
-```
-No-source-port sweep found more hosts (21) than source-port-53 (9) — dropping --source-port 53 for port scans.
-```
-
-This calibration runs even when `host_discovery` is `False`, so the source-port decision is always data-driven.
+1. **masscan sweep** across `DISCOVERY_MASSCAN_PORTS_EXTERNAL` — a curated 17-port set chosen to maximise host visibility (`--retries 2`); `--wait` scales with target count (1–3 s)
+2. **nmap -sn** with ICMP echo + TCP SYN/ACK probes
 
 #### Internal scans
 
-Internal host discovery mirrors the external dual-sweep pattern, with three adaptations for the smaller state tables of inline enterprise firewalls:
+Internal host discovery uses a single masscan sweep followed by an optional concurrent nmap `-sn` pass:
 
-1. **masscan sweep with `-g 88`** (source port 88 / Kerberos) — bypasses Windows Firewall rules on domain-joined networks that permit Kerberos traffic through
-2. **masscan sweep without source port** — catches hosts that filter traffic to port 88
-3. **nmap -sn** with ICMP echo + TCP SYN/ACK probes (target sets ≤ 65,536 hosts only)
+1. **masscan sweep** across `DISCOVERY_MASSCAN_PORTS_INTERNAL` (10 ports: 22, 80, 135, 443, 445, 1433, 3306, 3389, 5985, 8080) with no source-port override (`--retries 1`); `--wait` scales with target count
+2. **nmap -sn** with ICMP echo + TCP SYN/ACK probes — runs **concurrently** with masscan (target sets ≤ 65,536 hosts only)
 
-Both masscan sweeps cover a 10-port list tuned for internal services: `22, 80, 135, 443, 445, 1433, 3306, 3389, 5985, 8080`. For very large ranges (> 262,144 hosts), the list trims to 5 ports to keep peak firewall state entries within safe bounds.
+The masscan sweep rate is capped to **1,000 pps** regardless of `max_rate`. At 1,000 pps and a typical 60-second firewall half-open timeout, peak concurrent state entries stay at ~60,000 — safe for enterprise inline firewalls carrying production traffic. For very large ranges (> 262,144 hosts), the port list trims from 10 to 5 to keep total packet volume bounded.
 
-The sweep rate is capped to **1,000 pps** regardless of `max_rate`. At 1,000 pps and a typical 60-second firewall half-open timeout, peak concurrent state entries stay at ~60,000 — safe for enterprise inline firewalls carrying production traffic.
-
-After both sweeps complete, SpooNMAP compares host counts. If the no-source-port sweep found more hosts, source port 88 is dropped for all subsequent port scans:
-
-```
-No-source-port sweep found more hosts (21) than source-port-88 (9) — dropping --source-port 88 for port scans.
-```
-
-This calibration runs even when `host_discovery` is `False`, so the source-port decision is always data-driven.
+> **Note:** The Windows Firewall Kerberos bypass (`--source-port 88`) used in earlier versions has been removed. The single no-source-port sweep is used for all internal scans.
 
 ### Intelligent tool selection: masscan vs nmap (port discovery)
 
