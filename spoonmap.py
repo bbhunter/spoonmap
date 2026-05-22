@@ -468,7 +468,6 @@ def _nmap_host_discovery(target_file, disc, source_port, exclusions_file, tcp_po
         '--max-retries', '1',
         '-PE',                       # ICMP echo
         f'-PS{tcp_ports}',           # TCP SYN to discovery ports
-        f'-PA{tcp_ports}',           # TCP ACK to discovery ports (bypasses stateful firewalls)
         *(['--source-port', source_port] if source_port else []),
         '-iL', target_file,
         '-oX', output_xml,
