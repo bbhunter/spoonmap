@@ -366,8 +366,7 @@ def _external_host_discovery(target_file, disc, max_rate, exclusions_file, targe
     """
     masscan_ips = _discover_external_masscan(
         target_file, disc, max_rate, exclusions_file, target_count)
-    nmap_ips = _nmap_host_discovery(
-        target_file, disc, '', exclusions_file, DISCOVERY_TCP_PORTS_EXTERNAL)
+    nmap_ips = _nmap_host_discovery(target_file, disc, '', exclusions_file)
     return masscan_ips | nmap_ips
 
 
@@ -385,8 +384,7 @@ def _internal_host_discovery(target_file, disc, max_rate, exclusions_file, targe
     if target_count <= HOST_DISCOVERY_NMAP_THRESHOLD:
         def _run_nmap():
             try:
-                result = _nmap_host_discovery(
-                    target_file, disc, '', exclusions_file, DISCOVERY_TCP_PORTS_INTERNAL)
+                result = _nmap_host_discovery(target_file, disc, '', exclusions_file)
                 nmap_ips.update(result)
             except Exception as exc:
                 nmap_errors.append(exc)
@@ -459,15 +457,14 @@ def _host_discovery(target_file, output_path, max_rate, exclusions_file,
     return discovery_file
 
 
-def _nmap_host_discovery(target_file, disc, source_port, exclusions_file, tcp_ports):
-    """Run nmap -sn (ICMP echo + TCP SYN/ACK probes); return set of live IPs."""
+def _nmap_host_discovery(target_file, disc, source_port, exclusions_file):
+    """Run nmap -sn (ICMP echo probe only); return set of live IPs."""
     output_xml = os.path.join(disc, 'discovery_nmap.xml')
     cmd = [
         'nmap', '-sn', '-T4',
         '--min-parallelism', '256',
         '--max-retries', '1',
-        '-PE',                       # ICMP echo
-        f'-PS{tcp_ports}',           # TCP SYN to discovery ports
+        '-PE',                       # ICMP echo only — TCP SYN probes risk RST from routers for non-existent hosts
         *(['--source-port', source_port] if source_port else []),
         '-iL', target_file,
         '-oX', output_xml,
@@ -1565,25 +1562,22 @@ EXTERNAL_PROBE_PORT_PRIORITY = [
     '8443',
 ]
 
-# TCP ports used for host discovery probes (replace ARP which produces proxy-ARP false positives
-# on virtualised networks where the hypervisor answers every ARP request).
-DISCOVERY_TCP_PORTS_INTERNAL = '22,80,443,445,3389'
-DISCOVERY_TCP_PORTS_EXTERNAL = '22,80,443,8080,8443'
-
-# Ports for the external masscan host-discovery sweep. Swept twice — once with
-# source port 53 and once without — to catch hosts that respond differently
-# depending on the source port. Avoids dangerous IDS-triggering ports like
-# Cisco Smart Install (4786), Docker API (2375), and debug ports.
+# Ports for the external masscan host-discovery sweep. Avoids dangerous
+# IDS-triggering ports like Cisco Smart Install (4786), Docker API (2375),
+# and debug ports.
 DISCOVERY_MASSCAN_PORTS_EXTERNAL = (
     '22,25,80,110,143,179,443,445,587,993,995,1433,3306,3389,5432,8080,8443'
 )
 
-# Ports for the internal masscan host-discovery sweep. Broader than the
-# DISCOVERY_TCP_PORTS_INTERNAL (5 ports) to catch ICMP-blocking hosts, but
-# narrower than external (17 ports) to limit firewall state table pressure.
+# Ports for the internal masscan host-discovery sweep. Narrower than
+# external (17 ports) to limit firewall state table pressure.
 # Covers near-universal Windows services (135 RPC, 445 SMB, 3389 RDP, 5985
 # WinRM) and common cross-platform services (22, 80, 443, 1433, 3306, 8080).
 DISCOVERY_MASSCAN_PORTS_INTERNAL = '22,80,135,443,445,1433,3306,3389,5985,8080'
+
+# Trimmed 5-port list used by _discover_internal_masscan for ranges above
+# INTERNAL_DISCOVERY_STATE_CEILING (/14+) to keep total packet volume bounded.
+DISCOVERY_TCP_PORTS_INTERNAL = '22,80,443,445,3389'
 
 # Rate cap for internal discovery masscan sweeps.  Discovery probes hit all
 # ports simultaneously across every target; at 1000 pps with a typical 60-second
@@ -1593,7 +1587,7 @@ DISCOVERY_MASSCAN_PORTS_INTERNAL = '22,80,135,443,445,1433,3306,3389,5985,8080'
 INTERNAL_DISCOVERY_MAX_RATE = 1000
 
 # Target count above which the internal discovery port list is trimmed from 10
-# to 5 ports (DISCOVERY_TCP_PORTS_INTERNAL).  A /14 (262,144 hosts) × 10 ports
+# to 5 ports.  A /14 (262,144 hosts) × 10 ports
 # pushes total packet count high; at the INTERNAL_DISCOVERY_MAX_RATE cap the
 # rate-bound state ceiling still holds, but trimming reduces scan duration.
 INTERNAL_DISCOVERY_STATE_CEILING = 262_144  # /14 — trim ports above this count
