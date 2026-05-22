@@ -164,14 +164,14 @@ Full port scans (`-p 1-65535`) are capped to half the default to avoid saturatio
 External host discovery runs two sweeps and takes the union:
 
 1. **masscan sweep** across `DISCOVERY_MASSCAN_PORTS_EXTERNAL` — a curated 17-port set chosen to maximise host visibility (`--retries 2`); `--wait` scales with target count (1–3 s)
-2. **nmap -sn** with ICMP echo + TCP SYN/ACK probes
+2. **nmap -sn** with ICMP echo (`-PE`) only
 
 #### Internal scans
 
 Internal host discovery uses a single masscan sweep followed by an optional concurrent nmap `-sn` pass:
 
 1. **masscan sweep** across `DISCOVERY_MASSCAN_PORTS_INTERNAL` (10 ports: 22, 80, 135, 443, 445, 1433, 3306, 3389, 5985, 8080) with no source-port override (`--retries 1`); `--wait` scales with target count
-2. **nmap -sn** with ICMP echo + TCP SYN/ACK probes — runs **concurrently** with masscan (target sets ≤ 65,536 hosts only)
+2. **nmap -sn** with ICMP echo (`-PE`) only — runs **concurrently** with masscan (target sets ≤ 65,536 hosts; skipped for larger ranges)
 
 The masscan sweep rate is capped to **1,000 pps** regardless of `max_rate`. At 1,000 pps and a typical 60-second firewall half-open timeout, peak concurrent state entries stay at ~60,000 — safe for enterprise inline firewalls carrying production traffic. For very large ranges (> 262,144 hosts), the port list trims from 10 to 5 to keep total packet volume bounded.
 
