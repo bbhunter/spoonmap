@@ -368,6 +368,30 @@ def _discovery_wait(target_count: int) -> str:
     return '3'
 
 
+def _stream_masscan_progress(proc):
+    """Read masscan stderr and display its \\r-based progress on one updating stdout line.
+
+    Masscan emits status using bare \\r (no \\n), so readline() would stall
+    until the process exits.  Reading byte-by-byte and splitting on \\r lets
+    us display each update as it arrives.  Clears the line when done.
+    """
+    buf = b''
+    while True:
+        ch = proc.stderr.read(1)
+        if not ch:
+            break
+        if ch == b'\r':
+            line = buf.decode('utf-8', errors='replace').strip()
+            if line:
+                sys.stdout.write(f'\r  {line:<78}')
+                sys.stdout.flush()
+            buf = b''
+        elif ch != b'\n':
+            buf += ch
+    sys.stdout.write('\r' + ' ' * 80 + '\r')
+    sys.stdout.flush()
+
+
 def _discover_external_masscan(target_file, disc, max_rate, exclusions_file, target_count):
     """Single masscan TCP SYN sweep for external host discovery. Returns set of live IPs."""
     xml_file = os.path.join(disc, 'discovery_masscan_external.xml')
@@ -383,13 +407,19 @@ def _discover_external_masscan(target_file, disc, max_rate, exclusions_file, tar
     if exclusions_file:
         masscan_cmd.extend(['--excludefile', exclusions_file])
     term_state = save_terminal_state()
+    progress_thread = None
     try:
-        proc = subprocess.Popen(masscan_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        proc = subprocess.Popen(masscan_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                 preexec_fn=_raise_fd_limit)
+        progress_thread = threading.Thread(target=_stream_masscan_progress, args=(proc,), daemon=True)
+        progress_thread.start()
         proc.wait()
+        progress_thread.join()
     except KeyboardInterrupt:
         proc.kill()
         proc.wait()
+        if progress_thread:
+            progress_thread.join()
         restore_terminal_state(term_state)
         raise
     except FileNotFoundError:
@@ -429,13 +459,19 @@ def _discover_internal_masscan(target_file, disc, max_rate, exclusions_file, tar
     if exclusions_file:
         masscan_cmd.extend(['--excludefile', exclusions_file])
     term_state = save_terminal_state()
+    progress_thread = None
     try:
-        proc = subprocess.Popen(masscan_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        proc = subprocess.Popen(masscan_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                 preexec_fn=_raise_fd_limit)
+        progress_thread = threading.Thread(target=_stream_masscan_progress, args=(proc,), daemon=True)
+        progress_thread.start()
         proc.wait()
+        progress_thread.join()
     except KeyboardInterrupt:
         proc.kill()
         proc.wait()
+        if progress_thread:
+            progress_thread.join()
         restore_terminal_state(term_state)
         raise
     except FileNotFoundError:
