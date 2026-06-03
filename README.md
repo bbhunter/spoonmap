@@ -135,12 +135,12 @@ git update-index --no-skip-worktree ranges.txt
 | `dest_ports` | Array of port strings | Overrides `scan_categories`; use `U:` prefix for UDP |
 | `banner_scan` | `"True"` / `"False"` | Runs nmap -sV against discovered hosts |
 | `script_scan` | `"True"` / `"False"` | Runs NSE security scripts (implies `banner_scan`) |
-| `host_discovery` | `"True"` / `"False"` | Run host discovery before port scanning to narrow the target set (default: True); both External and Internal scans always run the dual masscan calibration probe regardless of this setting |
-| `target_scan` | `"External"` / `"Internal"` | External → source port 53 (unless calibration shows it hurts — see below); Internal → source port 88 |
+| `host_discovery` | `"True"` / `"False"` | Run host discovery before port scanning to narrow the target set (default: True) |
+| `target_scan` | `"External"` / `"Internal"` | Selects discovery port lists and NSE script sets; no source-port override is applied |
 | `max_rate` | Packets/second string | See rate guidance below |
 | `target_file` | Path | One IP, CIDR, or hostname per line; `ranges.txt` is committed as a blank placeholder (see below) |
 | `output_path` | Path | Directory for all output; relative paths resolve to script dir |
-| `exclusions_file` | Path | IPs/CIDRs passed to masscan `--excludefile` |
+| `exclusions_file` | Path | IPs/CIDRs to exclude; SpooNMAP pre-computes the set intersection with the target file and passes only the net target IPs to masscan (see below) |
 | `nmap_threads` | Integer | Concurrent nmap processes (default: 5) |
 | `masscan_batch_size` | Integer | Ports per masscan invocation (default: 5) |
 | `nmap_threshold` | Integer | Work-unit threshold for tool selection (default: 5,000,000 — see below) |
@@ -158,6 +158,16 @@ The adaptive probe phase and category/custom batched scans always use the full `
 Full port scans (`-p 1-65535`) are capped to half the default to avoid saturation.
 
 ### Host discovery
+
+#### Exclusion pre-filtering
+
+Before running any discovery sweep, SpooNMAP computes the **set difference** between the target CIDRs and the exclusion CIDRs in Python and writes the result to `discovery/discovery_targets_filtered.txt`. Masscan receives this pre-filtered file instead of the original target file and no `--excludefile` argument.
+
+Without pre-filtering, masscan builds its randomisation permutation over the full target address space and skips excluded IPs at send time, so the `--max-rate` applies to iterations rather than actual packets — severely degrading effective throughput when most IPs are excluded (e.g. 3.19 M targets with 2.96 M excluded → ~72 effective pps instead of 1,000). Pre-filtering ensures the permutation covers only the hosts masscan will actually probe.
+
+The startup "Target Hosts" count reflects the **actual intersection** of target and exclusion ranges, not simple arithmetic subtraction. The exclusion file may accept CIDR notation, range notation (`A.B.C.D-E.F.G.H`), inline comments, and netmask notation (`A.B.C.D M.M.M.M`).
+
+Live **masscan progress** (rate, % done, time remaining) is streamed to the terminal during discovery and updates in place on a single line.
 
 #### External scans
 
@@ -240,15 +250,13 @@ Inter-scan wait: 29s (target ~256 hosts)
 ```
 <output_path>/
   discovery/
-    resolved_targets.txt        # resolved IPs/CIDRs (input to host discovery)
-    ip_hostname_map.json        # hostname → resolved IP mapping
-    discovery_masscan_sp53.xml          # masscan sweep with source port 53 (external scans)
-    discovery_masscan_nosp.xml          # masscan sweep without source port (external scans)
-    discovery_masscan_sp88.xml          # masscan sweep with source port 88 (internal scans)
-    discovery_masscan_nosp_internal.xml # masscan sweep without source port (internal scans)
-    discovery_nmap.xml                  # nmap -sn XML (external; internal sets ≤ 65,536 hosts)
-    discovery_masscan.xml               # legacy masscan XML (large internal sets, pre-dual-sweep)
-    live_hosts_discovery.txt    # live IPs found by host discovery phase
+    resolved_targets.txt            # resolved IPs/CIDRs (input to host discovery)
+    ip_hostname_map.json            # hostname → resolved IP mapping
+    discovery_targets_filtered.txt  # pre-filtered target CIDRs (targets minus exclusions)
+    discovery_masscan_external.xml  # masscan TCP SYN sweep XML (external scans)
+    discovery_masscan_internal.xml  # masscan TCP SYN sweep XML (internal scans)
+    discovery_nmap.xml              # nmap -sn ICMP XML (external; internal sets ≤ 65,536 hosts)
+    live_hosts_discovery.txt        # live IPs found by host discovery phase
     masscan_results/portN.xml   # raw masscan XML per port (masscan port discovery path)
     live_hosts/portN.txt        # deduplicated IPs per port
   nmap_results/portN.xml        # nmap banner (-sV) XML per port
