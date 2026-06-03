@@ -135,19 +135,49 @@ def _build_discovery_target_file(target_file, exclusions_file, disc):
     returns (target_file, raw_count) unchanged so callers omit --excludefile.
     """
     def _parse_ranges(filepath):
+        """Parse IPs/CIDRs/ranges from a masscan-style target or exclude file.
+
+        Handles three formats masscan accepts but ipaddress rejects:
+          - Inline comments:    10.0.0.0/8 # note
+          - Range notation:     10.0.0.1-10.0.0.254
+          - Netmask notation:   10.0.0.0 255.255.0.0
+        """
         ranges = []
         try:
             with open(filepath) as fh:
                 for line in fh:
-                    line = line.strip()
-                    if not line or line.startswith('#'):
+                    # Strip inline comments before parsing
+                    line = line.split('#')[0].strip()
+                    if not line:
                         continue
+                    # Standard CIDR or bare IP
                     try:
                         net = ipaddress.ip_network(line, strict=False)
                         ranges.append((int(net.network_address),
                                        int(net.broadcast_address)))
+                        continue
                     except ValueError:
                         pass
+                    # Range notation: A.B.C.D-E.F.G.H
+                    if '-' in line:
+                        parts = line.split('-', 1)
+                        try:
+                            start = int(ipaddress.IPv4Address(parts[0].strip()))
+                            end   = int(ipaddress.IPv4Address(parts[1].strip()))
+                            if start <= end:
+                                ranges.append((start, end))
+                            continue
+                        except ValueError:
+                            pass
+                    # Netmask notation: A.B.C.D M.M.M.M
+                    parts = line.split()
+                    if len(parts) == 2:
+                        try:
+                            net = ipaddress.ip_network(f'{parts[0]}/{parts[1]}', strict=False)
+                            ranges.append((int(net.network_address),
+                                           int(net.broadcast_address)))
+                        except ValueError:
+                            pass
         except OSError:
             pass
         return ranges
