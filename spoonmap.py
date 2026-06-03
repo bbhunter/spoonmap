@@ -122,6 +122,96 @@ def _count_hosts_in_file(filepath):
     return count
 
 
+def _build_discovery_target_file(target_file, exclusions_file, disc):
+    """Pre-subtract exclusions from target ranges and write a masscan-ready file.
+
+    Masscan builds its randomization permutation over the full target space
+    before applying --excludefile, so passing a 3M-IP target with 2.96M
+    excluded hosts causes it to iterate at ~72 effective pps instead of 1000.
+    Pre-computing the difference here gives masscan a file containing only the
+    ~230k IPs it will actually probe, restoring full rate efficiency.
+
+    Returns (filtered_file_path, accurate_host_count).  If no exclusions apply,
+    returns (target_file, raw_count) unchanged so callers omit --excludefile.
+    """
+    def _parse_ranges(filepath):
+        ranges = []
+        try:
+            with open(filepath) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    try:
+                        net = ipaddress.ip_network(line, strict=False)
+                        ranges.append((int(net.network_address),
+                                       int(net.broadcast_address)))
+                    except ValueError:
+                        pass
+        except OSError:
+            pass
+        return ranges
+
+    def _merge(ranges):
+        out = []
+        for s, e in sorted(ranges):
+            if out and s <= out[-1][1] + 1:
+                out[-1] = (out[-1][0], max(out[-1][1], e))
+            else:
+                out.append((s, e))
+        return out
+
+    def _subtract(targets, excls):
+        result = []
+        ei = 0
+        for ts, te in targets:
+            cur = ts
+            while ei < len(excls) and excls[ei][1] < cur:
+                ei += 1
+            j = ei
+            while j < len(excls) and excls[j][0] <= te:
+                es, ee = excls[j]
+                if es > cur:
+                    result.append((cur, es - 1))
+                cur = max(cur, ee + 1)
+                if cur > te:
+                    break
+                j += 1
+            if cur <= te:
+                result.append((cur, te))
+        return result
+
+    target_ranges = _parse_ranges(target_file)
+    if not target_ranges:
+        return target_file, 0
+
+    raw_count = sum(e - s + 1 for s, e in target_ranges)
+
+    if not exclusions_file or not os.path.exists(exclusions_file):
+        return target_file, raw_count
+
+    excl_ranges = _parse_ranges(exclusions_file)
+    if not excl_ranges:
+        return target_file, raw_count
+
+    remaining = _subtract(_merge(target_ranges), _merge(excl_ranges))
+    if not remaining:
+        filtered_file = os.path.join(disc, 'discovery_targets_filtered.txt')
+        open(filtered_file, 'w').close()
+        return filtered_file, 0
+
+    filtered_file = os.path.join(disc, 'discovery_targets_filtered.txt')
+    count = 0
+    with open(filtered_file, 'w') as fh:
+        for start, end in remaining:
+            for net in ipaddress.summarize_address_range(
+                    ipaddress.IPv4Address(start), ipaddress.IPv4Address(end)):
+                fh.write(str(net) + '\n')
+                count += net.num_addresses
+
+    return filtered_file, count
+
+
 def ascii_art():
     print(r'''
 ________                   _____   _______  _________________
@@ -432,14 +522,26 @@ def _host_discovery(target_file, output_path, max_rate, exclusions_file,
         print(_COLOR_INFO + f'Resume: skipping host discovery ({count} hosts cached)' + _COLOR_RESET)
         return discovery_file
 
-    target_count = _count_hosts_in_file(target_file) or 0
+    # Pre-subtract exclusions so masscan's permutation only covers actual targets.
+    # Without this, masscan iterates over the full target range at the configured
+    # rate and skips excluded IPs mid-permutation — reducing effective pps to
+    # rate × (included / total).  The filtered file eliminates that overhead.
+    filtered_target, target_count = _build_discovery_target_file(
+        target_file, exclusions_file, disc)
+    # Exclusions are now baked into filtered_target; pass None so sub-functions
+    # don't also add --excludefile to masscan/nmap command lines.
+    discovery_excl = None if filtered_target != target_file else exclusions_file
+    if filtered_target != target_file:
+        print(_COLOR_INFO
+              + f'Host discovery: pre-filtered to {target_count:,} target IPs'
+              + _COLOR_RESET)
 
     if scan_type == 'External':
         live_ips = _external_host_discovery(
-            target_file, disc, max_rate, exclusions_file, target_count)
+            filtered_target, disc, max_rate, discovery_excl, target_count)
     else:  # Internal
         live_ips = _internal_host_discovery(
-            target_file, disc, max_rate, exclusions_file, target_count)
+            filtered_target, disc, max_rate, discovery_excl, target_count)
 
     total = len(live_ips)
     print(_COLOR_PROGRESS + f'Host discovery total: {total} unique live host(s)' + _COLOR_RESET)
