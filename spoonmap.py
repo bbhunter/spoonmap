@@ -845,7 +845,7 @@ def _fname_port(stem: str) -> str:
 
 
 # Result dirs and files written during a scan run.
-_RESULT_DIRS  = ('discovery', 'nmap_results', 'nse_results')
+_RESULT_DIRS  = ('discovery', 'nmap_results', 'nse_results', 'live_hosts')
 _RESULT_FILES = ('all_live_hosts.txt', 'spoonmap_output.xml',
                  'spoonmap_output.json',
                  'findings.txt', 'findings.md', 'findings.json')
