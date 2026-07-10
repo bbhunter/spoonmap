@@ -63,7 +63,7 @@ action = function(host, port)
   if not ok then socket:close(); return nil end
 
   local session = ipmi.parse_open_session_reply(reply)
-  if session.session_payload_type ~= ipmi.PAYLOADS["RMCPPLUSOPEN_REP"] then
+  if not session or session.session_payload_type ~= ipmi.PAYLOADS["RMCPPLUSOPEN_REP"] then
     socket:close(); return nil
   end
   if session.error_code ~= 0 then
@@ -80,7 +80,7 @@ action = function(host, port)
   if not ok then return nil end
 
   local rakp2 = ipmi.parse_rakp_1_reply(reply)
-  if rakp2.session_payload_type ~= ipmi.PAYLOADS["RAKP2"] then
+  if not rakp2 or rakp2.session_payload_type ~= ipmi.PAYLOADS["RAKP2"] then
     return nil
   end
   if rakp2.error_code ~= 0 then

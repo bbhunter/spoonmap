@@ -58,7 +58,7 @@ def save_terminal_state():
     """Save the current terminal state"""
     try:
         return termios.tcgetattr(sys.stdin)
-    except:
+    except (termios.error, OSError):
         return None
 
 def restore_terminal_state(state):
@@ -66,12 +66,12 @@ def restore_terminal_state(state):
     if state:
         try:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, state)
-        except:
+        except (termios.error, OSError):
             pass
     # Always try to reset terminal using stty as a fallback
     try:
         subprocess.run(['stty', 'sane'], check=False, stderr=subprocess.DEVNULL)
-    except:
+    except (OSError, subprocess.SubprocessError):
         pass
 
 def _format_eta(seconds):
@@ -1538,9 +1538,9 @@ def nmap_worker(work_queue, completed_count, total_count, source_port, lock,
                     start_new_session=True,
                 )
 
-                # Poll process to allow interrupt checking
+                # Poll process to allow interrupt checking; wake immediately on interrupt
                 while nmap_process.poll() is None and not interrupt_event.is_set():
-                    threading.Event().wait(0.1)
+                    interrupt_event.wait(0.1)
 
                 if interrupt_event.is_set() and nmap_process.poll() is None:
                     nmap_process.kill()
@@ -1574,7 +1574,7 @@ def nmap_worker(work_queue, completed_count, total_count, source_port, lock,
                             start_new_session=True,
                         )
                         while nse_process.poll() is None and not interrupt_event.is_set():
-                            threading.Event().wait(0.1)
+                            interrupt_event.wait(0.1)
                         if interrupt_event.is_set() and nse_process.poll() is None:
                             nse_process.kill()
                         nse_process.wait()

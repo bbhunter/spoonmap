@@ -156,7 +156,7 @@ action = function(host, port)
   socket:set_timeout(8000)
 
   local ok, err = socket:connect(host, port, "tcp")
-  if not ok then stdnse.debug1("Connect failed: %s", err); return nil end
+  if not ok then stdnse.debug1("Connect failed: %s", err); socket:close(); return nil end
 
   -- 1. Anonymous simple bind
   ok, err = socket:send(ldap_simple_bind(1))

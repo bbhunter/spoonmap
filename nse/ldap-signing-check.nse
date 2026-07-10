@@ -113,7 +113,7 @@ action = function(host, port)
   socket:set_timeout(8000)
 
   local ok, err = socket:connect(host, port, "tcp")
-  if not ok then stdnse.debug1("Connect failed: %s", err); return nil end
+  if not ok then stdnse.debug1("Connect failed: %s", err); socket:close(); return nil end
 
   ok, err = socket:send(ldap_sasl_bind(1, spnego_init(NTLM_NEGOTIATE)))
   if not ok then socket:close(); return nil end

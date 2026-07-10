@@ -38,6 +38,7 @@ action = function(host, port)
   local status, err = socket:connect(host, port, "tcp")
   if not status then
     stdnse.debug1("Connect failed: %s", err)
+    socket:close()
     return nil
   end
 

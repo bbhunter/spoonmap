@@ -48,6 +48,7 @@ local function http_get(host, port, path)
   local ok, err = socket:connect(host, port, "tcp")
   if not ok then
     stdnse.debug1("Connect failed: %s", err)
+    socket:close()
     return nil
   end
   local req = table.concat({
