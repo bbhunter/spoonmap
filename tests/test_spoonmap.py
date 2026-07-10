@@ -22,6 +22,7 @@ from spoonmap import (
     PROBE_PORT_PRIORITY,
     _build_interactive_config,
     _build_nmap_cmd,
+    _handle_previous_results,
     _host_discovery,
     _write_if_changed,
     _write_interactive_config,
@@ -1385,6 +1386,58 @@ class TestNmapUdpDiscoveryResumeFreshness:
                 'U:53', str(target), str(tmp_path), '', None, resume=True)
         assert mock_popen.called
         assert result == {'10.0.0.9'}
+
+
+# ── _handle_previous_results (delete / append / resume prompt) ────────────────
+
+class TestHandlePreviousResults:
+    def test_no_previous_results_returns_resume_unchanged(self):
+        prompt = MagicMock()
+        with patch('spoonmap._previous_results_exist', return_value=False):
+            assert _handle_previous_results('/out', False, prompt) is False
+            assert _handle_previous_results('/out', True, prompt) is True
+        prompt.assert_not_called()
+
+    def test_resume_flag_skips_prompt(self):
+        prompt = MagicMock()
+        with patch('spoonmap._previous_results_exist', return_value=True):
+            assert _handle_previous_results('/out', True, prompt) is True
+        prompt.assert_not_called()
+
+    def test_resume_choice_enables_resume_without_deleting(self):
+        prompt = MagicMock(return_value='r')
+        with patch('spoonmap._previous_results_exist', return_value=True), \
+             patch('spoonmap._delete_previous_results') as del_mock:
+            assert _handle_previous_results('/out', False, prompt) is True
+        del_mock.assert_not_called()
+
+    def test_delete_choice_removes_and_stays_off(self):
+        prompt = MagicMock(return_value='d')
+        with patch('spoonmap._previous_results_exist', return_value=True), \
+             patch('spoonmap._delete_previous_results') as del_mock:
+            assert _handle_previous_results('/out', False, prompt) is False
+        del_mock.assert_called_once_with('/out')
+
+    def test_append_choice_keeps_files_and_stays_off(self):
+        prompt = MagicMock(return_value='a')
+        with patch('spoonmap._previous_results_exist', return_value=True), \
+             patch('spoonmap._delete_previous_results') as del_mock:
+            assert _handle_previous_results('/out', False, prompt) is False
+        del_mock.assert_not_called()
+
+    def test_default_empty_input_is_append(self):
+        prompt = MagicMock(return_value='')
+        with patch('spoonmap._previous_results_exist', return_value=True), \
+             patch('spoonmap._delete_previous_results') as del_mock:
+            assert _handle_previous_results('/out', False, prompt) is False
+        del_mock.assert_not_called()
+
+    def test_invalid_input_reprompts_until_valid(self):
+        prompt = MagicMock(side_effect=['x', 'nonsense', 'r'])
+        with patch('spoonmap._previous_results_exist', return_value=True), \
+             patch('spoonmap._delete_previous_results'):
+            assert _handle_previous_results('/out', False, prompt) is True
+        assert prompt.call_count == 3
 
 
 # ── _cleanup_cmd ──────────────────────────────────────────────────────────────

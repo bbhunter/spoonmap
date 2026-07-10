@@ -3457,6 +3457,42 @@ def _write_interactive_config(config_path, config):
         return False
 
 
+def _handle_previous_results(output_path, resume, prompt_fn=input):
+    """Resolve what to do with pre-existing scan output; return the resume flag.
+
+    If nothing pre-exists, ``resume`` is returned unchanged.  If a resume was
+    already requested (``--resume`` or config), no prompt is shown.  Otherwise
+    the user picks delete / append / resume:
+      - delete  -> remove prior output, resume stays off
+      - append  -> keep prior output, re-run (resume stays off)
+      - resume  -> keep prior output and enable the same freshness-gated skip
+                   logic as ``--resume`` (returns True)
+    """
+    if not _previous_results_exist(output_path):
+        return resume
+    if resume:
+        print(_COLOR_INFO + 'Resuming previous scan...' + _COLOR_RESET)
+        return True
+
+    print(_COLOR_INFO + '\nPrevious scan results detected in output directory.' + _COLOR_RESET)
+    while True:
+        choice = (prompt_fn('Delete previous results, append to them, or resume the scan? '
+                            '[d]elete / [a]ppend / [r]esume (default: append): ')
+                  .strip().lower() or 'a')
+        if choice[0] in ('d', 'a', 'r'):
+            break
+
+    if choice[0] == 'd':
+        _delete_previous_results(output_path)
+        print(_COLOR_INFO + 'Previous results deleted.' + _COLOR_RESET)
+        return False
+    if choice[0] == 'r':
+        print(_COLOR_INFO + 'Resuming previous scan...' + _COLOR_RESET)
+        return True
+    print(_COLOR_INFO + 'Appending to previous results.' + _COLOR_RESET)
+    return False
+
+
 # The Main Guts
 def main():
     global dir_path
@@ -3769,22 +3805,8 @@ def main():
                       + _COLOR_RESET)
             print()
 
-        # Detect previous scan results and ask whether to delete or append
-        if _previous_results_exist(output_path):
-            if resume:
-                print(_COLOR_INFO + 'Resuming previous scan...' + _COLOR_RESET)
-            else:
-                print(_COLOR_INFO + '\nPrevious scan results detected in output directory.' + _COLOR_RESET)
-                while True:
-                    choice = input('Delete previous results or append to them? '
-                                   '[d]elete / [a]ppend (default: append): ').strip().lower() or 'a'
-                    if choice and choice[0] in ('d', 'a'):
-                        break
-                if choice[0] == 'd':
-                    _delete_previous_results(output_path)
-                    print(_COLOR_INFO + 'Previous results deleted.' + _COLOR_RESET)
-                else:
-                    print(_COLOR_INFO + 'Appending to previous results.' + _COLOR_RESET)
+        # Detect previous scan results and ask whether to delete, append, or resume
+        resume = _handle_previous_results(output_path, resume)
 
         scan_start_time = time.time()
 
