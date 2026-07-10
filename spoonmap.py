@@ -3375,6 +3375,58 @@ def _filter_udp_live_hosts(output_path):
     return confirmed_counts
 
 
+def _build_interactive_config(scan_categories, dest_ports, scan_type, banner_scan,
+                              script_scan, target_scan, max_rate, target_file,
+                              output_path, exclusions_file, nmap_threads,
+                              masscan_batch_size, nmap_threshold, host_discovery):
+    """Build a config.json-compatible dict from interactively collected options.
+
+    The result round-trips through main()'s config loader: reloading it
+    reproduces the same scan without prompting.  A custom port list is stored
+    under ``dest_ports``; an All/Full/category selection under
+    ``scan_categories``.  ``resume`` is written as ``"False"`` so a plain
+    re-run still surfaces the delete/append prompt — resuming is opt-in via the
+    ``--resume`` flag.
+    """
+    config = {
+        'banner_scan': 'True' if banner_scan else 'False',
+        'script_scan': 'True' if script_scan else 'False',
+        'host_discovery': 'True' if host_discovery else 'False',
+        'resume': 'False',
+        'target_scan': target_scan,
+        'max_rate': str(max_rate),
+        'nmap_threads': int(nmap_threads),
+        'masscan_batch_size': int(masscan_batch_size),
+        'nmap_threshold': int(nmap_threshold),
+        'target_file': target_file,
+        'output_path': output_path,
+        'exclusions_file': exclusions_file or '',
+    }
+    if scan_type == 'Custom':
+        config['dest_ports'] = list(dest_ports)
+    elif scan_categories is not None:
+        config['scan_categories'] = scan_categories
+    return config
+
+
+def _write_interactive_config(config_path, config):
+    """Write *config* to *config_path* as pretty JSON. Returns True on success.
+
+    Never raises: a failed write only means resume via config.json is
+    unavailable, which must not abort an otherwise-valid scan.
+    """
+    try:
+        with open(config_path, 'w') as fh:
+            json.dump(config, fh, indent=4)
+            fh.write('\n')
+        return True
+    except OSError as e:
+        print(_COLOR_ERROR
+              + f'Warning: could not write {config_path} for resume support: {e}'
+              + _COLOR_RESET)
+        return False
+
+
 # The Main Guts
 def main():
     global dir_path
@@ -3387,6 +3439,7 @@ def main():
         ascii_art()
 
         scan_type = ''
+        scan_categories = None  # canonical selection for config.json round-trip
         dest_ports = []
         banner_scan = ''
         script_scan = ''
@@ -3409,7 +3462,9 @@ def main():
         if '--cleanup' in sys.argv:
             _cleanup_cmd(dir_path)  # prints result and exits
         resume = '--resume' in sys.argv
+        config_loaded = False
         if os.path.exists(f'{dir_path}/config.json'):
+            config_loaded = True
             with open(f'{dir_path}/config.json') as config:
                 config_parser = json.load(config)
 
@@ -3443,7 +3498,9 @@ def main():
             max_rate = config_parser['max_rate']
             target_file = config_parser['target_file']
             output_path = config_parser['output_path']
-            exclusions_file = config_parser['exclusions_file']
+            # Absent or empty means "no exclusions" — normalize to None so it is
+            # neither re-prompted nor passed as an empty --excludefile.
+            exclusions_file = config_parser.get('exclusions_file') or None
             nmap_threads = config_parser.get('nmap_threads', 5)
             masscan_batch_size = int(config_parser.get('masscan_batch_size', 5))
             nmap_threshold = int(config_parser.get('nmap_threshold', 5_000_000))
@@ -3476,6 +3533,7 @@ def main():
 
                 if selection in (str(full_n), 'full', 'f'):
                     scan_type = 'Full'
+                    scan_categories = 'Full'
                     dest_ports = ['1-65535']
                     break
 
@@ -3493,6 +3551,7 @@ def main():
                 if not selection:
                     # Default: all categories
                     scan_type = 'All'
+                    scan_categories = 'All'
                     all_ports = [p for cat in SERVICE_CATEGORIES.values() for p in cat]
                     dest_ports = [p for p in all_ports if not p.startswith('U:')] + \
                                  [p for p in all_ports if p.startswith('U:')]
@@ -3504,6 +3563,7 @@ def main():
                     if all(1 <= i <= len(category_names) for i in indices):
                         selected = [category_names[i - 1] for i in indices]
                         scan_type = ', '.join(selected)
+                        scan_categories = selected
                         all_ports = [p for name in selected for p in SERVICE_CATEGORIES[name]]
                         dest_ports = [p for p in all_ports if not p.startswith('U:')] + \
                                      [p for p in all_ports if p.startswith('U:')]
@@ -3603,7 +3663,7 @@ def main():
                 if os.path.exists(target_file):
                     break
 
-        if not exclusions_file:
+        if not exclusions_file and not config_loaded:
             exclusions_choice = 'n'
             exclusions_choice = input(f'\nWould you like to exclude any hosts?  (default: No) '
                 ) or exclusions_choice
@@ -3658,6 +3718,26 @@ def main():
                 host_line = f'Target Hosts: {target_count:,}'
             print(_COLOR_RESULT + host_line + _COLOR_RESET)
         print()
+
+        # Persist interactively-collected settings to config.json so a later
+        # `--resume` run reloads them and skips all prompts — giving console
+        # users the same resume support as config.json users.  Only written when
+        # no config.json was loaded this run (interactive path); the file is
+        # gitignored and absent in that case, so this never overwrites one.
+        if not config_loaded:
+            interactive_config = _build_interactive_config(
+                scan_categories, dest_ports, scan_type, banner_scan, script_scan,
+                target_scan, max_rate, target_file, output_path, exclusions_file,
+                nmap_threads, masscan_batch_size, nmap_threshold, host_discovery,
+            )
+            config_json_path = f'{dir_path}/config.json'
+            if _write_interactive_config(config_json_path, interactive_config):
+                print(_COLOR_INFO
+                      + f'Settings saved to {config_json_path} — re-run with '
+                      + '--resume to continue this scan; delete the file to be '
+                      + 'prompted again.'
+                      + _COLOR_RESET)
+            print()
 
         # Detect previous scan results and ask whether to delete or append
         if _previous_results_exist(output_path):

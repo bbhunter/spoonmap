@@ -19,7 +19,9 @@ from spoonmap import (
     SLOW_PORTS,
     INTERNAL_PORT_SCRIPTS,
     PROBE_PORT_PRIORITY,
+    _build_interactive_config,
     _build_nmap_cmd,
+    _write_interactive_config,
     _discover_internal_masscan,
     _discovery_wait,
     _internal_host_discovery,
@@ -1117,6 +1119,129 @@ class TestConfigSourcePort:
 
     def test_external_scan_uses_source_port_53(self):
         assert self._source_port_for('External') == '53'
+
+
+# ── interactive config persistence ───────────────────────────────────────────
+
+class TestBuildInteractiveConfig:
+    """_build_interactive_config output must round-trip through the loader."""
+
+    def _resolve(self, config):
+        """Replicate main()'s config loader for scan_type/dest_ports derivation."""
+        scan_categories = config.get('scan_categories', 'All')
+        all_ports = []
+        scan_type = ''
+        if scan_categories == 'All' or scan_categories == ['All']:
+            scan_type = 'All'
+            all_ports = [p for cat in SERVICE_CATEGORIES.values() for p in cat]
+        elif scan_categories in ('Full', ['Full']):
+            scan_type = 'Full'
+            all_ports = ['1-65535']
+        elif isinstance(scan_categories, list):
+            valid = [c for c in scan_categories if c in SERVICE_CATEGORIES]
+            scan_type = ', '.join(valid)
+            all_ports = [p for name in valid for p in SERVICE_CATEGORIES[name]]
+        dest_ports = [p for p in all_ports if not p.startswith('U:')] + \
+                     [p for p in all_ports if p.startswith('U:')]
+        if config.get('dest_ports'):
+            dest_ports = config['dest_ports']
+            scan_type = 'Custom'
+        return scan_type, dest_ports
+
+    def _dest_ports_for(self, categories):
+        all_ports = [p for name in categories for p in SERVICE_CATEGORIES[name]]
+        return [p for p in all_ports if not p.startswith('U:')] + \
+               [p for p in all_ports if p.startswith('U:')]
+
+    def test_category_list_round_trips(self):
+        selected = ['Web', 'Database']
+        dest_ports = self._dest_ports_for(selected)
+        cfg = _build_interactive_config(
+            selected, dest_ports, 'Web, Database', True, False, 'Internal',
+            '2000', '/t/ranges.txt', '/t/out', None, 5, 5, 5_000_000, True)
+        assert cfg['scan_categories'] == selected
+        assert 'dest_ports' not in cfg
+        assert self._resolve(cfg) == ('Web, Database', dest_ports)
+
+    def test_full_round_trips(self):
+        cfg = _build_interactive_config(
+            'Full', ['1-65535'], 'Full', True, False, 'External',
+            '20000', '/t/r', '/t/o', None, 5, 5, 5_000_000, True)
+        assert cfg['scan_categories'] == 'Full'
+        assert self._resolve(cfg) == ('Full', ['1-65535'])
+
+    def test_all_round_trips(self):
+        dest_ports = [p for cat in SERVICE_CATEGORIES.values() for p in cat]
+        cfg = _build_interactive_config(
+            'All', dest_ports, 'All', True, False, 'Internal',
+            '2000', '/t/r', '/t/o', None, 5, 5, 5_000_000, True)
+        assert cfg['scan_categories'] == 'All'
+        assert self._resolve(cfg)[0] == 'All'
+
+    def test_custom_writes_dest_ports_not_categories(self):
+        cfg = _build_interactive_config(
+            None, ['80', '443', 'U:53'], 'Custom', True, False, 'External',
+            '20000', '/t/r', '/t/o', None, 5, 5, 5_000_000, True)
+        assert cfg['dest_ports'] == ['80', '443', 'U:53']
+        assert 'scan_categories' not in cfg
+        assert self._resolve(cfg) == ('Custom', ['80', '443', 'U:53'])
+
+    def test_booleans_and_rate_serialize_as_strings(self):
+        cfg = _build_interactive_config(
+            'All', [], 'All', True, False, 'Internal', 2000,
+            'r', 'o', None, 5, 5, 5_000_000, False)
+        assert cfg['banner_scan'] == 'True'
+        assert cfg['script_scan'] == 'False'
+        assert cfg['host_discovery'] == 'False'
+        assert cfg['max_rate'] == '2000'
+        assert cfg['resume'] == 'False'
+
+    def test_exclusions_none_becomes_empty_string(self):
+        cfg = _build_interactive_config(
+            'All', [], 'All', True, False, 'Internal', '2000',
+            'r', 'o', None, 5, 5, 5_000_000, True)
+        assert cfg['exclusions_file'] == ''
+
+    def test_exclusions_path_preserved(self):
+        cfg = _build_interactive_config(
+            'All', [], 'All', True, False, 'Internal', '2000',
+            'r', 'o', '/etc/excl.txt', 5, 5, 5_000_000, True)
+        assert cfg['exclusions_file'] == '/etc/excl.txt'
+
+    def test_numeric_fields_are_ints(self):
+        cfg = _build_interactive_config(
+            'All', [], 'All', True, False, 'Internal', '2000',
+            'r', 'o', None, '7', '3', '1000000', True)
+        assert cfg['nmap_threads'] == 7
+        assert cfg['masscan_batch_size'] == 3
+        assert cfg['nmap_threshold'] == 1_000_000
+
+
+class TestWriteInteractiveConfig:
+    def test_writes_valid_json(self, tmp_path):
+        path = str(tmp_path / 'config.json')
+        cfg = {'banner_scan': 'True', 'target_scan': 'Internal'}
+        assert _write_interactive_config(path, cfg) is True
+        with open(path) as fh:
+            assert json.load(fh) == cfg
+
+    def test_returns_false_on_unwritable_path(self, tmp_path, capsys):
+        path = str(tmp_path / 'nonexistent_dir' / 'config.json')
+        assert _write_interactive_config(path, {'a': 'b'}) is False
+        assert 'could not write' in capsys.readouterr().out
+
+    def test_build_then_write_round_trips(self, tmp_path):
+        selected = ['Web']
+        all_ports = [p for name in selected for p in SERVICE_CATEGORIES[name]]
+        dest_ports = [p for p in all_ports if not p.startswith('U:')] + \
+                     [p for p in all_ports if p.startswith('U:')]
+        cfg = _build_interactive_config(
+            selected, dest_ports, 'Web', True, False, 'Internal', '2000',
+            'r', 'o', None, 5, 5, 5_000_000, True)
+        path = str(tmp_path / 'config.json')
+        assert _write_interactive_config(path, cfg) is True
+        with open(path) as fh:
+            assert json.load(fh) == cfg
 
 
 # ── _cleanup_cmd ──────────────────────────────────────────────────────────────

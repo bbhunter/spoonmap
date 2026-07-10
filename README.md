@@ -89,6 +89,8 @@ To scan all 65535 ports, set `"scan_categories": "Full"`.
 For a fully custom port list, omit `scan_categories` and use `"dest_ports": ["80","443","U:53"]` instead.
 UDP ports are specified with a `U:` prefix (e.g. `"U:53"`).
 
+When you answer the interactive prompts, the selected options are written to `config.json` before the scan begins (this file is created only when one does not already exist). This means an interrupted interactive scan can be resumed the same way as a config-driven one — just re-run with `--resume`, and all prompts are skipped. Delete `config.json` to be prompted again from scratch.
+
 If a previous scan's output is detected in `output_path`, the tool offers to delete it or append to it.
 
 To resume an interrupted scan without any prompts, use the `--resume` flag:

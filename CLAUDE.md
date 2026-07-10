@@ -29,7 +29,7 @@ uv run pytest tests/test_spoonmap.py::TestGenerateFindings  # single class
 
 The entire tool is a single script: `spoonmap.py`. Execution flow:
 
-1. `main()` — loads `config.json` if present, otherwise runs interactive prompts to collect: scan type, banner scan flag, internal/external target, max rate, output path, target file, exclusions file
+1. `main()` — loads `config.json` if present, otherwise runs interactive prompts to collect: scan type, banner scan flag, internal/external target, max rate, output path, target file, exclusions file. When prompts are used (no `config.json` existed), the collected options are persisted to `config.json` via `_build_interactive_config()` / `_write_interactive_config()` before the scan starts, so the run can later be resumed with `--resume` and no prompts. A loaded `config.json` sets `config_loaded=True`, which suppresses the exclusions prompt and the config write.
 2. `preprocess_targets()` — reads the target file; resolves hostnames via DNS to IPs; writes `discovery/resolved_targets.txt` and `discovery/ip_hostname_map.json`
 3. `_host_discovery()` — determines live hosts before port scanning (skipped if `host_discovery=False`); delegates to `_internal_host_discovery()` or `_external_host_discovery()` depending on scan type
 4. `mass_scan()` — iterates over each port, runs masscan as a subprocess, parses XML output, deduplicates IPs per port using in-memory sets, writes `discovery/live_hosts/port<N>.txt`
