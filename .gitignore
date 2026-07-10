@@ -6,6 +6,8 @@ __pycache__/
 all_live_hosts.txt
 resolved_targets.txt
 ip_hostname_map.json
+discovery/
+nse_results/
 masscan_results/
 live_hosts/
 nmap_results/

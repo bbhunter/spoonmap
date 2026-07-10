@@ -101,7 +101,7 @@ To resume an interrupted scan without any prompts, use the `--resume` flag:
 uv run spoonmap.py --resume
 ```
 
-`--resume` skips completed port discovery whose output XML is newer than `resolved_targets.txt`, loads the pre-existing live host lists, and continues from where it left off. If `ranges.txt` was changed since the last run, any discovery output that pre-dates the new target file is automatically re-run. nmap banner/script results are always resumed (existing `nmap_results/portN.xml` files are skipped unconditionally). Resume can also be enabled via `config.json` with `"resume": "True"`.
+`--resume` reuses completed **host discovery** and **port discovery** whose output is newer than `resolved_targets.txt`, loads the pre-existing live host lists, and continues from where it left off. Because `resolved_targets.txt` is only rewritten when the resolved target set actually changes, resuming with an unchanged `ranges.txt` skips discovery entirely (no re-scan). If `ranges.txt` changed since the last run, `resolved_targets.txt` is rewritten with a newer timestamp and any discovery output that now pre-dates it — host and port — is automatically re-run so newly added ranges are not missed. nmap banner/script results are always resumed (existing `nmap_results/portN.xml` files are skipped unconditionally). Resume can also be enabled via `config.json` with `"resume": "True"`.
 
 To remove scan data non-interactively, use the `--cleanup` flag:
 

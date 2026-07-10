@@ -295,6 +295,25 @@ def resolve_hostname(hostname):
         print(_COLOR_ERROR + f'Warning: Could not resolve hostname {hostname}: {e}' + _COLOR_RESET)
         return None
 
+def _write_if_changed(path, content):
+    """Write *content* to *path* only if it differs from the current contents.
+
+    Preserves the file's mtime when the content is unchanged so mtime-based
+    resume freshness checks stay valid across re-runs (e.g. an unchanged
+    resolved_targets.txt must not appear newer than the discovery output it
+    produced).  Returns True if the file was (re)written, False if left as-is.
+    """
+    try:
+        with open(path) as fh:
+            if fh.read() == content:
+                return False
+    except (OSError, UnicodeDecodeError):
+        pass  # missing/unreadable → (re)write below
+    with open(path, 'w') as fh:
+        fh.write(content)
+    return True
+
+
 def preprocess_targets(target_file, output_path):
     """
     Preprocess the target file to separate hostnames from IPs.
@@ -332,17 +351,17 @@ def preprocess_targets(target_file, output_path):
                 # It's already an IP or CIDR, add as-is
                 masscan_targets.append(line)
 
-    # Write resolved IP list (used by both nmap and masscan paths)
+    # Write resolved IP list (used by both nmap and masscan paths).  Rewritten
+    # only when the content changed, so an unchanged target set preserves the
+    # file's mtime and resume correctly skips discovery already completed against
+    # it; a changed target set bumps the mtime and forces re-discovery.
     os.makedirs(_disc(output_path), exist_ok=True)
     masscan_file = os.path.join(_disc(output_path), 'resolved_targets.txt')
-    with open(masscan_file, 'w') as f:
-        for target in masscan_targets:
-            f.write(f'{target}\n')
+    _write_if_changed(masscan_file, ''.join(f'{target}\n' for target in masscan_targets))
 
-    # Save IP-to-hostname mapping
+    # Save IP-to-hostname mapping (also content-stable to avoid needless churn)
     mapping_file = os.path.join(_disc(output_path), 'ip_hostname_map.json')
-    with open(mapping_file, 'w') as f:
-        json.dump(ip_to_hostname, f, indent=2)
+    _write_if_changed(mapping_file, json.dumps(ip_to_hostname, indent=2))
 
     print(_COLOR_INFO + f'Resolved {len(ip_to_hostname)} hostnames to IPs' + _COLOR_RESET)
     print(_COLOR_INFO + f'Target file: {masscan_file}' + _COLOR_RESET)
@@ -582,7 +601,13 @@ def _host_discovery(target_file, output_path, max_rate, exclusions_file,
     os.makedirs(disc, exist_ok=True)
     discovery_file = os.path.join(disc, 'live_hosts_discovery.txt')
 
-    if resume and os.path.exists(discovery_file):
+    # Resume: reuse cached discovery only if it is newer than the target file.
+    # If the target set changed since the cache was written, re-discover so
+    # newly added ranges are not silently skipped.
+    targets_mtime = os.path.getmtime(target_file) if os.path.exists(target_file) else 0
+    if (resume
+            and os.path.exists(discovery_file)
+            and os.path.getmtime(discovery_file) >= targets_mtime):
         with open(discovery_file) as fh:
             count = sum(1 for line in fh if line.strip())
         print(_COLOR_INFO + f'Resume: skipping host discovery ({count} hosts cached)' + _COLOR_RESET)
@@ -887,7 +912,12 @@ def _nmap_udp_discovery(udp_port, target_file, output_path, source_port,
     port_num = udp_port[2:]          # strip 'U:'
     output_file = f'{_disc(output_path)}/masscan_results/port{_port_fname(udp_port)}.xml'
 
-    if resume and os.path.exists(output_file):
+    # Resume: reuse cached UDP results only if newer than the target file, so a
+    # changed target set forces a re-scan rather than reusing stale hosts.
+    targets_mtime = os.path.getmtime(target_file) if os.path.exists(target_file) else 0
+    if (resume
+            and os.path.exists(output_file)
+            and os.path.getmtime(output_file) >= targets_mtime):
         live_file = f'{_disc(output_path)}/live_hosts/port{_port_fname(udp_port)}.txt'
         if os.path.exists(live_file):
             with open(live_file) as fh:

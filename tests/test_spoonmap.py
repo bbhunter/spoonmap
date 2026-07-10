@@ -1,6 +1,7 @@
 """Tests for spoonmap.py"""
 import datetime
 import json
+import os
 import textwrap
 from unittest.mock import MagicMock, patch
 
@@ -21,8 +22,11 @@ from spoonmap import (
     PROBE_PORT_PRIORITY,
     _build_interactive_config,
     _build_nmap_cmd,
+    _host_discovery,
+    _write_if_changed,
     _write_interactive_config,
     _discover_internal_masscan,
+    preprocess_targets,
     _discovery_wait,
     _internal_host_discovery,
     _merge_host_xml,
@@ -1242,6 +1246,145 @@ class TestWriteInteractiveConfig:
         assert _write_interactive_config(path, cfg) is True
         with open(path) as fh:
             assert json.load(fh) == cfg
+
+
+# ── resume freshness (idempotent target write + staleness gates) ──────────────
+
+class TestWriteIfChanged:
+    def test_creates_missing_file(self, tmp_path):
+        p = tmp_path / 'f.txt'
+        assert _write_if_changed(str(p), 'hello') is True
+        assert p.read_text() == 'hello'
+
+    def test_preserves_mtime_when_unchanged(self, tmp_path):
+        p = tmp_path / 'f.txt'
+        p.write_text('same')
+        os.utime(str(p), (1000, 1000))
+        assert _write_if_changed(str(p), 'same') is False
+        assert os.path.getmtime(str(p)) == 1000  # untouched
+
+    def test_rewrites_and_bumps_mtime_when_changed(self, tmp_path):
+        p = tmp_path / 'f.txt'
+        p.write_text('old')
+        os.utime(str(p), (1000, 1000))
+        assert _write_if_changed(str(p), 'new') is True
+        assert p.read_text() == 'new'
+        assert os.path.getmtime(str(p)) > 1000
+
+
+class TestPreprocessTargetsIdempotent:
+    """resolved_targets.txt must keep its mtime when the target set is unchanged."""
+
+    def test_unchanged_targets_preserve_mtime(self, tmp_path, capsys):
+        target = tmp_path / 'ranges.txt'
+        target.write_text('10.0.0.0/24\n192.168.1.1\n')
+        out = tmp_path / 'out'
+        preprocess_targets(str(target), str(out))
+        resolved = out / 'discovery' / 'resolved_targets.txt'
+        os.utime(str(resolved), (1000, 1000))
+        preprocess_targets(str(target), str(out))
+        assert os.path.getmtime(str(resolved)) == 1000
+
+    def test_changed_targets_bump_mtime(self, tmp_path, capsys):
+        target = tmp_path / 'ranges.txt'
+        target.write_text('10.0.0.0/24\n')
+        out = tmp_path / 'out'
+        preprocess_targets(str(target), str(out))
+        resolved = out / 'discovery' / 'resolved_targets.txt'
+        os.utime(str(resolved), (1000, 1000))
+        target.write_text('10.0.0.0/24\n192.168.5.5\n')
+        preprocess_targets(str(target), str(out))
+        assert os.path.getmtime(str(resolved)) > 1000
+        assert '192.168.5.5' in resolved.read_text()
+
+
+class TestHostDiscoveryResumeFreshness:
+    def _setup(self, tmp_path):
+        out = tmp_path / 'out'
+        disc = out / 'discovery'
+        disc.mkdir(parents=True)
+        target = disc / 'resolved_targets.txt'
+        target.write_text('10.0.0.1\n')
+        cache = disc / 'live_hosts_discovery.txt'
+        cache.write_text('10.0.0.1\n')
+        return out, target, cache
+
+    def test_fresh_cache_is_reused(self, tmp_path, capsys):
+        out, target, cache = self._setup(tmp_path)
+        os.utime(str(target), (1000, 1000))
+        os.utime(str(cache), (2000, 2000))  # cache newer than targets
+        with patch('spoonmap._internal_host_discovery') as m:
+            result = _host_discovery(str(target), str(out), '1000', None,
+                                     scan_type='Internal', resume=True)
+        assert result == str(cache)
+        assert not m.called
+        assert 'skipping host discovery' in capsys.readouterr().out
+
+    def test_stale_cache_triggers_rediscovery(self, tmp_path, capsys):
+        out, target, cache = self._setup(tmp_path)
+        os.utime(str(cache), (1000, 1000))   # cache older
+        os.utime(str(target), (2000, 2000))  # targets newer → stale
+        with patch('spoonmap._build_discovery_target_file',
+                   return_value=(str(target), 1)), \
+             patch('spoonmap._internal_host_discovery',
+                   return_value={'10.9.9.9'}) as m:
+            result = _host_discovery(str(target), str(out), '1000', None,
+                                     scan_type='Internal', resume=True)
+        assert m.called
+        assert result == str(cache)
+        assert '10.9.9.9' in cache.read_text()
+
+
+class TestNmapUdpDiscoveryResumeFreshness:
+    def _setup(self, tmp_path):
+        disc = tmp_path / 'discovery'
+        (disc / 'masscan_results').mkdir(parents=True)
+        (disc / 'live_hosts').mkdir(parents=True)
+        target = disc / 'resolved_targets.txt'
+        target.write_text('10.0.0.1\n')
+        xml = disc / 'masscan_results' / 'portU_53.xml'
+        xml.write_text('<nmaprun/>')
+        live = disc / 'live_hosts' / 'portU_53.txt'
+        live.write_text('10.0.0.5\n')
+        return target, xml, live
+
+    def test_fresh_cache_reused_without_scanning(self, tmp_path):
+        target, xml, live = self._setup(tmp_path)
+        os.utime(str(target), (1000, 1000))
+        os.utime(str(xml), (2000, 2000))  # cached XML newer than targets
+        spoonmap.output_path = str(tmp_path)
+        with patch('spoonmap.subprocess.Popen') as mock_popen:
+            result = spoonmap._nmap_udp_discovery(
+                'U:53', str(target), str(tmp_path), '', None, resume=True)
+        assert result == {'10.0.0.5'}
+        assert not mock_popen.called
+
+    def test_stale_cache_triggers_rescan(self, tmp_path):
+        target, xml, live = self._setup(tmp_path)
+        fresh_xml = (
+            '<?xml version="1.0"?>'
+            '<nmaprun><host>'
+            '<address addr="10.0.0.9" addrtype="ipv4"/>'
+            '<ports><port protocol="udp" portid="53">'
+            '<state state="open"/></port></ports>'
+            '</host></nmaprun>'
+        )
+        # Fresh content but a stale mtime: nmap (mocked) would rewrite the XML
+        # *after* the freshness check, so the check must see the old mtime.
+        xml.write_text(fresh_xml)
+        os.utime(str(xml), (1000, 1000))
+        os.utime(str(target), (2000, 2000))  # targets newer → stale
+        spoonmap.output_path = str(tmp_path)
+        with patch('spoonmap.subprocess.Popen') as mock_popen, \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            mock_proc = MagicMock()
+            mock_proc.wait.return_value = 0
+            mock_popen.return_value = mock_proc
+            result = spoonmap._nmap_udp_discovery(
+                'U:53', str(target), str(tmp_path), '', None, resume=True)
+        assert mock_popen.called
+        assert result == {'10.0.0.9'}
 
 
 # ── _cleanup_cmd ──────────────────────────────────────────────────────────────
