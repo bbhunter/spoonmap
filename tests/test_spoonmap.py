@@ -22,6 +22,8 @@ from spoonmap import (
     PROBE_PORT_PRIORITY,
     _build_interactive_config,
     _build_nmap_cmd,
+    _external_exposure_scripts,
+    _summarize_vulns,
     _handle_previous_results,
     _host_discovery,
     _write_if_changed,
@@ -277,9 +279,10 @@ class TestLineCount:
 # ── _write_findings_txt ───────────────────────────────────────────────────────
 
 SAMPLE_FINDINGS = [
-    ('HIGH',   '10.0.0.1', 'tcp/21',   'Anonymous FTP',      'Login allowed'),
+    ('HIGH',   '10.0.0.4', 'tcp/445',  'SMBv2 Signing Not Required', 'no signing'),
     ('MEDIUM', '10.0.0.2', 'tcp/22',   'Weak SSH Algorithms', 'arcfour offered'),
-    ('INFO',   '10.0.0.3', 'tcp/1433', 'SQL Server Found',    'version info'),
+    ('LOW',    '10.0.0.1', 'tcp/21',   'Anonymous FTP',      'Login allowed'),
+    ('LOW',    '10.0.0.3', 'tcp/1433', 'SQL Server Found',    'version info'),
 ]
 
 
@@ -293,7 +296,7 @@ class TestWriteFindingsTxt:
         content = (tmp_path / 'findings.txt').read_text()
         assert 'HIGH' in content
         assert 'MEDIUM' in content
-        assert 'INFO' in content
+        assert 'LOW' in content
 
     def test_contains_host_and_title(self, tmp_path):
         _write_findings_txt(str(tmp_path), 'Internal', SAMPLE_FINDINGS)
@@ -330,7 +333,7 @@ class TestWriteFindingsTxt:
     def test_severity_ordering_in_output(self, tmp_path):
         _write_findings_txt(str(tmp_path), 'Internal', SAMPLE_FINDINGS)
         content = (tmp_path / 'findings.txt').read_text()
-        assert content.index('HIGH') < content.index('MEDIUM') < content.index('INFO')
+        assert content.index('HIGH') < content.index('MEDIUM') < content.index('LOW')
 
     def test_openai_extra_cmds_use_bare_port_number(self, tmp_path):
         # Regression: {port} must be the bare number, not the internal proto/port.
@@ -405,9 +408,9 @@ class TestWriteFindingsMd:
 
     def test_multiple_hosts_same_finding_single_heading(self, tmp_path):
         findings = [
-            ('HIGH', '10.0.0.1', 'tcp/21', 'Anonymous FTP', 'Login allowed'),
-            ('HIGH', '10.0.0.2', 'tcp/21', 'Anonymous FTP', 'Login allowed'),
-            ('HIGH', '10.0.0.3', 'tcp/21', 'Anonymous FTP', 'Login allowed'),
+            ('LOW', '10.0.0.1', 'tcp/21', 'Anonymous FTP', 'Login allowed'),
+            ('LOW', '10.0.0.2', 'tcp/21', 'Anonymous FTP', 'Login allowed'),
+            ('LOW', '10.0.0.3', 'tcp/21', 'Anonymous FTP', 'Login allowed'),
         ]
         _write_findings_md(str(tmp_path), 'Internal', findings)
         content = (tmp_path / 'findings.md').read_text()
@@ -418,8 +421,8 @@ class TestWriteFindingsMd:
 
     def test_different_findings_same_severity_separate_headings(self, tmp_path):
         findings = [
-            ('HIGH', '10.0.0.1', 'tcp/21', 'Anonymous FTP', 'Login allowed'),
-            ('HIGH', '10.0.0.2', 'tcp/22', 'Weak SSH Auth', 'password accepted'),
+            ('LOW', '10.0.0.1', 'tcp/21', 'Anonymous FTP', 'Login allowed'),
+            ('LOW', '10.0.0.2', 'tcp/22', 'Weak SSH Auth', 'password accepted'),
         ]
         _write_findings_md(str(tmp_path), 'External', findings)
         content = (tmp_path / 'findings.md').read_text()
@@ -524,14 +527,20 @@ def nmap_dir(tmp_path):
 class TestGenerateFindings:
     # ── anonymous FTP ────────────────────────────────────────────────────────
 
-    def test_anonymous_ftp_detected(self, nmap_dir):
+    def test_anonymous_ftp_detected_rated_low_with_review_note(self, nmap_dir):
         xml = _nmap_xml('10.0.0.1', 'tcp', '21',
                         scripts={'ftp-anon': 'Anonymous FTP login allowed'})
         (nmap_dir / 'nse_results' / 'port21.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
-        content = (nmap_dir / 'findings.txt').read_text()
-        assert 'Anonymous FTP' in content
-        assert '10.0.0.1' in content
+        txt = (nmap_dir / 'findings.txt').read_text()
+        assert 'Anonymous FTP' in txt
+        assert '10.0.0.1' in txt
+        # Rated LOW by default with a reviewer escalation note
+        import json as _json
+        records = _json.loads((nmap_dir / 'findings.json').read_text())
+        ftp = [r for r in records if r['title'] == 'Anonymous FTP']
+        assert ftp and ftp[0]['severity'] == 'LOW'
+        assert 'REVIEW REQUIRED' in ftp[0]['detail']
 
     def test_anonymous_ftp_not_triggered_when_denied(self, nmap_dir):
         xml = _nmap_xml('10.0.0.1', 'tcp', '21',
@@ -876,11 +885,11 @@ class TestGenerateFindings:
         assert not (tmp_path / 'findings.txt').exists()
 
     def test_severity_order_in_output(self, nmap_dir):
-        # HIGH from ftp-anon, INFO from ms-sql-info — HIGH must come first
+        # HIGH from nfs-showmount, LOW from ms-sql-info — HIGH must come first
         # ms-sql-info is a hostrule script — appears under <hostscript>
-        (nmap_dir / 'nse_results' / 'port21.xml').write_text(
-            _nmap_xml('10.0.0.1', 'tcp', '21',
-                      scripts={'ftp-anon': 'Anonymous FTP login allowed'})
+        (nmap_dir / 'nse_results' / 'port111.xml').write_text(
+            _nmap_xml('10.0.0.1', 'tcp', '111',
+                      scripts={'nfs-showmount': '/exports *'})
         )
         (nmap_dir / 'nse_results' / 'port1433.xml').write_text(
             _nmap_xml_hostscript('10.0.0.2', 'tcp', '1433',
@@ -888,7 +897,7 @@ class TestGenerateFindings:
         )
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
-        assert content.index('HIGH') < content.index('INFO')
+        assert content.index('HIGH') < content.index('LOW')
 
     def test_generate_findings_writes_json(self, nmap_dir):
         xml = _nmap_xml('10.0.0.1', 'tcp', '21',
@@ -1627,10 +1636,15 @@ class TestSnmpSeverityAndDetail:
         assert 'LOW' in content
         assert 'SNMP Default Community String' in content
 
-    def test_snmp_accepts_any_validated(self, nmap_dir):
+    def test_snmp_accepts_any_rw_network_device_is_critical(self, nmap_dir):
+        # Accepts-any severity follows the same tiering as default-community:
+        # read-write on a network device is CRITICAL.
         xml = _nmap_xml(
             '10.0.0.5', 'udp', '161',
-            scripts={'snmp-brute': 'public - Valid credentials'},
+            scripts={
+                'snmp-brute': 'public - Valid credentials   (Access level: read-write)',
+                'snmp-sysdescr': 'Cisco IOS Software, Version 15.7',
+            },
         )
         (nmap_dir / 'nse_results' / 'portU:161.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal',
@@ -1638,6 +1652,20 @@ class TestSnmpSeverityAndDetail:
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'SNMP Accepts Any Community String' in content
         assert 'CRITICAL' in content
+
+    def test_snmp_accepts_any_read_only_is_low(self, nmap_dir):
+        # Accepts-any but only read-only, non-network host -> LOW, not CRITICAL.
+        xml = _nmap_xml(
+            '10.0.0.6', 'udp', '161',
+            scripts={'snmp-brute': 'public - Valid credentials   (Access level: read-only)'},
+        )
+        (nmap_dir / 'nse_results' / 'portU:161.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal',
+                          snmp_any_validated={'10.0.0.6': True})
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'SNMP Accepts Any Community String' in content
+        assert 'CRITICAL' not in content
+        assert 'LOW' in content
 
     def test_snmp_printer_exclusion_note_in_detail(self, nmap_dir):
         xml = _nmap_xml(
@@ -2791,6 +2819,8 @@ class TestIPMIFindings:
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'IPMI Cipher Zero Authentication Bypass' in content
+        # CVE-2013-4786 is the RAKP hash-disclosure CVE, not cipher zero — must not be attached here
+        assert 'CVE-2013-4786' not in content
         assert 'CRITICAL' in content
         assert '10.0.1.1' in content
 
@@ -2812,7 +2842,7 @@ class TestIPMIFindings:
         (nmap_dir / 'nse_results' / 'portU:623.xml').write_text(xml)
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
-        assert 'IPMI RAKP Hash Captured' in content
+        assert 'IPMI RAKP Hash Disclosure (CVE-2013-4786)' in content
         assert 'HIGH' in content
         assert '10.0.1.3' in content
 
@@ -2823,10 +2853,10 @@ class TestIPMIFindings:
         generate_findings(str(nmap_dir), 'Internal')
         findings_file = nmap_dir / 'findings.txt'
         if findings_file.exists():
-            assert 'IPMI RAKP Hash Captured' not in findings_file.read_text()
+            assert 'IPMI RAKP Hash Disclosure' not in findings_file.read_text()
 
     def test_ipmi_version_detected_info(self, nmap_dir):
-        """ipmi-version non-empty output -> INFO finding."""
+        """ipmi-version non-empty output -> LOW finding."""
         xml = _nmap_xml(
             '10.0.1.5', 'udp', '623',
             scripts={'ipmi-version': 'Version: 2.0\nUser Level: Administrator'})
@@ -2834,8 +2864,110 @@ class TestIPMIFindings:
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'IPMI Service Detected' in content
-        assert 'INFO' in content
+        assert 'LOW' in content
         assert '10.0.1.5' in content
+
+
+class TestExternalExposureVulnScripts:
+    """External sensitive ports are layered with curated + broad vuln checks."""
+
+    def test_sensitive_port_gets_curated_and_categories(self):
+        scripts = _get_scripts_for_port('445', 'External')
+        assert 'smb-vuln-ms17-010' in scripts
+        assert 'vuln' in scripts.split(',')
+        assert 'vulners' in scripts.split(',')
+
+    def test_no_duplicate_scripts(self):
+        # U:623 already lists ipmi-cipher-zero in EXTERNAL_PORT_SCRIPTS and the
+        # curated set — it must appear only once.
+        toks = _get_scripts_for_port('U:623', 'External').split(',')
+        assert toks.count('ipmi-cipher-zero') == 1
+
+    def test_internal_scan_not_augmented(self):
+        scripts = _get_scripts_for_port('445', 'Internal')
+        assert 'vulners' not in scripts
+
+    def test_non_sensitive_external_port_unchanged(self):
+        # 80 is not in EXTERNAL_SENSITIVE_PORTS and has no external scripts
+        assert _get_scripts_for_port('80', 'External') is None
+
+    def test_external_exposure_scripts_empty_for_non_sensitive(self):
+        assert _external_exposure_scripts('80') == ''
+
+    def test_script_only_cmd_adds_sv_for_vulners(self):
+        cmd = _build_nmap_cmd('445', 'in.txt', 'out.xml', '',
+                              script_scan=True, target_scan='External', script_only=True)
+        assert '-sV' in cmd
+        joined = ' '.join(cmd)
+        assert 'vulners' in joined and 'smb-vuln-ms17-010' in joined
+
+    def test_internal_script_only_cmd_has_no_vulners(self):
+        cmd = _build_nmap_cmd('445', 'in.txt', 'out.xml', '',
+                              script_scan=True, target_scan='Internal', script_only=True)
+        assert 'vulners' not in ' '.join(cmd)
+
+
+class TestSummarizeVulns:
+    def test_vulnerable_with_cve(self):
+        hits = _summarize_vulns({'smb-vuln-ms17-010': 'State: VULNERABLE\nIDs: CVE:CVE-2017-0143'})
+        assert hits == ['smb-vuln-ms17-010: VULNERABLE (CVE-2017-0143)']
+
+    def test_not_vulnerable_ignored(self):
+        assert _summarize_vulns({'smb-vuln-ms08-067': 'NOT VULNERABLE'}) == []
+
+    def test_vulners_cve_listing(self):
+        hits = _summarize_vulns({'vulners': 'cpe:/a:x\n\tCVE-2021-1234\t7.5\n\tCVE-2020-9999\t5.0'})
+        assert hits == ['vulners: CVE-2020-9999, CVE-2021-1234']
+
+    def test_non_vuln_script_ignored(self):
+        assert _summarize_vulns({'ssl-cert': 'Subject: commonName=example'}) == []
+
+    def test_empty_output_ignored(self):
+        assert _summarize_vulns({'smb-vuln-ms17-010': ''}) == []
+
+
+class TestExternalExposureVulnEmbed:
+    """'Service Exposed Externally' findings embed vuln-check results."""
+
+    def test_exposed_smb_embeds_vulnerable_result(self, nmap_dir):
+        xml = _nmap_xml('10.0.0.5', 'tcp', '445',
+                        scripts={'smb-vuln-ms17-010': 'State: VULNERABLE\nIDs: CVE:CVE-2017-0143'})
+        (nmap_dir / 'nse_results' / 'port445.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'Service Exposed Externally' in content
+        assert 'Vuln check:' in content
+        assert 'VULNERABLE' in content
+        assert 'CVE-2017-0143' in content
+
+    def test_exposed_service_without_vuln_notes_clean(self, nmap_dir):
+        xml = _nmap_xml('10.0.0.6', 'tcp', '445',
+                        scripts={'smb-security-mode': 'message signing enabled and required'})
+        (nmap_dir / 'nse_results' / 'port445.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'Service Exposed Externally' in content
+        assert 'no known vulnerabilities detected' in content
+
+    def test_external_ftp_exposure_rated_low_plaintext(self, nmap_dir):
+        xml = _nmap_xml('10.0.0.7', 'tcp', '21', scripts={})
+        (nmap_dir / 'nse_results' / 'port21.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        records = json.loads((nmap_dir / 'findings.json').read_text())
+        exp = [r for r in records
+               if r['title'] == 'Service Exposed Externally' and r['host'] == '10.0.0.7']
+        assert exp and exp[0]['severity'] == 'LOW'
+        assert 'plaintext' in exp[0]['detail'].lower()
+
+    def test_external_telnet_exposure_rated_low_plaintext(self, nmap_dir):
+        xml = _nmap_xml('10.0.0.8', 'tcp', '23', scripts={})
+        (nmap_dir / 'nse_results' / 'port23.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        records = json.loads((nmap_dir / 'findings.json').read_text())
+        exp = [r for r in records
+               if r['title'] == 'Service Exposed Externally' and r['host'] == '10.0.0.8']
+        assert exp and exp[0]['severity'] == 'LOW'
+        assert 'plaintext' in exp[0]['detail'].lower()
 
 
 class TestVNCFindings:
@@ -2916,7 +3048,7 @@ class TestIKEFindings:
         assert '10.0.3.1' in content
 
     def test_ike_main_mode_only_info(self, nmap_dir):
-        """ike-version output without 'aggressive' keyword -> INFO, no HIGH."""
+        """ike-version output without 'aggressive' keyword -> LOW, no HIGH."""
         xml = _nmap_xml(
             '10.0.3.2', 'udp', '500',
             scripts={'ike-version': 'Main mode: supported\n  vendor: Cisco'})
@@ -2927,7 +3059,7 @@ class TestIKEFindings:
         assert 'IKE Aggressive Mode with Pre-Shared Key' not in content
 
     def test_ike_aggressive_no_psk_info(self, nmap_dir):
-        """ike-version output with 'aggressive' but auth RSA (not PSK) -> INFO, no HIGH."""
+        """ike-version output with 'aggressive' but auth RSA (not PSK) -> LOW, no HIGH."""
         xml = _nmap_xml(
             '10.0.3.3', 'udp', '500',
             scripts={'ike-version': 'Aggressive mode: yes\n  auth: RSA\n  vendor: OpenSwan'})

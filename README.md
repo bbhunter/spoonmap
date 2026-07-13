@@ -320,12 +320,10 @@ After scanning, `generate_findings()` parses all nmap XML results and produces s
 | CRITICAL | Node.js Inspector Port Exposed (9229, confirmed by custom NSE) |
 | CRITICAL | Delve Go Debugger Exposed (2345, confirmed by custom NSE) |
 | CRITICAL | Kubernetes Kubelet Anonymous Access (10250, confirmed by custom NSE) |
-| CRITICAL | SNMP Accepts Any Community String (community-string auth effectively disabled) |
-| CRITICAL | SNMP Default Community String — read-write on network device (router/switch/firewall) |
-| CRITICAL | IPMI Cipher Zero Authentication Bypass (CVE-2013-4786) |
+| CRITICAL | SNMP default or accepts-any community — read-write on a network device (router/switch/firewall) |
+| CRITICAL | IPMI Cipher Zero Authentication Bypass |
 | CRITICAL | VNC No Authentication Required (5900/5901, confirmed by `vnc-info`) |
 | CRITICAL | Service Exposed Externally (Docker API, Swarm, debugger/container ports — external scan only) |
-| HIGH | Anonymous FTP login |
 | HIGH | Weak SSH authentication (password/keyboard-interactive — external scan only) |
 | HIGH | NTLM information disclosure (external scan only) |
 | HIGH | SMBv1/SMBv2 signing not required |
@@ -341,9 +339,9 @@ After scanning, `generate_findings()` parses all nmap XML results and produces s
 | HIGH | OpenAI-Compatible LLM API Unauthenticated (1234/1337/3000/8000, custom NSE — external scan only at HIGH) |
 | HIGH | Gradio LLM Web UI Accessible (7860, custom NSE — external scan only at HIGH) |
 | HIGH | KoboldCpp LLM API Unauthenticated (5001, custom NSE — external scan only at HIGH) |
-| HIGH | SNMP Default Community String — read-write, non-network device (non-printer hosts only) |
+| HIGH | SNMP default or accepts-any community — read-write, non-network device (non-printer hosts only) |
 | HIGH | Kubernetes Dashboard Accessible (8001, confirmed by `http-title`) |
-| HIGH | IPMI RAKP Hash Captured — offline cracking with hashcat mode 7300 |
+| HIGH | IPMI RAKP Hash Disclosure (CVE-2013-4786) — offline cracking with hashcat mode 7300 |
 | HIGH | IKE Aggressive Mode with Pre-Shared Key (U:500, confirmed by `ike-version`) |
 | HIGH | RealVNC Authentication Bypass (CVE-2006-2369) (5900/5901, confirmed by `realvnc-auth-bypass`) |
 | HIGH | Service Exposed Externally (databases, RDP, SMB, SNMP, WebLogic, VNC, etc. — external scan only) |
@@ -356,12 +354,17 @@ After scanning, `generate_findings()` parses all nmap XML results and produces s
 | MEDIUM | OpenAI-Compatible LLM API Unauthenticated (1234/1337/3000/8000, custom NSE — internal scan) |
 | MEDIUM | Gradio LLM Web UI Accessible (7860, custom NSE — internal scan) |
 | MEDIUM | KoboldCpp LLM API Unauthenticated (5001, custom NSE — internal scan) |
-| LOW | SNMP Default Community String — read-only, non-network device (non-printer hosts only) |
-| INFO | IPMI Service Detected |
-| INFO | IKE/IPsec Service Detected (U:500) |
-| INFO | SQL Server instance discovered |
+| LOW | Anonymous FTP login (default LOW — review the share; escalate if it exposes sensitive data or is writable) |
+| LOW | FTP exposed externally (plaintext protocol — credentials/data in cleartext; use FTPS/SFTP) |
+| LOW | Telnet exposed externally (plaintext protocol — credentials/data in cleartext; use SSH) |
+| LOW | SNMP default or accepts-any community — read-only (non-printer hosts only) |
+| LOW | IPMI Service Detected |
+| LOW | IKE/IPsec Service Detected (U:500) |
+| LOW | SQL Server instance discovered |
 
 On Internal scans, if `ms-sql-info` discovers SQL Server named instances on non-standard ports, nmap is automatically re-run against those ports.
+
+On External scans, each externally-exposed sensitive service is additionally vulnerability-tested: curated per-protocol NSE scripts (e.g. `smb-vuln-ms17-010` for SMB, `rdp-vuln-ms12-020` for RDP, `ipmi-cipher-zero` for IPMI) plus nmap's broad `vuln`/`vulners` categories are run against it, and the result is embedded per host in the "Service Exposed Externally" finding (e.g. `Vuln check: smb-vuln-ms17-010: VULNERABLE (CVE-2017-0143)`, or `no known vulnerabilities detected`). This is heavier and noisier than a plain port check — the intentional trade-off for thoroughness.
 
 ## Potential Hacks to Look For
 
@@ -386,7 +389,7 @@ On Internal scans, if `ms-sql-info` discovers SQL Server named instances on non-
 | 10250 | Kubernetes Kubelet API | Auto-detected by `script_scan`; arbitrary pod exec |
 | 61616 | Apache ActiveMQ | Auto-detected by `script_scan`; RCE via CVE-2023-46604 |
 | U:500 | IKE/IPsec VPN | Aggressive Mode + PSK auto-detected (HIGH); ike-version identifies vendor/mode |
-| U:623 | IPMI / BMC | Cipher Zero auto-detected (CRITICAL); RAKP hash captured for offline crack (HIGH) |
+| U:623 | IPMI / BMC | Cipher Zero auth bypass auto-detected (CRITICAL); RAKP hash disclosure for offline crack (HIGH, CVE-2013-4786) |
 | 5900, 5901 | VNC | No-auth auto-detected (CRITICAL); realvnc-auth-bypass checked (HIGH) |
 | 11434 | Ollama LLM Runtime | Custom NSE (`ollama-detect`) probes `/api/tags` and `/api/version`; unauthenticated access exposes model inventory and full inference API |
 | 1234, 1337 | LM Studio / OpenAI-compat API | Custom NSE (`openai-api-detect`) probes `/v1/models`; unauthenticated access exposes models and inference |

@@ -369,9 +369,25 @@ def preprocess_targets(target_file, output_path):
     return masscan_file, ip_to_hostname
 
 def _get_scripts_for_port(dest_port, target_scan):
-    """Return comma-separated NSE script list for dest_port, or None."""
+    """Return comma-separated NSE script list for dest_port, or None.
+
+    On External scans, sensitive ports are additionally layered with vuln checks
+    (see _external_exposure_scripts) so their exposure findings carry known-vuln
+    status; duplicates are removed while preserving order.
+    """
     table = EXTERNAL_PORT_SCRIPTS if target_scan == 'External' else INTERNAL_PORT_SCRIPTS
-    return table.get(dest_port)
+    scripts = table.get(dest_port)
+    if target_scan == 'External':
+        extra = _external_exposure_scripts(dest_port)
+        if extra:
+            merged = ','.join([scripts, extra]) if scripts else extra
+            seen, ordered = set(), []
+            for tok in (t.strip() for t in merged.split(',')):
+                if tok and tok not in seen:
+                    seen.add(tok)
+                    ordered.append(tok)
+            return ','.join(ordered)
+    return scripts
 
 
 def _parse_masscan_ping_xml(xml_file):
@@ -1492,6 +1508,9 @@ def _build_nmap_cmd(dest_port, input_file, output_file, source_port,
         if scripts:
             is_udp = 'U:' in dest_port
             host_timeout = '90s' if is_udp else '5m'
+            # vulners matches CVEs against detected service versions, so it needs -sV.
+            if 'vulners' in scripts:
+                cmd += ['-sV']
             cmd += ['--script', scripts, '--script-timeout', '30s', '--host-timeout', host_timeout]
             if is_udp:
                 cmd += ['--max-retries', '1']
@@ -1934,8 +1953,8 @@ EXTERNAL_SENSITIVE_PORTS = [
     ('3389',  'HIGH', 'RDP — direct internet exposure is high risk'),
     ('5900',  'HIGH', 'VNC — remote desktop should not be internet-facing'),
     ('5901',  'HIGH', 'VNC — remote desktop should not be internet-facing'),
-    ('21',    'HIGH', 'FTP — should not be exposed unless wrapped in SSL/SSH'),
-    ('23',    'HIGH', 'Telnet — unencrypted, should not be internet-facing'),
+    ('21',    'LOW', 'FTP — plaintext protocol exposed externally; credentials/data sent in cleartext (use FTPS/SFTP)'),
+    ('23',    'LOW', 'Telnet — plaintext protocol exposed externally; credentials/data sent in cleartext (use SSH)'),
     ('U:137', 'HIGH', 'NetBIOS Name Service — should not be internet-facing'),
     ('7001',  'HIGH', 'WebLogic — admin/app server port should not be internet-facing'),
     ('7002',  'HIGH', 'WebLogic — admin/app server SSL port should not be internet-facing'),
@@ -1956,6 +1975,34 @@ EXTERNAL_SENSITIVE_PORTS = [
     ('5001',  'HIGH',     'KoboldCpp — local LLM API; no auth by default, should not be internet-facing'),
     ('1337',  'HIGH',     'Jan — local LLM API; no auth by default, should not be internet-facing'),
 ]
+
+# Vulnerability checks layered onto externally-exposed sensitive services so each
+# "Service Exposed Externally" finding also reports known-vuln status.  Curated
+# high-signal scripts per protocol; the broad `vuln`/`vulners` categories are
+# appended for every sensitive port for wide CVE coverage.  (External scans only;
+# heavier and noisier — this is the intentional trade-off for thoroughness.)
+_EXTERNAL_EXPOSURE_VULN_SCRIPTS = {
+    '445':   'smb-security-mode,smb2-security-mode,smb-vuln-ms17-010,smb-vuln-ms08-067,smb-double-pulsar-backdoor,smb-vuln-cve-2017-7494',
+    '139':   'smb-security-mode,smb2-security-mode,smb-vuln-ms17-010,smb-vuln-ms08-067,smb-double-pulsar-backdoor,smb-vuln-cve-2017-7494',
+    '3389':  'rdp-vuln-ms12-020',
+    'U:623': 'ipmi-cipher-zero',
+}
+_EXTERNAL_EXPOSURE_VULN_CATEGORIES = 'vuln,vulners'
+_EXTERNAL_SENSITIVE_PORT_KEYS = frozenset(p for p, _, _ in EXTERNAL_SENSITIVE_PORTS)
+
+
+def _external_exposure_scripts(dest_port):
+    """Extra vuln NSE scripts to layer onto an externally-exposed sensitive port.
+
+    Returns a comma-separated script string (curated per-protocol scripts plus the
+    broad vuln/vulners categories), or '' for non-sensitive ports.
+    """
+    if dest_port not in _EXTERNAL_SENSITIVE_PORT_KEYS:
+        return ''
+    curated = _EXTERNAL_EXPOSURE_VULN_SCRIPTS.get(dest_port)
+    parts = ([curated] if curated else []) + [_EXTERNAL_EXPOSURE_VULN_CATEGORIES]
+    return ','.join(parts)
+
 
 SERVICE_CATEGORIES = {
     'Web': [
@@ -2083,7 +2130,31 @@ def _validate_snmp_any_community(nmap_dir, scan_type):
     return validated
 
 
-SEVERITY_ORDER = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO']
+SEVERITY_ORDER = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']
+
+
+def _summarize_vulns(scripts):
+    """Summarize known-vuln evidence from a port's NSE script outputs.
+
+    Returns a list of concise per-script strings for scripts that report a
+    confirmed/likely vulnerability (state VULNERABLE, excluding NOT VULNERABLE)
+    or that list CVEs (e.g. vulners). Returns [] when nothing is found.
+    """
+    hits = []
+    for sid, out in sorted(scripts.items()):
+        if not out:
+            continue
+        upper = out.upper()
+        vulnerable = 'VULNERABLE' in upper and 'NOT VULNERABLE' not in upper
+        cves = sorted(set(re.findall(r'CVE-\d{4}-\d{4,7}', out)))
+        if vulnerable:
+            label = 'VULNERABLE'
+            if cves:
+                label += ' (' + ', '.join(cves[:5]) + (' …' if len(cves) > 5 else '') + ')'
+            hits.append(f'{sid}: {label}')
+        elif cves:
+            hits.append(f'{sid}: ' + ', '.join(cves[:5]) + (' …' if len(cves) > 5 else ''))
+    return hits
 
 
 def generate_findings(output_path, target_scan, snmp_any_validated=None):
@@ -2126,6 +2197,7 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
 
     # ── parse every nmap XML result file ─────────────────────────────────────
     open_ports_by_host = {}  # {ip: [port_key, ...]} — for external exposure check
+    vuln_by_host_port = {}   # {(ip, port_key): [summary, ...]} — embedded in exposure findings
 
     for fname in sorted(os.listdir(nmap_dir)):
         if not fname.endswith('.xml'):
@@ -2156,12 +2228,22 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
                 open_ports_by_host.setdefault(ip, []).append(port_key)
                 scripts  = scripts_for_elem(port_elem)
 
+                # Collect vuln evidence for embedding into the exposure finding
+                # (external scans layer vuln/vulners onto sensitive ports).
+                if target_scan == 'External':
+                    vuln_hits = _summarize_vulns(scripts)
+                    if vuln_hits:
+                        vuln_by_host_port.setdefault((ip, port_key), []).extend(vuln_hits)
+
                 # ── ftp-anon ─────────────────────────────────────────────
                 if 'ftp-anon' in scripts and ip not in printer_ips:
                     out = scripts['ftp-anon']
                     if 'Anonymous FTP login allowed' in out:
-                        add('HIGH', ip, port_str, 'Anonymous FTP',
-                            'Anonymous FTP login is permitted.')
+                        add('LOW', ip, port_str, 'Anonymous FTP',
+                            'Anonymous FTP login is permitted. Rated LOW by default — '
+                            'REVIEW REQUIRED: escalate if the anonymous share exposes '
+                            'sensitive data or is writable (e.g. config/backups/creds, '
+                            'or upload leading to code execution).')
 
                 # ── ssh-auth-methods (external) ──────────────────────────
                 if 'ssh-auth-methods' in scripts and target_scan == 'External':
@@ -2396,21 +2478,25 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
                         detail_parts.append(printer_note)
                         detail = ' '.join(detail_parts)
 
-                        # Accepts-any validated?
+                        # Severity is driven by impact, not by which check fired:
+                        # write access + a network device (router/switch/firewall)
+                        # is the worst case. Read-write elsewhere is HIGH;
+                        # read-only is LOW. This applies equally whether the device
+                        # exposes a default community or accepts any community.
+                        if has_rw and is_network_device:
+                            sev = 'CRITICAL'
+                        elif has_rw:
+                            sev = 'HIGH'
+                        else:
+                            sev = 'LOW'
+
                         if snmp_any_validated and ip in snmp_any_validated:
-                            add('CRITICAL', ip, port_str,
+                            add(sev, ip, port_str,
                                 'SNMP Accepts Any Community String',
                                 'Confirmed: device responds to a random UUID community string — '
                                 'SNMP community-string authentication is effectively disabled. '
                                 + detail)
                         else:
-                            # Severity based on access level and device type
-                            if has_rw and is_network_device:
-                                sev = 'CRITICAL'
-                            elif has_rw:
-                                sev = 'HIGH'
-                            else:
-                                sev = 'LOW'
                             add(sev, ip, port_str, 'SNMP Default Community String', detail)
 
                 # ── ms-sql-info (portscript on UDP 1434) ──────────────────
@@ -2421,7 +2507,7 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
                     if 'ms-sql-info' in scripts and target_scan == 'Internal':
                         out = scripts['ms-sql-info'].strip()
                         if out:
-                            add('INFO', ip, port_str, 'SQL Server Instance Discovered',
+                            add('LOW', ip, port_str, 'SQL Server Instance Discovered',
                                 out[:300])
 
                 # ── ipmi-cipher-zero (CVE-2013-4786 Cipher Zero auth bypass) ──
@@ -2429,7 +2515,7 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
                     out = scripts['ipmi-cipher-zero']
                     if 'VULNERABLE' in out and 'NOT VULNERABLE' not in out:
                         add('CRITICAL', ip, port_str,
-                            'IPMI Cipher Zero Authentication Bypass (CVE-2013-4786)',
+                            'IPMI Cipher Zero Authentication Bypass',
                             'IPMI 2.0 is configured with cipher suite 0, allowing authentication '
                             'with any password using a valid username. Default accounts (e.g. "admin") '
                             'grant full BMC control: power, console, and firmware access.')
@@ -2439,7 +2525,7 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
                     out = scripts['ipmi-hashdump']
                     if '$rakp$' in out:
                         add('HIGH', ip, port_str,
-                            'IPMI RAKP Hash Captured (Offline Cracking Risk)',
+                            'IPMI RAKP Hash Disclosure (CVE-2013-4786)',
                             'The BMC responded to an unauthenticated RAKP-1 request and returned an '
                             'HMAC-SHA1 hash. This hash can be cracked offline using hashcat (mode 7300). '
                             'BMC default credentials (admin/admin) are common; cracking yields full '
@@ -2449,7 +2535,7 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
                 if 'ipmi-version' in scripts:
                     out = scripts['ipmi-version'].strip()
                     if out:
-                        add('INFO', ip, port_str,
+                        add('LOW', ip, port_str,
                             'IPMI Service Detected',
                             f'IPMI management interface is accessible. {out[:200]}')
 
@@ -2464,7 +2550,7 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
                             'cleartext, enabling offline cracking. Use ike-scan --aggressive to capture '
                             'the hash; crack with hashcat. Migrate to Main Mode or certificate-based auth.')
                     elif out.strip():
-                        add('INFO', ip, port_str,
+                        add('LOW', ip, port_str,
                             'IKE/IPsec Service Detected',
                             f'IKE VPN endpoint identified. {out.strip()[:200]}')
 
@@ -2617,7 +2703,7 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
                 if 'ms-sql-info' in hscripts and target_scan == 'Internal':
                     out = hscripts['ms-sql-info'].strip()
                     if out:
-                        add('INFO', ip, file_port_str, 'SQL Server Instance Discovered',
+                        add('LOW', ip, file_port_str, 'SQL Server Instance Discovered',
                             out[:300])
 
     # ── external exposure findings (port list, no script needed) ─────────────
@@ -2627,8 +2713,18 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
                 if port_key in open_keys:
                     proto = 'udp' if port_key.startswith('U:') else 'tcp'
                     pnum  = port_key[2:] if port_key.startswith('U:') else port_key
+                    hits = vuln_by_host_port.get((ip, port_key), [])
+                    if hits:
+                        seen, uniq = set(), []
+                        for h in hits:
+                            if h not in seen:
+                                seen.add(h)
+                                uniq.append(h)
+                        detail = f'{label} | Vuln check: ' + '; '.join(uniq)
+                    else:
+                        detail = f'{label} | Vuln check: no known vulnerabilities detected'
                     add(severity, ip, f'{proto}/{pnum}',
-                        'Service Exposed Externally', label)
+                        'Service Exposed Externally', detail)
 
     # ── sort and write ────────────────────────────────────────────────────────
     findings.sort(key=lambda f: (SEVERITY_ORDER.index(f[0]), f[1], f[2]))
@@ -3117,12 +3213,13 @@ def _write_findings_txt(output_path, target_scan, findings):
 
     # Group by (severity, title, port_str) so all hosts with the same
     # vulnerability on the same port are together for easy copy-paste.
-    groups = {}  # (sev, title, port_str) → {'hosts': list[host], 'detail': str}
+    groups = {}  # (sev, title, port_str) → {'hosts': [host], 'detail': str, 'host_details': [(host, detail)]}
     for sev, host, port_str, title, detail in findings:
         key = (sev, title, port_str)
         if key not in groups:
-            groups[key] = {'hosts': [], 'detail': detail}
+            groups[key] = {'hosts': [], 'detail': detail, 'host_details': []}
         groups[key]['hosts'].append(host)
+        groups[key]['host_details'].append((host, detail))
 
     for sev in SEVERITY_ORDER:
         sev_keys = sorted(
@@ -3139,8 +3236,14 @@ def _write_findings_txt(output_path, target_scan, findings):
             repro = _FINDING_REPRO.get(title, {})
             lines.append(f'  [{title}]  port {port_str}')
             lines.append(f'  Affected hosts ({len(hosts)}):')
-            for h in sorted(hosts):
-                lines.append(h)
+            if title == 'Service Exposed Externally':
+                # Detail (exposure label + embedded per-host vuln check) varies per
+                # host, so render it inline rather than collapsing to one line.
+                for h, d in sorted(grp['host_details']):
+                    lines.append(f'{h}  —  {d}')
+            else:
+                for h in sorted(hosts):
+                    lines.append(h)
             lines.append('')
             if repro:
                 cmd = _build_repro_cmd(title, port_str, hosts[0])
