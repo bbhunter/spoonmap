@@ -332,6 +332,31 @@ class TestWriteFindingsTxt:
         content = (tmp_path / 'findings.txt').read_text()
         assert content.index('HIGH') < content.index('MEDIUM') < content.index('INFO')
 
+    def test_openai_extra_cmds_use_bare_port_number(self, tmp_path):
+        # Regression: {port} must be the bare number, not the internal proto/port.
+        findings = [('HIGH', '10.0.0.5', 'tcp/1234',
+                     'OpenAI-Compatible LLM API Unauthenticated', 'LM Studio')]
+        _write_findings_txt(str(tmp_path), 'External', findings)
+        content = (tmp_path / 'findings.txt').read_text()
+        assert 'http://10.0.0.5:1234/v1/models' in content
+        assert 'http://10.0.0.5:tcp' not in content  # no malformed proto/port in URLs
+
+    def test_snmp_repro_has_single_su_flag(self, tmp_path):
+        findings = [('HIGH', '10.0.0.5', 'udp/161',
+                     'SNMP Default Community String', 'public')]
+        _write_findings_txt(str(tmp_path), 'Internal', findings)
+        content = (tmp_path / 'findings.txt').read_text()
+        assert 'nmap -sU -p 161 --script snmp-brute,snmp-sysdescr 10.0.0.5' in content
+        assert '-sU -p 161 -sU' not in content  # no duplicate -sU
+
+    def test_custom_nse_repro_uses_absolute_script_path(self, tmp_path):
+        findings = [('HIGH', '10.0.0.5', 'tcp/389',
+                     'LDAP Signing Not Required', 'Signing: NOT REQUIRED')]
+        _write_findings_txt(str(tmp_path), 'Internal', findings)
+        content = (tmp_path / 'findings.txt').read_text()
+        assert f'--script {spoonmap._DIR}/nse/ldap-signing-check.nse' in content
+        assert '--script spoonmap/nse/' not in content  # not the old relative path
+
 
 # ── _write_findings_md ────────────────────────────────────────────────────────
 
