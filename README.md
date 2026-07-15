@@ -36,9 +36,9 @@ Service Categories (comma-separated numbers, default: All)
 	(6) Network Infrastructure  [53, 179, U:500, U:161, U:623, U:631]
 	(7) File Transfer      [21, 111]
 	(8) SMB          [445, 135, 139, U:137]
-	(9) Specialized  [1090, 3300, 4786, 6970, 2375, 4243, 9100]
+	(9) Specialized  [1090, 3300, 4786, 6970, 2375, 4243, 9100, 8530, 8531]
 	(10) Containers & Debuggers  [2377, 10250, 8001, 9229, 2345, 5005, 61616, 8009, 6000]
-	(11) AI / Local LLM  [11434, 1234, 7860, 5000, 5001, 1337, 3000, 8000, 8080]
+	(11) Local LLM  [11434, 1234, 7860, 5000, 5001, 1337, 3000, 8000, 8080]
 	(12) Full Port Scan  [1-65535]
 	(c) Custom Port Scan  [enter your own comma-separated ports]
 
@@ -344,7 +344,7 @@ After scanning, `generate_findings()` parses all nmap XML results and produces s
 | HIGH | IPMI RAKP Hash Disclosure (CVE-2013-4786) — offline cracking with hashcat mode 7300 |
 | HIGH | IKE Aggressive Mode with Pre-Shared Key (U:500, confirmed by `ike-version`) |
 | HIGH | RealVNC Authentication Bypass (CVE-2006-2369) (5900/5901, confirmed by `realvnc-auth-bypass`) |
-| HIGH | Service Exposed Externally (databases, RDP, SMB, SNMP, WebLogic, VNC, etc. — external scan only) |
+| HIGH | Service Exposed Externally (databases, RDP, SMB, SNMP, WebLogic, VNC, WSUS 8530/8531, etc. — external scan only) |
 | MEDIUM | SMBv1 protocol enabled |
 | MEDIUM | Weak SSH algorithms (deprecated ciphers/MACs/KEX) |
 | MEDIUM | Java RMI registry exposed |
@@ -361,6 +361,7 @@ After scanning, `generate_findings()` parses all nmap XML results and produces s
 | LOW | IPMI Service Detected |
 | LOW | IKE/IPsec Service Detected (U:500) |
 | LOW | SQL Server instance discovered |
+| LOW | WSUS Service Detected (8530/8531; identification only — review CVE-2025-59287 patch status) |
 
 On Internal scans, if `ms-sql-info` discovers SQL Server named instances on non-standard ports, nmap is automatically re-run against those ports.
 
@@ -396,6 +397,7 @@ On External scans, each externally-exposed sensitive service is additionally vul
 | 3000, 8000 | OpenAI-compatible LLM API | Custom NSE (`openai-api-detect`) probes `/v1/models` with three-string fingerprint to avoid false positives on generic web apps |
 | 7860 | Gradio / text-generation-webui | Custom NSE (`gradio-detect`) probes `/info` (fallback: `/`); unauthenticated access to LLM web UI |
 | 5001 | KoboldCpp | Custom NSE (`koboldcpp-detect`) probes `/api/v1/model`; unauthenticated inference API exposes loaded model |
+| 8530, 8531 | Microsoft WSUS | Custom NSE (`wsus-detect`) probes the WSUS web-service endpoints (e.g. `/ClientWebService/client.asmx`) to identify WSUS; detection only — review CVE-2025-59287 (unauth RCE, CVSS 9.8) patch status |
 
 ### References
 

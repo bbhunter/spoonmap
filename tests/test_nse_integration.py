@@ -431,3 +431,41 @@ class TestKoboldcppDetectNse:
         with _StubServer(_KOBOLD_PORT, _KOBOLD_INVALID):
             output = _run_nmap(_KOBOLD_PORT, _KOBOLD_SCRIPT)
         assert 'koboldcpp-detect' not in output
+
+
+# ── wsus-detect ───────────────────────────────────────────────────────────────
+
+_WSUS_PORT   = 8530
+_WSUS_SCRIPT = os.path.join(_NSE_DIR, 'wsus-detect.nse')
+
+# WSUS ASMX help page listing WSUS-specific SOAP methods.
+_WSUS_VALID = (
+    b'HTTP/1.0 200 OK\r\n'
+    b'Content-Type: text/html; charset=utf-8\r\n\r\n'
+    b'<html><head><title>ClientWebService</title></head><body>'
+    b'<p>The following operations are supported: SyncUpdates, GetConfig, '
+    b'GetCookie, GetExtendedUpdateInfo, RegisterComputer.</p>'
+    b'<p>Windows Server Update Services</p></body></html>'
+)
+_WSUS_INVALID = (
+    b'HTTP/1.0 200 OK\r\n'
+    b'Content-Type: text/html\r\n\r\n'
+    b'<html><body>Just a web server</body></html>'
+)
+
+
+@pytest.mark.skipif(not _port_is_free(_WSUS_PORT),
+                    reason=f'port {_WSUS_PORT} already in use — stub tests require a free port')
+class TestWsusDetectNse:
+    def test_detects_wsus(self):
+        """Stub returns a WSUS ASMX help page → script reports WSUS detected."""
+        with _StubServer(_WSUS_PORT, _WSUS_VALID):
+            output = _run_nmap(_WSUS_PORT, _WSUS_SCRIPT)
+        assert 'wsus-detect' in output
+        assert 'Microsoft WSUS detected' in output
+
+    def test_no_output_for_non_wsus_service(self):
+        """Stub returns generic HTML (no WSUS markers) → no detection."""
+        with _StubServer(_WSUS_PORT, _WSUS_INVALID):
+            output = _run_nmap(_WSUS_PORT, _WSUS_SCRIPT)
+        assert 'Microsoft WSUS detected' not in output

@@ -1855,7 +1855,9 @@ EXTERNAL_PORT_SCRIPTS = {
     '5901':  'vnc-info,realvnc-auth-bypass',
     '631':   f'{_DIR}/nse/cups-browsed-rce.nse',
     'U:631': f'{_DIR}/nse/cups-browsed-rce.nse',
-    # AI / Local LLM
+    '8530':  f'{_DIR}/nse/wsus-detect.nse',
+    '8531':  f'{_DIR}/nse/wsus-detect.nse',
+    # Local LLM
     '11434': f'{_DIR}/nse/ollama-detect.nse',
     '1234':  f'{_DIR}/nse/openai-api-detect.nse',
     '1337':  f'{_DIR}/nse/openai-api-detect.nse',
@@ -1904,7 +1906,9 @@ INTERNAL_PORT_SCRIPTS = {
     '5901':  'vnc-info,realvnc-auth-bypass',
     '631':   f'{_DIR}/nse/cups-browsed-rce.nse',
     'U:631': f'{_DIR}/nse/cups-browsed-rce.nse',
-    # AI / Local LLM
+    '8530':  f'{_DIR}/nse/wsus-detect.nse',
+    '8531':  f'{_DIR}/nse/wsus-detect.nse',
+    # Local LLM
     '11434': f'{_DIR}/nse/ollama-detect.nse',
     '1234':  f'{_DIR}/nse/openai-api-detect.nse',
     '1337':  f'{_DIR}/nse/openai-api-detect.nse',
@@ -1974,6 +1978,8 @@ EXTERNAL_SENSITIVE_PORTS = [
     ('7860',  'HIGH',     'text-generation-webui (Gradio) — LLM UI; no auth by default, should not be internet-facing'),
     ('5001',  'HIGH',     'KoboldCpp — local LLM API; no auth by default, should not be internet-facing'),
     ('1337',  'HIGH',     'Jan — local LLM API; no auth by default, should not be internet-facing'),
+    ('8530',  'HIGH',     'WSUS (HTTP) — update/management service should not be internet-facing; review CVE-2025-59287 patch status'),
+    ('8531',  'HIGH',     'WSUS (HTTPS) — update/management service should not be internet-facing; review CVE-2025-59287 patch status'),
 ]
 
 # Vulnerability checks layered onto externally-exposed sensitive services so each
@@ -2030,12 +2036,12 @@ SERVICE_CATEGORIES = {
         '445', '135', '139', 'U:137'
     ],
     'Specialized': [
-        '1090', '3300', '4786', '6970', '2375', '4243', '9100'
+        '1090', '3300', '4786', '6970', '2375', '4243', '9100', '8530', '8531'
     ],
     'Containers & Debuggers': [
         '2377', '10250', '8001', '9229', '2345', '5005', '61616', '8009', '6000'
     ],
-    'AI / Local LLM': [
+    'Local LLM': [
         '11434', '1234', '7860', '5000', '5001', '1337', '3000', '8000', '8080',
     ],
 }
@@ -2614,7 +2620,16 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
                         'Verify the version is patched against CVE-2023-46604 (RCE, CVSS 10.0). '
                         'Broker should not be reachable from general workstations.')
 
-                # ── AI / Local LLM — unauthenticated API access ───────────────
+                # ── wsus-detect (custom NSE) — identification only ─────────────
+                if 'wsus-detect' in scripts and scripts['wsus-detect'].strip():
+                    add('LOW', ip, port_str, 'WSUS Service Detected',
+                        'Microsoft WSUS is running on this host. '
+                        + scripts['wsus-detect'].strip()
+                        + ' REVIEW: confirm the October 2025 out-of-band patch for '
+                        'CVE-2025-59287 (unauthenticated RCE, CVSS 9.8, CISA KEV) is applied, '
+                        'and that WSUS is not reachable from untrusted networks.')
+
+                # ── Local LLM — unauthenticated API access ───────────────────
                 sev_llm = 'HIGH' if target_scan == 'External' else 'MEDIUM'
 
                 ollama_out = scripts.get('ollama-detect', '')
@@ -3077,6 +3092,15 @@ _FINDING_REPRO = {
             '61616/tcp open  activemq\n'
             '| banner:\n'
             '|_  ...ActiveMQ...'
+        ),
+    },
+    'WSUS Service Detected': {
+        'flags': f'--script {_DIR}/nse/wsus-detect.nse',
+        'sample': (
+            'PORT     STATE SERVICE\n'
+            '8530/tcp open  wsus\n'
+            '| wsus-detect:\n'
+            '|_  Microsoft WSUS detected (/ClientWebService/client.asmx)'
         ),
     },
     # ── LDAP security (custom NSE scripts) ───────────────────────────────────

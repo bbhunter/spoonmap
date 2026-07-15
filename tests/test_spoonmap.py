@@ -1,5 +1,6 @@
 """Tests for spoonmap.py"""
 import datetime
+import io
 import json
 import os
 import textwrap
@@ -194,14 +195,18 @@ class TestGetScriptsForPort:
         assert _get_scripts_for_port('22', 'External') == 'ssh-auth-methods,ssh2-enum-algos'
 
     def test_external_ftp(self):
-        assert _get_scripts_for_port('21', 'External') == 'ftp-anon'
+        # 21 is a sensitive external port, so vuln/vulners are appended; the base
+        # script must still lead the list.
+        assert _get_scripts_for_port('21', 'External').split(',')[0] == 'ftp-anon'
 
     def test_external_ssl_cert_ports(self):
         for port in ('443', '8443', '636', '10443'):
             assert 'ssl-cert' in _get_scripts_for_port(port, 'External'), port
 
     def test_external_mssql(self):
-        assert _get_scripts_for_port('1433', 'External') == 'ms-sql-ntlm-info'
+        # 1433 is a sensitive external port, so vuln/vulners are appended; the base
+        # script must still lead the list.
+        assert _get_scripts_for_port('1433', 'External').split(',')[0] == 'ms-sql-ntlm-info'
 
     def test_internal_ftp(self):
         assert _get_scripts_for_port('21', 'Internal') == 'ftp-anon'
@@ -2506,7 +2511,7 @@ class TestInternalNseFindings:
         if findings_file.exists():
             assert 'JDWP Java Debugger Exposed' not in findings_file.read_text()
 
-    # ── AI / Local LLM findings ───────────────────────────────────────────────
+    # ── Local LLM findings ─────────────────────────────────────────────────────
 
     def test_ollama_internal_medium(self, nmap_dir):
         """ollama-detect output on internal scan → MEDIUM finding."""
@@ -2968,6 +2973,44 @@ class TestExternalExposureVulnEmbed:
                if r['title'] == 'Service Exposed Externally' and r['host'] == '10.0.0.8']
         assert exp and exp[0]['severity'] == 'LOW'
         assert 'plaintext' in exp[0]['detail'].lower()
+
+
+class TestWsusDetection:
+    """WSUS ports are registered and wsus-detect emits a LOW identification finding."""
+
+    def test_wsus_ports_in_specialized_category(self):
+        assert '8530' in SERVICE_CATEGORIES['Specialized']
+        assert '8531' in SERVICE_CATEGORIES['Specialized']
+
+    def test_wsus_ports_in_sensitive_list(self):
+        keys = {t[0] for t in EXTERNAL_SENSITIVE_PORTS}
+        assert '8530' in keys and '8531' in keys
+
+    def test_wsus_scripts_mapped_both_scans(self):
+        for scan in ('External', 'Internal'):
+            for port in ('8530', '8531'):
+                scripts = _get_scripts_for_port(port, scan)
+                assert 'wsus-detect.nse' in scripts
+
+    def test_wsus_finding_is_low_with_cve_review_pointer(self, nmap_dir):
+        xml = _nmap_xml('10.0.0.9', 'tcp', '8530',
+                        scripts={'wsus-detect': 'Microsoft WSUS detected (/ClientWebService/client.asmx)'})
+        (nmap_dir / 'nse_results' / 'port8530.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        txt = (nmap_dir / 'findings.txt').read_text()
+        assert 'WSUS Service Detected' in txt
+        assert '10.0.0.9' in txt
+        records = json.loads((nmap_dir / 'findings.json').read_text())
+        wsus = [r for r in records if r['title'] == 'WSUS Service Detected']
+        assert wsus and wsus[0]['severity'] == 'LOW'
+        assert 'CVE-2025-59287' in wsus[0]['detail']
+
+    def test_no_wsus_finding_without_script_output(self, nmap_dir):
+        xml = _nmap_xml('10.0.0.9', 'tcp', '8530', scripts={})
+        (nmap_dir / 'nse_results' / 'port8530.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        if (nmap_dir / 'findings.txt').exists():
+            assert 'WSUS Service Detected' not in (nmap_dir / 'findings.txt').read_text()
 
 
 class TestVNCFindings:
@@ -3718,6 +3761,9 @@ class TestDiscoverInternalMasscan:
         mock_proc = MagicMock()
         mock_proc.wait.return_value = 0
         mock_proc.pid = 99999
+        # Finite stderr so _stream_masscan_progress()'s read(1) loop terminates;
+        # a bare MagicMock would return truthy bytes forever and hang the join.
+        mock_proc.stderr = io.BytesIO(b'')
         return mock_proc
 
     def _write_xml(self, path, *ips):
