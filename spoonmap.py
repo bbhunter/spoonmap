@@ -3587,6 +3587,24 @@ def _write_interactive_config(config_path, config):
         return False
 
 
+def _prompt_yes_no(question, default, prompt_fn=input):
+    """Prompt until a valid yes/no answer is given; return bool.
+
+    Empty input selects *default*.  Accepts y/yes/n/no (case-insensitive); any
+    other input (e.g. a typo like "Ywa") is rejected and re-prompted rather than
+    being silently interpreted.
+    """
+    while True:
+        answer = prompt_fn(question).strip().lower()
+        if not answer:
+            return default
+        if answer in ('y', 'yes'):
+            return True
+        if answer in ('n', 'no'):
+            return False
+        print(_COLOR_ERROR + "Please answer 'y'/'yes' or 'n'/'no'." + _COLOR_RESET)
+
+
 def _handle_previous_results(output_path, resume, prompt_fn=input):
     """Resolve what to do with pre-existing scan output; return the resume flag.
 
@@ -3769,15 +3787,10 @@ def main():
                 # Invalid input — loop again
 
         if banner_scan == '':
-            banner_choice = 1
-            banner_choice = input(
-                f'\nWould you like to enumerate service banners for any identified services '
-                f'(default: Yes)? '
-                ) or banner_choice
-            if banner_choice == 1 or banner_choice[0].lower() == 'y':
-                banner_scan = True
-            else:
-                banner_scan = False
+            banner_scan = _prompt_yes_no(
+                '\nWould you like to enumerate service banners for any identified services '
+                '(default: Yes)? ', True)
+            if not banner_scan:
                 # Warn if UDP ports are in scope — open|filtered won't be confirmed
                 udp_in_scope = any(p.startswith('U:') for p in dest_ports)
                 if udp_in_scope:
@@ -3789,12 +3802,9 @@ def main():
 
         if script_scan == '':
             if banner_scan:
-                script_choice = 'n'
-                script_choice = input(
+                script_scan = _prompt_yes_no(
                     '\nWould you like to run NSE security scripts on identified services '
-                    '(default: No)? '
-                ) or script_choice
-                script_scan = script_choice[0].lower() == 'y'
+                    '(default: No)? ', False)
             else:
                 script_scan = False
 
@@ -3860,11 +3870,7 @@ def main():
                     break
 
         if not exclusions_file and not config_loaded:
-            exclusions_choice = 'n'
-            exclusions_choice = input(f'\nWould you like to exclude any hosts?  (default: No) '
-                ) or exclusions_choice
-
-            if exclusions_choice[0].lower() == 'y':
+            if _prompt_yes_no('\nWould you like to exclude any hosts?  (default: No) ', False):
                 exclusions_file = f'{dir_path}/exclusions.txt'
                 while True:
                     print('\nExample Exclusions File')
@@ -3884,12 +3890,9 @@ def main():
                 exclusions_file = None
 
         if host_discovery is None:
-            disc_default = 'y'
-            disc_choice = input(
+            host_discovery = _prompt_yes_no(
                 '\nRun host discovery (nmap -sn; masscan for large ranges) before scanning '
-                '(default: Yes)? '
-            ) or disc_default
-            host_discovery = disc_choice[0].lower() == 'y'
+                '(default: Yes)? ', True)
 
         print(f'\nScan Type: {scan_type}')
         print(f'Target Ports: {dest_ports}')

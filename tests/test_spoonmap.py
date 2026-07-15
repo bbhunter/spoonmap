@@ -26,6 +26,7 @@ from spoonmap import (
     _external_exposure_scripts,
     _summarize_vulns,
     _handle_previous_results,
+    _prompt_yes_no,
     _host_discovery,
     _write_if_changed,
     _write_interactive_config,
@@ -1428,6 +1429,32 @@ class TestNmapUdpDiscoveryResumeFreshness:
 
 
 # ── _handle_previous_results (delete / append / resume prompt) ────────────────
+
+class TestPromptYesNo:
+    def test_empty_uses_default_true(self):
+        assert _prompt_yes_no('q', True, MagicMock(return_value='')) is True
+
+    def test_empty_uses_default_false(self):
+        assert _prompt_yes_no('q', False, MagicMock(return_value='')) is False
+
+    def test_accepts_y_and_yes(self):
+        assert _prompt_yes_no('q', False, MagicMock(return_value='y')) is True
+        assert _prompt_yes_no('q', False, MagicMock(return_value='YES')) is True
+
+    def test_accepts_n_and_no(self):
+        assert _prompt_yes_no('q', True, MagicMock(return_value='n')) is False
+        assert _prompt_yes_no('q', True, MagicMock(return_value='No')) is False
+
+    def test_reprompts_on_invalid_then_accepts(self, capsys):
+        # 'Ywa' (the reported bad input) must NOT be silently accepted; re-prompt.
+        prompt = MagicMock(side_effect=['Ywa', 'maybe', 'y'])
+        assert _prompt_yes_no('q', False, prompt) is True
+        assert prompt.call_count == 3
+        assert "Please answer" in capsys.readouterr().out
+
+    def test_whitespace_only_uses_default(self):
+        assert _prompt_yes_no('q', True, MagicMock(return_value='   ')) is True
+
 
 class TestHandlePreviousResults:
     def test_no_previous_results_returns_resume_unchanged(self):
