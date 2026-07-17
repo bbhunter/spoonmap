@@ -1838,7 +1838,8 @@ EXTERNAL_PORT_SCRIPTS = {
     '636':   'ssl-cert',
     '993':   'imap-ntlm-info,ssl-cert',
     '995':   'pop3-ntlm-info,ssl-cert',
-    '1433':  'ms-sql-ntlm-info',
+    '1433':  f'ms-sql-ntlm-info,{_DIR}/nse/azure-sql-detect.nse',
+    '3342':  f'{_DIR}/nse/azure-sql-detect.nse',  # Azure SQL Managed Instance public endpoint
     '3389':  'rdp-ntlm-info',
     '2375':  'docker-version',
     '4243':  'docker-version',
@@ -1876,7 +1877,8 @@ INTERNAL_PORT_SCRIPTS = {
     '2375':  'docker-version',
     '4243':  'docker-version',
     '1090':  'rmi-dumpregistry',
-    '1433':  'ms-sql-info',
+    '1433':  f'ms-sql-info,{_DIR}/nse/azure-sql-detect.nse',
+    '3342':  f'{_DIR}/nse/azure-sql-detect.nse',  # Azure SQL Managed Instance public endpoint
     '4786':  f'{_DIR}/nse/cisco-siet.nse',
     '6129':  f'{_DIR}/nse/dameware-detect.nse',
     '6970':  f'{_DIR}/nse/cucm-detect.nse',
@@ -1944,6 +1946,7 @@ EXTERNAL_SENSITIVE_PORTS = [
     ('389',   'HIGH', 'LDAP — should not be internet-facing'),
     ('636',   'HIGH', 'LDAPS — should not be internet-facing'),
     ('1433',  'HIGH', 'MSSQL — database port should not be internet-facing'),
+    ('3342',  'HIGH', 'Azure SQL Managed Instance public endpoint — review whether public access is intended; private endpoint is the recommended configuration'),
     ('1521',  'HIGH', 'Oracle — database port should not be internet-facing'),
     ('3306',  'HIGH', 'MySQL — database port should not be internet-facing'),
     ('5432',  'HIGH', 'PostgreSQL — database port should not be internet-facing'),
@@ -2015,7 +2018,7 @@ SERVICE_CATEGORIES = {
         '80', '443', '7001', '7002', '8000', '8080', '8081', '8443', '8888', '9090', '10443'
     ],
     'Database': [
-        '1433', 'U:1434', '1521', '3306', '5432', '6379', '9200', '27017'
+        '1433', 'U:1434', '1521', '3306', '3342', '5432', '6379', '9200', '27017'
     ],
     'Remote Management': [
         '22', '23', '3389', '5900', '5901', '6129', '1723', '5985', '5986'
@@ -2064,8 +2067,11 @@ def _scan_extra_sql_ports(output_path, source_port):
                         continue
                     # Each <table> directly under the script is one instance.
                     # (table/table would navigate into the version sub-table.)
+                    # Key is "TCP port" (with a space), matching the output_table
+                    # key the bundled ms-sql-info.nse assigns — see
+                    # nse/ms-sql-info.nse's create_instance_output_table().
                     for instance_table in script.findall('table'):
-                        tcp_elem = instance_table.find("elem[@key='tcp']")
+                        tcp_elem = instance_table.find("elem[@key='TCP port']")
                         if tcp_elem is not None and tcp_elem.text not in ('1433', None):
                             discovered.setdefault(ip, []).append(tcp_elem.text)
         except Exception as e:
@@ -2074,20 +2080,43 @@ def _scan_extra_sql_ports(output_path, source_port):
     for ip, ports in discovered.items():
         for port in ports:
             out_file = f'{output_path}/nmap_results/port{port}_sql.xml'
-            if os.path.exists(out_file):
+            if not os.path.exists(out_file):
+                print(_COLOR_INFO + f'Discovered SQL Server instance on {ip}:{port} — running nmap -sV...' + _COLOR_RESET)
+                term_state = save_terminal_state()
+                try:
+                    proc = subprocess.Popen([
+                        'nmap', '-T4', '-sS', '-sV', '--version-intensity', '0',
+                        '-Pn', '-p', port,
+                        *(['--source-port', source_port] if source_port else []),
+                        ip, '-oX', out_file
+                    ])
+                    proc.wait()
+                except Exception as e:
+                    print(_COLOR_ERROR + f'Error scanning SQL port {port}: {e}' + _COLOR_RESET)
+                finally:
+                    restore_terminal_state(term_state)
+
+            # Separate --script invocation (mirrors the nmap_results/nse_results
+            # split used for the main port scan) so azure-sql-detect gets to
+            # run against this named instance too — otherwise a SQL Server
+            # discovered on a non-standard port would never get classified as
+            # Azure vs on-prem, only the default-instance port 1433 would.
+            nse_out_file = f'{output_path}/nse_results/port{port}_sql.xml'
+            if os.path.exists(nse_out_file):
                 continue
-            print(_COLOR_INFO + f'Discovered SQL Server instance on {ip}:{port} — running nmap -sV...' + _COLOR_RESET)
+            print(_COLOR_INFO + f'Running azure-sql-detect against {ip}:{port}...' + _COLOR_RESET)
             term_state = save_terminal_state()
             try:
                 proc = subprocess.Popen([
-                    'nmap', '-T4', '-sS', '-sV', '--version-intensity', '0',
-                    '-Pn', '-p', port,
+                    'nmap', '-T4', '-sS', '-Pn', '-p', port,
+                    '--script', f'{_DIR}/nse/azure-sql-detect.nse',
+                    '--script-timeout', '30s',
                     *(['--source-port', source_port] if source_port else []),
-                    ip, '-oX', out_file
+                    ip, '-oX', nse_out_file
                 ])
                 proc.wait()
             except Exception as e:
-                print(_COLOR_ERROR + f'Error scanning SQL port {port}: {e}' + _COLOR_RESET)
+                print(_COLOR_ERROR + f'Error running azure-sql-detect on port {port}: {e}' + _COLOR_RESET)
             finally:
                 restore_terminal_state(term_state)
 
@@ -2163,6 +2192,124 @@ def _summarize_vulns(scripts):
     return hits
 
 
+# Azure SQL Database / Managed Instance are reached through the Azure SQL
+# Gateway under these FQDN suffixes. A match here — whether against the
+# target's resolved hostname or the server's own TLS certificate SAN — is a
+# definitive signal that cannot be produced by an on-prem server.
+AZURE_SQL_DOMAIN_SUFFIXES = (
+    '.database.windows.net',
+    '.database.chinacloudapi.cn',
+    '.database.usgovcloudapi.net',
+)
+
+# Human-readable basis text per _classify_sql() confidence tier.
+_SQL_AZURE_BASIS = {
+    'hostname': 'Confirmed via hostname',
+    'certificate': 'Confirmed via certificate SAN',
+    'fedauth': 'Likely',
+}
+
+# TDS/SSNetLib major.minor prefix -> branded product year, mirroring nmap's
+# own mssql.lua VERSION_LOOKUP_TABLE. Used as a fallback when the branded
+# product name isn't present in the script text (e.g. raw PRELOGIN output).
+SQL_VERSION_YEAR_BY_PREFIX = {
+    '8.00': '2000', '9.00': '2005', '10.00': '2008', '10.50': '2008 R2',
+    '11.0': '2012', '12.0': '2014', '13.0': '2016', '14.0': '2017',
+    '15.0': '2019', '16.0': '2022',
+}
+
+# Microsoft extended-support end dates, per product lifecycle. Azure SQL
+# Database freezes its reported protocol version at 12.0 (SQL Server 2014's
+# number) even though the service itself is a managed, evergreen offering —
+# so this table must never be applied to an instance classified as Azure.
+SQL_SERVER_EOL = {
+    '2000': '2008-04-08',
+    '2005': '2016-04-12',
+    '2008': '2019-07-09',
+    '2008 R2': '2019-07-09',
+    '2012': '2022-07-12',
+    '2014': '2024-07-09',
+    '2016': '2026-07-14',
+}
+
+
+def _sql_version_year(text):
+    """Extract a branded SQL Server year (e.g. '2014', '2008 R2') from script text.
+
+    Tries the branded product name first ("Microsoft SQL Server 2014"), then
+    falls back to a bare version-number prefix (e.g. "12.0.2000.8").
+    """
+    if not text:
+        return None
+    m = re.search(r'Microsoft SQL Server (\d{4}(?:\s+R2)?)', text)
+    if m:
+        return m.group(1)
+    m = re.search(r'\b(\d{1,2}\.\d{1,2})\.\d+', text)
+    if m:
+        return SQL_VERSION_YEAR_BY_PREFIX.get(m.group(1))
+    return None
+
+
+def _cert_san_azure_match(azure_output):
+    """Return the first Azure-suffixed SAN hostname from a CERT_SAN=... token, else None.
+
+    azure-sql-detect.nse retrieves the server's TLS certificate (via nmap's own
+    sslcert.getCertificate(), which knows how to drive the TDS-tunneled TLS
+    handshake far enough to read the Certificate message) and reports its SAN
+    DNS entries verbatim. The certificate is presented by the server itself,
+    so a matching SAN is definitive regardless of what hostname or IP was used
+    to reach it — unlike the target hostname, it isn't affected by private
+    endpoints, custom internal DNS, or a bare-IP scan with no hostname at all.
+    """
+    if not azure_output:
+        return None
+    m = re.search(r'CERT_SAN=(\S+)', azure_output)
+    if not m or m.group(1) in ('none', 'unavailable'):
+        return None
+    for name in m.group(1).split(','):
+        if name.lower().endswith(AZURE_SQL_DOMAIN_SUFFIXES):
+            return name
+    return None
+
+
+def _classify_sql(hostname, ms_sql_output='', azure_output=''):
+    """Classify a SQL Server instance as Azure-managed or on-prem.
+
+    Returns (is_azure, confidence, year):
+      is_azure   - bool
+      confidence - 'hostname' (target hostname ends in an Azure SQL suffix),
+                   'certificate' (the server's own TLS certificate SAN carries
+                   an Azure SQL suffix — read directly off the wire, so it
+                   works even without a usable hostname), 'fedauth' (PRELOGIN
+                   FEDAUTHREQUIRED token only — corroborating, not conclusive;
+                   an on-prem server with Entra auth can also advertise it),
+                   or None when is_azure is False.
+      year       - branded product year if determined, else None.
+
+    'hostname' and 'certificate' are both definitive: neither can be produced
+    by a correctly-configured on-prem server. But that priority is
+    one-directional — a match on either proves Azure, while the absence of
+    both proves nothing. Internal scans routinely reach Azure SQL Managed
+    Instance/Database through a private endpoint, ExpressRoute/VPN, or a
+    custom internal DNS name (or no hostname at all for a bare-IP target),
+    none of which surface the public *.database.windows.net suffix in DNS —
+    the certificate check exists precisely to still catch those cases. So the
+    absence of both never downgrades a 'fedauth' PRELOGIN signal to on-prem.
+    """
+    year = _sql_version_year(ms_sql_output) or _sql_version_year(azure_output)
+
+    if hostname and hostname.lower().endswith(AZURE_SQL_DOMAIN_SUFFIXES):
+        return True, 'hostname', year
+
+    if _cert_san_azure_match(azure_output):
+        return True, 'certificate', year
+
+    if azure_output and 'FEDAUTHREQUIRED=1' in azure_output.upper().replace(' ', ''):
+        return True, 'fedauth', year
+
+    return False, None, year
+
+
 def generate_findings(output_path, target_scan, snmp_any_validated=None):
     """Parse nmap script output and write findings.txt and findings.md."""
     nmap_dir = f'{output_path}/nse_results'
@@ -2180,6 +2327,30 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
         return {s.attrib['id']: s.attrib.get('output', '')
                 for s in elem.findall('script')}
 
+    def add_sql_instance_finding(ip, port_str, ms_sql_output):
+        """Emit the SQL Server discovery finding, with Azure exemption + on-prem EOL check.
+
+        Azure SQL Database freezes its reported protocol version at 12.0 (SQL
+        Server 2014's version number) even though the service itself is a
+        managed, evergreen offering — so an Azure-classified instance is
+        never treated as end-of-life, regardless of the version it reports.
+        """
+        hostname = ip_to_hostname.get(ip)
+        is_azure, confidence, year = _classify_sql(hostname, ms_sql_output=ms_sql_output)
+        if is_azure:
+            basis = _SQL_AZURE_BASIS[confidence]
+            add('LOW', ip, port_str, 'Azure SQL Database Detected',
+                f'{basis} Azure SQL Database/Managed Instance — a managed, evergreen service. '
+                f'The frozen protocol version reported here is expected and is NOT end-of-life. '
+                + ms_sql_output[:300])
+        elif year and year in SQL_SERVER_EOL:
+            add('HIGH', ip, port_str, 'End-of-Life SQL Server',
+                f'SQL Server {year} (extended support ended {SQL_SERVER_EOL[year]}) is past '
+                'Microsoft support and no longer receives security updates. '
+                + ms_sql_output[:300])
+        else:
+            add('LOW', ip, port_str, 'SQL Server Instance Discovered', ms_sql_output[:300])
+
     def port_str_from_fname(fname):
         """Derive a port string from a filename like port445.xml or portU_1434.xml."""
         stem = fname.replace('.xml', '').lstrip('port')
@@ -2190,6 +2361,16 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
         if port_key.startswith('U:'):
             return f'udp/{port_key[2:]}'
         return f'tcp/{port_key}'
+
+    # ── load hostname map (for Azure SQL FQDN detection) ─────────────────────
+    ip_to_hostname = {}
+    hostmap_file = f'{_disc(output_path)}/ip_hostname_map.json'
+    if os.path.exists(hostmap_file):
+        try:
+            with open(hostmap_file) as fh:
+                ip_to_hostname = json.load(fh)
+        except (OSError, ValueError):
+            ip_to_hostname = {}
 
     # ── collect printer IPs (port 9100 open = JetDirect = printer) ───────────
     printer_ips = set()
@@ -2513,8 +2694,39 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
                     if 'ms-sql-info' in scripts and target_scan == 'Internal':
                         out = scripts['ms-sql-info'].strip()
                         if out:
-                            add('LOW', ip, port_str, 'SQL Server Instance Discovered',
-                                out[:300])
+                            add_sql_instance_finding(ip, port_str, out)
+
+                # ── azure-sql-detect (portscript on TCP 1433, 3342, or any ──
+                #     non-standard port a named instance was found on) ─────
+                # Sends a raw TDS PRELOGIN advertising FEDAUTHREQUIRED and
+                # retrieves the TLS certificate SAN (via nmap's own
+                # sslcert.getCertificate over the TDS-tunneled handshake) —
+                # both signals nmap's own mssql.lua library cannot see. See
+                # nse/azure-sql-detect.nse for why a bare-IP Azure SQL target
+                # can't be distinguished from on-prem using the stock
+                # ms-sql-info script alone. Not gated to a fixed port list:
+                # the script itself only ever produces output when it saw a
+                # genuine PRELOGIN response, so 'azure-sql-detect' in scripts
+                # is already a reliable signal regardless of which port it
+                # ran on (1433, 3342, or a discovered named-instance port).
+                if protocol == 'tcp' and 'azure-sql-detect' in scripts:
+                    az_out = scripts['azure-sql-detect'].strip()
+                    if az_out:
+                        hostname = ip_to_hostname.get(ip)
+                        is_azure, confidence, _year = _classify_sql(hostname, azure_output=az_out)
+                        # azure-sql-detect.nse returns a multi-line, screenshot-
+                        # friendly layout; flatten to one line here since it
+                        # feeds a finding 'detail' field, which findings.md
+                        # renders as a single markdown table cell.
+                        az_out_flat = '; '.join(
+                            line.strip() for line in az_out.splitlines() if line.strip())
+                        if is_azure:
+                            basis = _SQL_AZURE_BASIS[confidence]
+                            add('LOW', ip, port_str, 'Azure SQL Database Detected',
+                                f'{basis} Azure SQL Database/Managed Instance (managed, evergreen '
+                                f'service) — {az_out_flat}')
+                        else:
+                            add('LOW', ip, port_str, 'SQL Server PRELOGIN Probe', az_out_flat)
 
                 # ── ipmi-cipher-zero (CVE-2013-4786 Cipher Zero auth bypass) ──
                 if 'ipmi-cipher-zero' in scripts:
@@ -2718,8 +2930,7 @@ def generate_findings(output_path, target_scan, snmp_any_validated=None):
                 if 'ms-sql-info' in hscripts and target_scan == 'Internal':
                     out = hscripts['ms-sql-info'].strip()
                     if out:
-                        add('LOW', ip, file_port_str, 'SQL Server Instance Discovered',
-                            out[:300])
+                        add_sql_instance_finding(ip, file_port_str, out)
 
     # ── external exposure findings (port list, no script needed) ─────────────
     if target_scan == 'External':
@@ -2993,6 +3204,46 @@ _FINDING_REPRO = {
             '|       name: Microsoft SQL Server 2019 RTM\n'
             '|       number: 15.00.2000.00\n'
             '|_      Product: Microsoft SQL Server 2019'
+        ),
+    },
+    'End-of-Life SQL Server': {
+        'flags': '--script ms-sql-info',
+        'sample': (
+            'PORT     STATE SERVICE\n'
+            '1433/tcp open  ms-sql-s\n'
+            '| ms-sql-info:\n'
+            '|   10.0.0.5\\MSSQLSERVER:\n'
+            '|     Version:\n'
+            '|       name: Microsoft SQL Server 2014 SP3\n'
+            '|       number: 12.00.6024.00\n'
+            '|_      Product: Microsoft SQL Server 2014'
+        ),
+    },
+    'Azure SQL Database Detected': {
+        'flags': f'--script {_DIR}/nse/azure-sql-detect.nse',
+        'sample': (
+            'PORT     STATE SERVICE\n'
+            '1433/tcp open  ms-sql-s\n'
+            '| azure-sql-detect: Azure SQL Database / Managed Instance detected (certificate SAN confirms Azure)\n'
+            '|   Certificate SAN : myserver.database.windows.net\n'
+            '|   Reported version: 12.0.2000.8 (frozen at "SQL Server 2014" -- expected for Azure, NOT end-of-life)\n'
+            '|   Raw signals:\n'
+            '|     FEDAUTHREQUIRED=1\n'
+            '|     ENCRYPT=REQUIRED\n'
+            '|_    CERT_SAN=myserver.database.windows.net'
+        ),
+    },
+    'SQL Server PRELOGIN Probe': {
+        'flags': f'--script {_DIR}/nse/azure-sql-detect.nse',
+        'sample': (
+            'PORT     STATE SERVICE\n'
+            '1433/tcp open  ms-sql-s\n'
+            '| azure-sql-detect: No Azure SQL Gateway signals detected\n'
+            '|   Reported version: 15.0.2000.0\n'
+            '|   Raw signals:\n'
+            '|     FEDAUTHREQUIRED=not offered\n'
+            '|     ENCRYPT=ON\n'
+            '|_    CERT_SAN=none'
         ),
     },
     'SNMP Default Community String': {

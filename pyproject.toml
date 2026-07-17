@@ -15,10 +15,21 @@ spoonmap = "spoonmap:main"
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "pytest-cov>=5.0.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--cov=spoonmap --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["spoonmap"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+]
 
 [tool.hatch.build.targets.wheel]
 # Include the sample config and empty exclusions template alongside the module

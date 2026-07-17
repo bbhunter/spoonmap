@@ -11,19 +11,24 @@ import xml.etree.ElementTree as etree
 
 import spoonmap
 from spoonmap import (
+    AZURE_SQL_DOMAIN_SUFFIXES,
     DISCOVERY_MASSCAN_PORTS_INTERNAL,
     DISCOVERY_TCP_PORTS_INTERNAL,
+    EXTERNAL_PORT_SCRIPTS,
     EXTERNAL_PROBE_PORT_PRIORITY,
     EXTERNAL_SENSITIVE_PORTS,
     HOST_DISCOVERY_NMAP_THRESHOLD,
     INTERNAL_DISCOVERY_MAX_RATE,
     INTERNAL_DISCOVERY_STATE_CEILING,
     SLOW_PORTS,
+    SQL_SERVER_EOL,
     INTERNAL_PORT_SCRIPTS,
     PROBE_PORT_PRIORITY,
     _build_interactive_config,
     _build_nmap_cmd,
+    _classify_sql,
     _external_exposure_scripts,
+    _sql_version_year,
     _summarize_vulns,
     _handle_previous_results,
     _prompt_yes_no,
@@ -219,7 +224,12 @@ class TestGetScriptsForPort:
         assert 'smb-vuln-ms17-010' in result
 
     def test_internal_mssql(self):
-        assert _get_scripts_for_port('1433', 'Internal') == 'ms-sql-info'
+        # azure-sql-detect.nse rides along with ms-sql-info to distinguish
+        # Azure SQL Database (frozen 12.0 version, NOT end-of-life) from
+        # genuinely end-of-life on-prem SQL Server.
+        result = _get_scripts_for_port('1433', 'Internal')
+        assert result.split(',')[0] == 'ms-sql-info'
+        assert result.endswith('nse/azure-sql-detect.nse')
 
     def test_internal_udp_mssql(self):
         # Bundled pre-redesign script is referenced by absolute path
@@ -2333,7 +2343,9 @@ class TestMergeHostXml:
 # Real nmap XML for ms-sql-info when it fires as a *portscript* on UDP 1434.
 # Structure: <table key="INSTANCE"> (instance table, direct child of <script>)
 #              └── <table key="Version"> (version sub-table)
-#              └── <elem key="tcp">PORT</elem>
+#              └── <elem key="TCP port">PORT</elem>  (key matches
+#                    create_instance_output_table()'s instanceOutput["TCP port"]
+#                    in nse/ms-sql-info.nse — NOT the bare key "tcp")
 #              └── <elem key="Named pipe">...</elem>
 _MS_SQL_INFO_UDP_XML = textwrap.dedent("""\
     <?xml version="1.0"?>
@@ -2349,7 +2361,7 @@ _MS_SQL_INFO_UDP_XML = textwrap.dedent("""\
                   <elem key="name">Microsoft SQL Server 2019</elem>
                   <elem key="number">15.00.2000.00</elem>
                 </table>
-                <elem key="tcp">1433</elem>
+                <elem key="TCP port">1433</elem>
                 <elem key="Named pipe">\\\\192.168.1.10\\pipe\\sql\\query</elem>
               </table>
             </script>
@@ -2373,7 +2385,7 @@ _MS_SQL_INFO_NAMED_INSTANCE_XML = textwrap.dedent("""\
                 <table key="Version">
                   <elem key="name">Microsoft SQL Server 2019 Express</elem>
                 </table>
-                <elem key="tcp">51234</elem>
+                <elem key="TCP port">51234</elem>
                 <elem key="Named pipe">\\\\192.168.1.10\\pipe\\MSSQL$SQLEXPRESS\\sql\\query</elem>
               </table>
             </script>
@@ -2425,13 +2437,20 @@ class TestScanExtraSqlPorts:
     """_scan_extra_sql_ports() parsing of ms-sql-info XML output."""
 
     def test_finds_named_instance_on_non_standard_port(self, tmp_path):
-        """Named instance on port 51234 triggers an extra nmap scan.
+        """Named instance on port 51234 triggers extra nmap scans.
 
         The ms-sql-info XML has <table key="Version"> as a direct child of the
-        instance table.  <elem key="tcp"> is a *sibling* of that version table
-        (also a direct child of the instance table), not inside the version
-        sub-table.  The correct XPath to reach instance tables is 'table', not
-        'table/table' (which would navigate into the version sub-table).
+        instance table.  <elem key="TCP port"> is a *sibling* of that version
+        table (also a direct child of the instance table), not inside the
+        version sub-table.  The correct XPath to reach instance tables is
+        'table', not 'table/table' (which would navigate into the version
+        sub-table).
+
+        Two separate invocations are expected: a plain -sV scan (written to
+        nmap_results/, merged into spoonmap_output) and a --script
+        azure-sql-detect scan (written to nse_results/, picked up by
+        generate_findings()) — mirroring the same nmap_results/nse_results
+        split used for the main port scan.
         """
         nse_dir = tmp_path / 'nse_results'
         nse_dir.mkdir()
@@ -2445,9 +2464,17 @@ class TestScanExtraSqlPorts:
             mock_popen.return_value = mock_proc
             _scan_extra_sql_ports(str(tmp_path), '88')
 
-        assert mock_popen.called, 'nmap should be called for the non-standard port 51234'
-        cmd = mock_popen.call_args[0][0]
-        assert '51234' in cmd, f'Expected port 51234 in nmap command, got: {cmd}'
+        assert mock_popen.call_count == 2, f'Expected 2 nmap invocations, got {mock_popen.call_count}'
+        commands = [c[0][0] for c in mock_popen.call_args_list]
+        assert all('51234' in cmd for cmd in commands)
+
+        sv_cmd = next(cmd for cmd in commands if '-sV' in cmd)
+        assert f'{tmp_path}/nmap_results/port51234_sql.xml' in sv_cmd
+
+        script_cmd = next(cmd for cmd in commands if '--script' in cmd)
+        assert any('azure-sql-detect.nse' in arg for arg in script_cmd)
+        assert f'{tmp_path}/nse_results/port51234_sql.xml' in script_cmd
+        assert '-sV' not in script_cmd
 
     def test_standard_1433_instance_not_rescanned(self, tmp_path):
         """An instance on the default port 1433 must not trigger an extra scan."""
@@ -2461,6 +2488,338 @@ class TestScanExtraSqlPorts:
             _scan_extra_sql_ports(str(tmp_path), '88')
 
         assert not mock_popen.called, 'nmap must NOT be called for a standard 1433 instance'
+
+    def test_azure_sql_detect_scan_skipped_when_already_run(self, tmp_path):
+        """Resume behavior: an existing nse_results/portN_sql.xml skips only that scan."""
+        nse_dir = tmp_path / 'nse_results'
+        nse_dir.mkdir()
+        (nse_dir / 'portU_1434.xml').write_text(_MS_SQL_INFO_NAMED_INSTANCE_XML)
+        (nse_dir / 'port51234_sql.xml').write_text('<nmaprun></nmaprun>')
+
+        with patch('spoonmap.subprocess.Popen') as mock_popen, \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            mock_proc = MagicMock()
+            mock_proc.wait.return_value = 0
+            mock_popen.return_value = mock_proc
+            _scan_extra_sql_ports(str(tmp_path), '88')
+
+        assert mock_popen.call_count == 1, 'Only the -sV scan should run; azure-sql-detect already has output'
+        cmd = mock_popen.call_args[0][0]
+        assert '-sV' in cmd
+
+
+# ── Azure SQL Database vs on-prem classification ──────────────────────────────
+
+class TestSqlVersionYear:
+    """_sql_version_year() extracts a branded SQL Server year from script text."""
+
+    def test_branded_name_with_service_pack(self):
+        assert _sql_version_year('name: Microsoft SQL Server 2014 SP3') == '2014'
+
+    def test_branded_name_r2(self):
+        assert _sql_version_year('Product: Microsoft SQL Server 2008 R2') == '2008 R2'
+
+    def test_falls_back_to_version_number_prefix(self):
+        # No branded name present — only the raw PRELOGIN version number.
+        assert _sql_version_year('version 12.0.2000.8') == '2014'
+
+    def test_unrecognized_prefix_returns_none(self):
+        assert _sql_version_year('version 99.9.1234') is None
+
+    def test_empty_text_returns_none(self):
+        assert _sql_version_year('') is None
+        assert _sql_version_year(None) is None
+
+
+class TestClassifySql:
+    """_classify_sql() layers hostname/certificate (definitive) over PRELOGIN FEDAUTHREQUIRED (fedauth-only, corroborating)."""
+
+    def test_azure_domain_suffixes_cover_public_and_sovereign_clouds(self):
+        assert '.database.windows.net' in AZURE_SQL_DOMAIN_SUFFIXES
+        assert '.database.chinacloudapi.cn' in AZURE_SQL_DOMAIN_SUFFIXES
+        assert '.database.usgovcloudapi.net' in AZURE_SQL_DOMAIN_SUFFIXES
+
+    def test_azure_hostname_is_definitive(self):
+        is_azure, confidence, year = _classify_sql(
+            'myserver.database.windows.net',
+            ms_sql_output='name: Microsoft SQL Server 2014 SP3',
+        )
+        assert is_azure is True
+        assert confidence == 'hostname'
+        assert year == '2014'
+
+    def test_azure_sovereign_cloud_hostname_is_definitive(self):
+        is_azure, confidence, _year = _classify_sql('sql1.database.usgovcloudapi.net')
+        assert is_azure is True
+        assert confidence == 'hostname'
+
+    def test_onprem_hostname_is_not_azure(self):
+        is_azure, confidence, _year = _classify_sql(
+            'sql01.corp.local', ms_sql_output='Microsoft SQL Server 2014 SP3')
+        assert is_azure is False
+        assert confidence is None
+
+    def test_bare_ip_with_fedauthrequired_is_fedauth_only(self):
+        # No hostname at all (bare-IP target) — the PRELOGIN probe is the only signal.
+        is_azure, confidence, _year = _classify_sql(
+            None, azure_output='FEDAUTHREQUIRED=1  ENCRYPT=REQUIRED  version 12.0.2000')
+        assert is_azure is True
+        assert confidence == 'fedauth'
+
+    def test_bare_ip_without_fedauthrequired_is_onprem(self):
+        is_azure, confidence, _year = _classify_sql(
+            None, azure_output='FEDAUTHREQUIRED=0  ENCRYPT=ON  version 15.00.2000')
+        assert is_azure is False
+        assert confidence is None
+
+    def test_hostname_overrides_missing_fedauthrequired(self):
+        # Azure FQDN is definitive even if the PRELOGIN probe didn't run/failed.
+        is_azure, confidence, _year = _classify_sql(
+            'myserver.database.windows.net', azure_output='')
+        assert is_azure is True
+        assert confidence == 'hostname'
+
+    # ── certificate SAN (works even on hostname-less/internal targets) ──────
+
+    def test_bare_ip_cert_san_match_is_definitive(self):
+        # No hostname, no FEDAUTHREQUIRED — the certificate SAN is the only
+        # signal, exactly the internal-scan / private-endpoint scenario the
+        # hostname check alone cannot cover.
+        is_azure, confidence, _year = _classify_sql(
+            None,
+            azure_output='FEDAUTHREQUIRED=0 ENCRYPT=REQUIRED CERT_SAN=myserver.database.windows.net version 12.0.2000',
+        )
+        assert is_azure is True
+        assert confidence == 'certificate'
+
+    def test_cert_san_with_multiple_entries_matches_any(self):
+        is_azure, confidence, _year = _classify_sql(
+            None,
+            azure_output='FEDAUTHREQUIRED=0 ENCRYPT=REQUIRED '
+                          'CERT_SAN=other.internal.name,myserver.database.chinacloudapi.cn version 12.0.2000',
+        )
+        assert is_azure is True
+        assert confidence == 'certificate'
+
+    def test_cert_san_none_falls_back_to_fedauth(self):
+        is_azure, confidence, _year = _classify_sql(
+            None,
+            azure_output='FEDAUTHREQUIRED=1 ENCRYPT=REQUIRED CERT_SAN=none version 12.0.2000',
+        )
+        assert is_azure is True
+        assert confidence == 'fedauth'
+
+    def test_cert_san_unavailable_falls_back_to_fedauth(self):
+        is_azure, confidence, _year = _classify_sql(
+            None,
+            azure_output='FEDAUTHREQUIRED=1 ENCRYPT=REQUIRED CERT_SAN=unavailable version 12.0.2000',
+        )
+        assert is_azure is True
+        assert confidence == 'fedauth'
+
+    def test_cert_san_non_azure_hostnames_do_not_confirm(self):
+        is_azure, confidence, _year = _classify_sql(
+            None,
+            azure_output='FEDAUTHREQUIRED=0 ENCRYPT=ON CERT_SAN=sql01.corp.local,sql01 version 15.00.2000',
+        )
+        assert is_azure is False
+        assert confidence is None
+
+    def test_cert_san_beats_missing_hostname_even_without_fedauth(self):
+        # Confirms certificate check is independent of the FEDAUTHREQUIRED signal.
+        is_azure, confidence, _year = _classify_sql(
+            'sql-prod-01.internal.corp.com',  # internal alias, not an Azure FQDN
+            azure_output='FEDAUTHREQUIRED=0 ENCRYPT=REQUIRED CERT_SAN=sql-mi.database.windows.net version 12.0.2000',
+        )
+        assert is_azure is True
+        assert confidence == 'certificate'
+
+
+class TestGenerateFindingsSqlEolAndAzure:
+    """generate_findings() SQL branches: on-prem EOL detection + Azure exemption."""
+
+    def test_corrupt_hostname_map_falls_back_gracefully(self, nmap_dir):
+        """A malformed ip_hostname_map.json must not crash generate_findings()."""
+        (nmap_dir / 'discovery').mkdir(parents=True)
+        (nmap_dir / 'discovery' / 'ip_hostname_map.json').write_text('{not valid json')
+        xml = _nmap_xml_hostscript(
+            '10.0.0.26', 'tcp', '1434',
+            hostscripts={'ms-sql-info': 'name: Microsoft SQL Server 2019 RTM'})
+        (nmap_dir / 'nse_results' / 'port1434.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')  # must not raise
+        txt = (nmap_dir / 'findings.txt').read_text()
+        assert 'SQL Server Instance Discovered' in txt
+
+    def test_onprem_eol_sql_2014_is_high(self, nmap_dir):
+        xml = _nmap_xml_hostscript(
+            '10.0.0.20', 'tcp', '1434',
+            hostscripts={'ms-sql-info': 'name: Microsoft SQL Server 2014 SP3'})
+        (nmap_dir / 'nse_results' / 'port1434.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        records = json.loads((nmap_dir / 'findings.json').read_text())
+        eol = [r for r in records if r['title'] == 'End-of-Life SQL Server']
+        assert eol and eol[0]['severity'] == 'HIGH'
+        assert '10.0.0.20' in eol[0]['host']
+        assert '2024-07-09' in eol[0]['detail']
+
+    def test_onprem_supported_sql_2019_no_eol_finding(self, nmap_dir):
+        xml = _nmap_xml_hostscript(
+            '10.0.0.21', 'tcp', '1434',
+            hostscripts={'ms-sql-info': 'name: Microsoft SQL Server 2019 RTM'})
+        (nmap_dir / 'nse_results' / 'port1434.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        txt = (nmap_dir / 'findings.txt').read_text()
+        assert 'End-of-Life SQL Server' not in txt
+
+    def test_azure_hostname_exempts_frozen_12_0_from_eol(self, nmap_dir):
+        # Azure SQL Database reports a frozen 12.0 (SQL 2014) version, but is a
+        # managed evergreen service — it must NOT be flagged End-of-Life.
+        (nmap_dir / 'discovery').mkdir(parents=True)
+        (nmap_dir / 'discovery' / 'ip_hostname_map.json').write_text(
+            json.dumps({'10.0.0.22': 'myserver.database.windows.net'}))
+        xml = _nmap_xml_hostscript(
+            '10.0.0.22', 'tcp', '1434',
+            hostscripts={'ms-sql-info': 'name: Microsoft SQL Server 2014 SP3'})
+        (nmap_dir / 'nse_results' / 'port1434.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        records = json.loads((nmap_dir / 'findings.json').read_text())
+        assert not [r for r in records if r['title'] == 'End-of-Life SQL Server']
+        azure = [r for r in records if r['title'] == 'Azure SQL Database Detected']
+        assert azure and azure[0]['severity'] == 'LOW'
+        assert 'NOT end-of-life' in azure[0]['detail']
+
+    def test_azure_sql_detect_portscript_bare_ip_likely_azure(self, nmap_dir):
+        """azure-sql-detect on TCP 1433 with FEDAUTHREQUIRED=1 and no hostname."""
+        xml = _nmap_xml('10.0.0.23', 'tcp', '1433', scripts={
+            'azure-sql-detect': 'FEDAUTHREQUIRED=1 ENCRYPT=REQUIRED version 12.0.2000',
+        })
+        (nmap_dir / 'nse_results' / 'port1433.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        records = json.loads((nmap_dir / 'findings.json').read_text())
+        azure = [r for r in records if r['title'] == 'Azure SQL Database Detected']
+        assert azure and azure[0]['severity'] == 'LOW'
+        assert 'Likely' in azure[0]['detail']
+
+    def test_azure_sql_detect_portscript_no_fedauth_is_onprem_probe(self, nmap_dir):
+        xml = _nmap_xml('10.0.0.24', 'tcp', '1433', scripts={
+            'azure-sql-detect': 'FEDAUTHREQUIRED=0 ENCRYPT=ON version 15.00.2000',
+        })
+        (nmap_dir / 'nse_results' / 'port1433.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        txt = (nmap_dir / 'findings.txt').read_text()
+        assert 'SQL Server PRELOGIN Probe' in txt
+        assert 'Azure SQL Database Detected' not in txt
+
+    def test_azure_sql_detect_runs_on_external_scan_too(self, nmap_dir):
+        """Unlike ms-sql-info, azure-sql-detect findings are not Internal-only."""
+        xml = _nmap_xml('10.0.0.25', 'tcp', '1433', scripts={
+            'azure-sql-detect': 'FEDAUTHREQUIRED=1 ENCRYPT=REQUIRED version 12.0.2000',
+        })
+        (nmap_dir / 'nse_results' / 'port1433.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        txt = (nmap_dir / 'findings.txt').read_text()
+        assert 'Azure SQL Database Detected' in txt
+
+    def test_azure_sql_detect_cert_san_confirms_on_bare_ip_internal_target(self, nmap_dir):
+        """Certificate SAN confirms Azure even with no hostname at all (private
+        endpoint / custom internal DNS scenario the hostname check can't cover)."""
+        xml = _nmap_xml('10.0.0.27', 'tcp', '1433', scripts={
+            'azure-sql-detect': 'FEDAUTHREQUIRED=0 ENCRYPT=REQUIRED '
+                                 'CERT_SAN=myserver.database.windows.net version 12.0.2000.8',
+        })
+        (nmap_dir / 'nse_results' / 'port1433.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        records = json.loads((nmap_dir / 'findings.json').read_text())
+        azure = [r for r in records if r['title'] == 'Azure SQL Database Detected']
+        assert azure and azure[0]['severity'] == 'LOW'
+        assert 'Confirmed via certificate SAN' in azure[0]['detail']
+
+    def test_azure_sql_detect_multiline_output_is_flattened_for_findings(self, nmap_dir):
+        """azure-sql-detect.nse's real output is multi-line (screenshot-friendly
+        headline + indented evidence lines). generate_findings() must flatten
+        it to one line for the 'detail' field so findings.md's markdown table
+        doesn't break on an embedded newline, while classification still uses
+        the raw multi-line text unchanged."""
+        real_multiline_output = (
+            'Azure SQL Database / Managed Instance detected (certificate SAN confirms Azure)\n'
+            '  Certificate SAN : myserver.database.windows.net\n'
+            '  Reported version: 12.0.2000.8 (frozen at "SQL Server 2014" -- expected for Azure, NOT end-of-life)\n'
+            '  Raw signals:\n'
+            '    FEDAUTHREQUIRED=0\n'
+            '    ENCRYPT=REQUIRED\n'
+            '    CERT_SAN=myserver.database.windows.net'
+        )
+        xml = _nmap_xml('10.0.0.30', 'tcp', '1433', scripts={'azure-sql-detect': real_multiline_output})
+        (nmap_dir / 'nse_results' / 'port1433.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+
+        records = json.loads((nmap_dir / 'findings.json').read_text())
+        azure = [r for r in records if r['title'] == 'Azure SQL Database Detected']
+        assert azure and azure[0]['severity'] == 'LOW'
+        assert '\n' not in azure[0]['detail']
+        assert 'CERT_SAN=myserver.database.windows.net' in azure[0]['detail']
+
+        # findings.md must stay valid: this finding's row is a single,
+        # well-formed table line (not split across lines by an embedded
+        # newline from the raw multi-line NSE output).
+        md = (nmap_dir / 'findings.md').read_text()
+        matching_lines = [ln for ln in md.splitlines() if '10.0.0.30' in ln]
+        assert len(matching_lines) == 1
+        row = matching_lines[0]
+        assert row.startswith('| `10.0.0.30`') and row.endswith('|')
+        assert row.count('|') == 4
+
+    def test_azure_sql_detect_fires_on_managed_instance_port_3342(self, nmap_dir):
+        """Azure SQL Managed Instance's public endpoint (3342), not just 1433."""
+        xml = _nmap_xml('10.0.0.28', 'tcp', '3342', scripts={
+            'azure-sql-detect': 'FEDAUTHREQUIRED=1 ENCRYPT=REQUIRED CERT_SAN=none version 12.0.2000',
+        })
+        (nmap_dir / 'nse_results' / 'port3342.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        records = json.loads((nmap_dir / 'findings.json').read_text())
+        azure = [r for r in records if r['title'] == 'Azure SQL Database Detected']
+        assert azure and azure[0]['port'] == 'tcp/3342'
+
+    def test_azure_sql_detect_fires_on_non_standard_named_instance_port(self, nmap_dir):
+        """A named instance SpooNMAP discovered on a dynamic port (via
+        _scan_extra_sql_ports's follow-up scan, written as portN_sql.xml) is
+        still classified — the finding isn't gated to a fixed port list."""
+        xml = _nmap_xml('10.0.0.29', 'tcp', '51234', scripts={
+            'azure-sql-detect': 'FEDAUTHREQUIRED=0 ENCRYPT=REQUIRED '
+                                 'CERT_SAN=myserver.database.windows.net version 12.0.2000.8',
+        })
+        (nmap_dir / 'nse_results' / 'port51234_sql.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        records = json.loads((nmap_dir / 'findings.json').read_text())
+        azure = [r for r in records if r['title'] == 'Azure SQL Database Detected']
+        assert azure and azure[0]['port'] == 'tcp/51234'
+
+
+class TestAzureSqlDetectWiring:
+    """azure-sql-detect.nse is registered on TCP 1433 and 3342 (Managed
+    Instance public endpoint) for both scan types."""
+
+    def test_wired_into_internal_port_scripts(self):
+        assert 'nse/azure-sql-detect.nse' in INTERNAL_PORT_SCRIPTS['1433']
+
+    def test_wired_into_external_port_scripts(self):
+        assert 'nse/azure-sql-detect.nse' in EXTERNAL_PORT_SCRIPTS['1433']
+
+    def test_get_scripts_for_port_includes_it_both_scans(self):
+        for scan in ('External', 'Internal'):
+            assert 'azure-sql-detect.nse' in _get_scripts_for_port('1433', scan)
+
+    def test_wired_into_port_3342_both_scans(self):
+        for scan in ('External', 'Internal'):
+            assert 'azure-sql-detect.nse' in _get_scripts_for_port('3342', scan)
+
+    def test_port_3342_in_database_category(self):
+        assert '3342' in SERVICE_CATEGORIES['Database']
+
+    def test_port_3342_in_external_sensitive_ports(self):
+        keys = {t[0] for t in EXTERNAL_SENSITIVE_PORTS}
+        assert '3342' in keys
 
 
 # ── TestInternalNseFindings ───────────────────────────────────────────────────
