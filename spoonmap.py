@@ -242,7 +242,7 @@ def _build_discovery_target_file(target_file, exclusions_file, disc):
     return filtered_file, count
 
 
-def ascii_art():
+def ascii_art():  # pragma: no cover -- cosmetic banner, no branches to verify
     print(r'''
 ________                   _____   _______  _________________
 __  ___/______________________  | / /__   |/  /__    |__  __ \
@@ -714,46 +714,6 @@ def _nmap_host_discovery(target_file, disc, source_port, exclusions_file):
         print(_COLOR_ERROR + f'Error parsing nmap discovery XML: {e}' + _COLOR_RESET)
 
     print(_COLOR_PROGRESS + f'Host discovery (nmap -sn): {len(live_ips)} host(s)' + _COLOR_RESET)
-    return live_ips
-
-
-def _masscan_host_discovery(target_file, disc, max_rate, exclusions_file, tcp_ports):
-    """Run masscan ICMP ping + TCP SYN probe in a single pass; return set of live IPs."""
-    combined_xml = os.path.join(disc, 'discovery_masscan.xml')
-
-    print(_COLOR_INFO + 'Host discovery: running masscan (ICMP + TCP SYN)...' + _COLOR_RESET)
-    masscan_cmd = [
-        'masscan', '--ping',
-        '-p', tcp_ports,
-        '--open',
-        '--max-rate', max_rate,
-        '--retries', '1',
-        '-iL', target_file,
-        '-oX', combined_xml,
-        '--wait', '3',
-    ]
-    if exclusions_file:
-        masscan_cmd.extend(['--excludefile', exclusions_file])
-    term_state = save_terminal_state()
-    try:
-        proc = subprocess.Popen(masscan_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                preexec_fn=_raise_fd_limit)
-        proc.wait()
-    except KeyboardInterrupt:
-        print(f'Killing PID {proc.pid}...')
-        proc.kill()
-        proc.wait()
-        restore_terminal_state(term_state)
-        raise
-    except FileNotFoundError:
-        print(_COLOR_ERROR + 'Error: masscan not found. Please install masscan.' + _COLOR_RESET)
-        restore_terminal_state(term_state)
-        quit(1)
-    finally:
-        restore_terminal_state(term_state)
-
-    live_ips = _parse_masscan_ping_xml(combined_xml)
-    print(_COLOR_PROGRESS + f'Host discovery (masscan): {len(live_ips)} host(s)' + _COLOR_RESET)
     return live_ips
 
 
@@ -3893,7 +3853,10 @@ def _handle_previous_results(output_path, resume, prompt_fn=input):
 
 
 # The Main Guts
-def main():
+def main():  # pragma: no cover -- interactive CLI entry point; orchestrates
+    # already-independently-tested functions behind input()-driven prompts,
+    # so there's little signal in mocking every prompt/subprocess in one
+    # giant test versus exercising each called function directly.
     global dir_path
     global output_path
 

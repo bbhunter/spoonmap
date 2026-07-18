@@ -3,7 +3,11 @@ import datetime
 import io
 import json
 import os
+import readline
 import textwrap
+import threading
+from pathlib import Path
+from queue import Empty, Queue
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -12,6 +16,7 @@ import xml.etree.ElementTree as etree
 import spoonmap
 from spoonmap import (
     AZURE_SQL_DOMAIN_SUFFIXES,
+    DISCOVERY_MASSCAN_PORTS_EXTERNAL,
     DISCOVERY_MASSCAN_PORTS_INTERNAL,
     DISCOVERY_TCP_PORTS_INTERNAL,
     EXTERNAL_PORT_SCRIPTS,
@@ -24,10 +29,15 @@ from spoonmap import (
     SQL_SERVER_EOL,
     INTERNAL_PORT_SCRIPTS,
     PROBE_PORT_PRIORITY,
+    _build_discovery_target_file,
     _build_interactive_config,
     _build_nmap_cmd,
+    _build_repro_cmd,
     _classify_sql,
+    _count_hosts_in_file,
     _external_exposure_scripts,
+    _format_eta,
+    _raise_fd_limit,
     _sql_version_year,
     _summarize_vulns,
     _handle_previous_results,
@@ -35,17 +45,24 @@ from spoonmap import (
     _host_discovery,
     _write_if_changed,
     _write_interactive_config,
+    _discover_external_masscan,
     _discover_internal_masscan,
+    _external_host_discovery,
+    _nmap_host_discovery,
+    _stream_masscan_progress,
     preprocess_targets,
     _discovery_wait,
     _internal_host_discovery,
     _merge_host_xml,
     _filter_udp_live_hosts,
+    _nmap_port_discovery,
     _nmap_udp_discovery,
     _parse_masscan_ping_xml,
     _parse_nmap_sn_xml,
+    _path_completion,
     _run_masscan_batch,
     _scan_extra_sql_ports,
+    _validate_snmp_any_community,
     _SMB_COUPLED_PORTS,
     _SMB_PORTS,
     SERVICE_CATEGORIES,
@@ -59,11 +76,286 @@ from spoonmap import (
     _write_findings_json,
     _write_findings_md,
     _write_findings_txt,
+    create_hostname_target_file,
     generate_findings,
     is_hostname,
     lineCount,
     mass_scan,
+    nmap_scan,
+    nmap_worker,
+    resolve_hostname,
+    restore_terminal_state,
+    save_terminal_state,
+    verify_python_version,
 )
+
+
+# ── small platform/utility helpers ─────────────────────────────────────────────
+
+class TestVerifyPythonVersion:
+    def test_python2_exits(self):
+        with patch('sys.version_info', (2, 7, 18, 'final', 0)):
+            with pytest.raises(SystemExit):
+                verify_python_version()
+
+    def test_python_3_5_exits(self):
+        with patch('sys.version_info', (3, 5, 0, 'final', 0)):
+            with pytest.raises(SystemExit):
+                verify_python_version()
+
+    def test_python_3_6_plus_is_ok(self):
+        with patch('sys.version_info', (3, 10, 0, 'final', 0)):
+            verify_python_version()  # must not raise
+
+
+class TestRaiseFdLimit:
+    def test_sets_soft_limit_to_hard_when_below_65535(self):
+        with patch('spoonmap.resource.getrlimit', return_value=(1024, 4096)), \
+             patch('spoonmap.resource.setrlimit') as mock_set:
+            _raise_fd_limit()
+        mock_set.assert_called_once_with(spoonmap.resource.RLIMIT_NOFILE, (4096, 4096))
+
+    def test_caps_soft_limit_at_65535_when_hard_is_higher(self):
+        with patch('spoonmap.resource.getrlimit', return_value=(1024, 1048576)), \
+             patch('spoonmap.resource.setrlimit') as mock_set:
+            _raise_fd_limit()
+        mock_set.assert_called_once_with(spoonmap.resource.RLIMIT_NOFILE, (65535, 1048576))
+
+    def test_setrlimit_failure_is_swallowed(self):
+        with patch('spoonmap.resource.getrlimit', return_value=(1024, 4096)), \
+             patch('spoonmap.resource.setrlimit', side_effect=ValueError):
+            _raise_fd_limit()  # must not raise
+
+
+class TestSaveRestoreTerminalState:
+    def test_save_returns_attrs_on_success(self):
+        sentinel = ['sentinel-attrs']
+        with patch('spoonmap.termios.tcgetattr', return_value=sentinel):
+            assert save_terminal_state() == sentinel
+
+    def test_save_returns_none_on_error(self):
+        with patch('spoonmap.termios.tcgetattr', side_effect=OSError):
+            assert save_terminal_state() is None
+
+    def test_restore_applies_saved_state_and_resets_tty(self):
+        with patch('spoonmap.termios.tcsetattr') as mock_set, \
+             patch('spoonmap.subprocess.run') as mock_run:
+            restore_terminal_state(['saved'])
+        mock_set.assert_called_once()
+        mock_run.assert_called_once()
+
+    def test_restore_with_none_state_still_resets_tty(self):
+        with patch('spoonmap.termios.tcsetattr') as mock_set, \
+             patch('spoonmap.subprocess.run') as mock_run:
+            restore_terminal_state(None)
+        mock_set.assert_not_called()
+        mock_run.assert_called_once()
+
+    def test_restore_swallows_tcsetattr_error(self):
+        with patch('spoonmap.termios.tcsetattr', side_effect=OSError), \
+             patch('spoonmap.subprocess.run'):
+            restore_terminal_state(['saved'])  # must not raise
+
+    def test_restore_swallows_subprocess_error(self):
+        with patch('spoonmap.termios.tcsetattr'), \
+             patch('spoonmap.subprocess.run', side_effect=OSError):
+            restore_terminal_state(['saved'])  # must not raise
+
+
+class TestFormatEta:
+    def test_singular_second(self):
+        assert _format_eta(1) == '~1 second'
+
+    def test_plural_seconds(self):
+        assert _format_eta(45) == '~45 seconds'
+
+    def test_singular_minute(self):
+        assert _format_eta(60) == '~1 minute'
+
+    def test_plural_minutes(self):
+        assert _format_eta(300) == '~5 minutes'
+
+    def test_exact_singular_hour(self):
+        assert _format_eta(3600) == '~1 hour'
+
+    def test_exact_plural_hours(self):
+        assert _format_eta(7200) == '~2 hours'
+
+    def test_hour_and_minute_singular(self):
+        assert _format_eta(3660) == '~1 hour 1 minute'
+
+    def test_hours_and_minutes_plural(self):
+        assert _format_eta(7500) == '~2 hours 5 minutes'
+
+
+class TestResolveHostname:
+    def test_successful_resolution(self):
+        with patch('spoonmap.socket.gethostbyname', return_value='10.0.0.5'):
+            assert resolve_hostname('example.com') == '10.0.0.5'
+
+    def test_failed_resolution_returns_none_and_warns(self, capsys):
+        with patch('spoonmap.socket.gethostbyname', side_effect=OSError('nope')):
+            assert resolve_hostname('bad.example.com') is None
+        assert 'Could not resolve hostname' in capsys.readouterr().out
+
+
+class TestCountHostsInFile:
+    def test_counts_bare_ips_and_cidrs(self, tmp_path):
+        f = tmp_path / 'targets.txt'
+        f.write_text('10.0.0.1\n10.0.0.0/30\n')
+        assert _count_hosts_in_file(str(f)) == 1 + 4
+
+    def test_blank_and_comment_lines_skipped(self, tmp_path):
+        f = tmp_path / 'targets.txt'
+        f.write_text('\n# a comment\n10.0.0.1\n')
+        assert _count_hosts_in_file(str(f)) == 1
+
+    def test_hostname_counts_as_one(self, tmp_path):
+        f = tmp_path / 'targets.txt'
+        f.write_text('example.internal\n10.0.0.1\n')
+        assert _count_hosts_in_file(str(f)) == 2
+
+    def test_missing_file_returns_none(self, tmp_path):
+        assert _count_hosts_in_file(str(tmp_path / 'nonexistent.txt')) is None
+
+
+class TestBuildDiscoveryTargetFile:
+    """_build_discovery_target_file() pre-subtracts exclusions from targets
+    before masscan sees them, so masscan's randomization space stays small."""
+
+    def test_no_exclusions_file_returns_target_unchanged(self, tmp_path):
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.0/24\n')
+        result_file, count = _build_discovery_target_file(str(target), None, str(tmp_path))
+        assert result_file == str(target)
+        assert count == 256
+
+    def test_exclusions_file_missing_on_disk_returns_target_unchanged(self, tmp_path):
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.0/24\n')
+        missing_excl = str(tmp_path / 'nonexistent_excl.txt')
+        result_file, count = _build_discovery_target_file(str(target), missing_excl, str(tmp_path))
+        assert result_file == str(target)
+        assert count == 256
+
+    def test_unparseable_target_file_returns_zero_count(self, tmp_path):
+        target = tmp_path / 'targets.txt'
+        target.write_text('not a valid range\nnor is this\n')
+        result_file, count = _build_discovery_target_file(str(target), None, str(tmp_path))
+        assert result_file == str(target)
+        assert count == 0
+
+    def test_unparseable_exclusions_file_returns_target_unchanged(self, tmp_path):
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.0/24\n')
+        excl = tmp_path / 'excl.txt'
+        excl.write_text('garbage, not a range\n')
+        result_file, count = _build_discovery_target_file(str(target), str(excl), str(tmp_path))
+        assert result_file == str(target)
+        assert count == 256
+
+    def test_exclusions_fully_cover_targets_writes_empty_file(self, tmp_path):
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.0/30\n')
+        excl = tmp_path / 'excl.txt'
+        excl.write_text('10.0.0.0/24\n')
+        result_file, count = _build_discovery_target_file(str(target), str(excl), str(tmp_path))
+        assert count == 0
+        assert result_file == str(tmp_path / 'discovery_targets_filtered.txt')
+        assert Path(result_file).read_text() == ''
+
+    def test_partial_exclusion_writes_remaining_ranges(self, tmp_path):
+        # 10.0.0.0/24 minus 10.0.0.0/25 leaves 10.0.0.128/25
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.0/24\n')
+        excl = tmp_path / 'excl.txt'
+        excl.write_text('10.0.0.0/25\n')
+        result_file, count = _build_discovery_target_file(str(target), str(excl), str(tmp_path))
+        assert count == 128
+        content = Path(result_file).read_text()
+        assert '10.0.0.128/25' in content
+
+    def test_inline_comments_stripped(self, tmp_path):
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.0/24 # office network\n')
+        excl = tmp_path / 'excl.txt'
+        excl.write_text('10.0.0.128/25 # excluded segment\n')
+        result_file, count = _build_discovery_target_file(str(target), str(excl), str(tmp_path))
+        assert count == 128
+        assert '10.0.0.0/25' in Path(result_file).read_text()
+
+    def test_range_notation_parsed(self, tmp_path):
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.1-10.0.0.10\n')
+        excl = tmp_path / 'excl.txt'
+        excl.write_text('10.0.0.1-10.0.0.5\n')
+        result_file, count = _build_discovery_target_file(str(target), str(excl), str(tmp_path))
+        assert count == 5  # .6 through .10
+
+    def test_netmask_notation_parsed(self, tmp_path):
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.0 255.255.255.0\n')
+        excl = tmp_path / 'excl.txt'
+        excl.write_text('10.0.0.0 255.255.255.128\n')
+        result_file, count = _build_discovery_target_file(str(target), str(excl), str(tmp_path))
+        assert count == 128
+
+    def test_reversed_range_ignored(self, tmp_path):
+        """start > end in range notation is silently dropped, not swapped."""
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.10-10.0.0.1\n10.0.0.1\n')
+        excl = tmp_path / 'excl.txt'
+        excl.write_text('10.0.0.99\n')  # anything, just to exercise the subtract path
+        result_file, count = _build_discovery_target_file(str(target), str(excl), str(tmp_path))
+        assert count == 1  # only the bare 10.0.0.1 line counted
+
+    def test_no_remaining_exclusions_after_merge_returns_unchanged(self, tmp_path):
+        """merge()/subtract() consume adjacent/overlapping target ranges correctly."""
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.0/25\n10.0.0.128/25\n')  # adjacent -> merges to /24
+        excl = tmp_path / 'excl.txt'
+        excl.write_text('10.0.1.0/24\n')  # doesn't overlap target at all
+        result_file, count = _build_discovery_target_file(str(target), str(excl), str(tmp_path))
+        assert count == 256
+
+    def test_comment_only_line_skipped(self, tmp_path):
+        target = tmp_path / 'targets.txt'
+        target.write_text('# just a comment, no content\n10.0.0.1\n')
+        result_file, count = _build_discovery_target_file(str(target), None, str(tmp_path))
+        assert count == 1
+
+    def test_invalid_range_notation_ignored(self, tmp_path):
+        """A dash-containing line that isn't a valid A.B.C.D-E.F.G.H range is skipped."""
+        target = tmp_path / 'targets.txt'
+        target.write_text('not-a-range\n10.0.0.1\n')
+        result_file, count = _build_discovery_target_file(str(target), None, str(tmp_path))
+        assert count == 1
+
+    def test_invalid_netmask_notation_ignored(self, tmp_path):
+        """A two-token line with an invalid mask is skipped."""
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.0 999.999.999.999\n10.0.0.1\n')
+        result_file, count = _build_discovery_target_file(str(target), None, str(tmp_path))
+        assert count == 1
+
+    def test_unreadable_target_file_returns_zero_count(self, tmp_path):
+        """A directory in place of a file raises OSError on open(), swallowed
+        by _parse_ranges — treated the same as an unparseable file."""
+        target_dir = tmp_path / 'a_directory'
+        target_dir.mkdir()
+        result_file, count = _build_discovery_target_file(str(target_dir), None, str(tmp_path))
+        assert count == 0
+
+    def test_exclusion_entirely_before_and_between_targets_advances_cursor(self, tmp_path):
+        """Exclusion ranges that end before the current target's start advance
+        the shared exclusion cursor without subtracting anything from either
+        target range."""
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.0/24\n10.0.2.0/24\n')
+        excl = tmp_path / 'excl.txt'
+        excl.write_text('9.0.0.0/24\n10.0.1.0/24\n')  # before, then in the gap
+        result_file, count = _build_discovery_target_file(str(target), str(excl), str(tmp_path))
+        assert count == 512  # both target ranges fully preserved
 
 
 # ── is_hostname ───────────────────────────────────────────────────────────────
@@ -291,6 +583,14 @@ class TestLineCount:
         f.write_text('10.0.0.1')
         assert lineCount(str(f)) == 1
 
+    def test_generic_read_error_returns_zero(self, tmp_path, capsys):
+        # A directory raises IsADirectoryError (an OSError subclass, not
+        # FileNotFoundError) on open() — exercises the generic except branch.
+        d = tmp_path / 'a_directory'
+        d.mkdir()
+        assert lineCount(str(d)) == 0
+        assert 'Error reading file' in capsys.readouterr().out
+
 
 # ── _write_findings_txt ───────────────────────────────────────────────────────
 
@@ -375,6 +675,22 @@ class TestWriteFindingsTxt:
         content = (tmp_path / 'findings.txt').read_text()
         assert f'--script {spoonmap._DIR}/nse/ldap-signing-check.nse' in content
         assert '--script spoonmap/nse/' not in content  # not the old relative path
+
+
+class TestBuildReproCmd:
+    def test_udp_port_gets_su_flag(self):
+        cmd = _build_repro_cmd('Anonymous FTP', 'udp/69', '10.0.0.1')
+        assert cmd.startswith('nmap -sU -p 69')
+        assert '10.0.0.1' in cmd
+
+    def test_tcp_port_has_no_su_flag(self):
+        cmd = _build_repro_cmd('Anonymous FTP', 'tcp/21', '10.0.0.1')
+        assert '-sU' not in cmd
+        assert '-p 21' in cmd
+
+    def test_unparseable_port_str_falls_back_to_generic_command(self):
+        cmd = _build_repro_cmd('Some Finding', 'not-a-port', '10.0.0.1')
+        assert cmd == 'nmap -sV 10.0.0.1  # could not parse port from "not-a-port"'
 
 
 # ── _write_findings_md ────────────────────────────────────────────────────────
@@ -944,6 +1260,162 @@ class TestGenerateFindings:
         if findings_file.exists():
             assert 'Service Exposed Externally' not in findings_file.read_text()
 
+    # ── file-parsing edge cases ──────────────────────────────────────────────
+
+    def test_non_xml_file_in_nmap_dir_ignored(self, nmap_dir):
+        (nmap_dir / 'nse_results' / 'notes.txt').write_text('not xml')
+        generate_findings(str(nmap_dir), 'Internal')  # must not raise
+
+    def test_malformed_xml_file_skipped(self, nmap_dir, capsys):
+        (nmap_dir / 'nse_results' / 'port21.xml').write_text('<nmaprun><host>')
+        generate_findings(str(nmap_dir), 'Internal')  # must not raise
+
+    def test_host_without_ipv4_address_falls_back_to_first_address(self, nmap_dir):
+        """A host with only a non-ipv4-typed <address> still gets processed."""
+        xml = (
+            '<?xml version="1.0"?><nmaprun><host>'
+            '<address addr="AA:BB:CC:DD:EE:FF" addrtype="mac"/>'
+            '<ports><port protocol="tcp" portid="21">'
+            '<state state="open"/>'
+            '<script id="ftp-anon" output="Anonymous FTP login allowed"/>'
+            '</port></ports></host></nmaprun>'
+        )
+        (nmap_dir / 'nse_results' / 'port21.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'Anonymous FTP' in content
+        assert 'AA:BB:CC:DD:EE:FF' in content
+
+    # ── ssh-auth-methods (external) ──────────────────────────────────────────
+
+    def test_weak_ssh_auth_method_flagged_external(self, nmap_dir):
+        xml = _nmap_xml('1.2.3.4', 'tcp', '22',
+                        scripts={'ssh-auth-methods': 'password\npublickey'})
+        (nmap_dir / 'nse_results' / 'port22.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'Weak SSH Authentication' in content
+        assert 'HIGH' in content
+
+    def test_ssh_auth_methods_not_flagged_internal(self, nmap_dir):
+        xml = _nmap_xml('10.0.0.1', 'tcp', '22',
+                        scripts={'ssh-auth-methods': 'password'})
+        (nmap_dir / 'nse_results' / 'port22.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        assert 'Weak SSH Authentication' not in (nmap_dir / 'findings.txt').read_text()
+
+    # ── ssh2-enum-algos (external) ────────────────────────────────────────────
+
+    def test_weak_ssh_algo_flagged_external(self, nmap_dir):
+        xml = _nmap_xml('1.2.3.4', 'tcp', '22',
+                        scripts={'ssh2-enum-algos':
+                                 'encryption_algorithms: (2)\n    arcfour\n    aes128-ctr'})
+        (nmap_dir / 'nse_results' / 'port22.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        assert 'Weak SSH Algorithms' in (nmap_dir / 'findings.txt').read_text()
+        records = json.loads((nmap_dir / 'findings.json').read_text())
+        algos = [r for r in records if r['title'] == 'Weak SSH Algorithms']
+        assert algos and 'arcfour' in algos[0]['detail']
+
+    # ── rmi-dumpregistry (internal) ───────────────────────────────────────────
+
+    def test_rmi_dumpregistry_flagged_internal(self, nmap_dir):
+        xml = _nmap_xml('10.0.0.1', 'tcp', '1090',
+                        scripts={'rmi-dumpregistry': 'jmxrmi -> //10.0.0.1:1090'})
+        (nmap_dir / 'nse_results' / 'port1090.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'Java RMI Registry Exposed' in content
+
+    def test_rmi_dumpregistry_not_flagged_external(self, nmap_dir):
+        xml = _nmap_xml('1.2.3.4', 'tcp', '1090',
+                        scripts={'rmi-dumpregistry': 'jmxrmi -> //1.2.3.4:1090'})
+        (nmap_dir / 'nse_results' / 'port1090.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'External')
+        assert 'Java RMI Registry Exposed' not in (nmap_dir / 'findings.txt').read_text()
+
+    # ── AJP connector / Ghostcat (port 8009) ──────────────────────────────────
+
+    def test_ajp_connector_flagged(self, nmap_dir):
+        xml = _nmap_xml('10.0.0.1', 'tcp', '8009',
+                        scripts={'ajp-headers': 'AJP/1.3'})
+        (nmap_dir / 'nse_results' / 'port8009.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'AJP Connector Exposed' in content
+        assert 'HIGH' in content
+
+    def test_ajp_connector_not_flagged_without_script_output(self, nmap_dir):
+        xml = _nmap_xml('10.0.0.1', 'tcp', '8009', scripts={})
+        (nmap_dir / 'nse_results' / 'port8009.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        findings_file = nmap_dir / 'findings.txt'
+        if findings_file.exists():
+            assert 'AJP Connector Exposed' not in findings_file.read_text()
+
+    # ── X11 (port 6000) ────────────────────────────────────────────────────────
+
+    def test_x11_access_granted_flagged(self, nmap_dir):
+        xml = _nmap_xml('10.0.0.1', 'tcp', '6000',
+                        scripts={'x11-access': 'X server access is granted'})
+        (nmap_dir / 'nse_results' / 'port6000.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'X11 Display Accessible' in content
+
+    def test_x11_access_denied_not_flagged(self, nmap_dir):
+        xml = _nmap_xml('10.0.0.1', 'tcp', '6000',
+                        scripts={'x11-access': 'X server access is denied'})
+        (nmap_dir / 'nse_results' / 'port6000.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        assert 'X11 Display Accessible' not in (nmap_dir / 'findings.txt').read_text()
+
+    # ── cups-browsed RCE (CVE-2024-47176) ─────────────────────────────────────
+
+    def test_cups_browsed_rce_flagged_with_version(self, nmap_dir):
+        xml = _nmap_xml('10.0.0.1', 'udp', '631',
+                        scripts={'cups-browsed-rce':
+                                 'LIKELY VULNERABLE\ncups_version: 2.0.1'})
+        (nmap_dir / 'nse_results' / 'port631.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'CUPS RCE' in content
+        assert 'CRITICAL' in content
+        records = json.loads((nmap_dir / 'findings.json').read_text())
+        cups = [r for r in records if 'CUPS RCE' in r['title']]
+        assert cups and '2.0.1' in cups[0]['detail']
+
+    def test_cups_browsed_rce_unknown_version_when_unparsed(self, nmap_dir):
+        xml = _nmap_xml('10.0.0.1', 'udp', '631',
+                        scripts={'cups-browsed-rce': 'LIKELY VULNERABLE'})
+        (nmap_dir / 'nse_results' / 'port631.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        records = json.loads((nmap_dir / 'findings.json').read_text())
+        cups = [r for r in records if 'CUPS RCE' in r['title']]
+        assert cups and 'CUPS unknown' in cups[0]['detail']
+
+    def test_cups_browsed_not_flagged_when_not_vulnerable(self, nmap_dir):
+        xml = _nmap_xml('10.0.0.1', 'udp', '631',
+                        scripts={'cups-browsed-rce': 'NOT VULNERABLE'})
+        (nmap_dir / 'nse_results' / 'port631.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        findings_file = nmap_dir / 'findings.txt'
+        if findings_file.exists():
+            assert 'CUPS RCE' not in findings_file.read_text()
+
+    # ── snmp-brute output line parsing ────────────────────────────────────────
+
+    def test_snmp_brute_ignores_non_matching_lines(self, nmap_dir):
+        """A snmp-brute output line that doesn't match the community regex is skipped."""
+        xml = _nmap_xml('10.0.0.1', 'udp', '161',
+                        scripts={'snmp-brute':
+                                 'Some unrelated line\n'
+                                 'public - Valid credentials    (Access level: read-only)'})
+        (nmap_dir / 'nse_results' / 'port161.xml').write_text(xml)
+        generate_findings(str(nmap_dir), 'Internal')
+        content = (nmap_dir / 'findings.txt').read_text()
+        assert 'public' in content
+
 
 # ── _previous_results_exist / _delete_previous_results ───────────────────────
 
@@ -1121,6 +1593,22 @@ class TestFullPortScan:
         assert live_file.exists()
         assert '10.0.0.5' in live_file.read_text()
         assert '10.0.0.6' in live_file.read_text()
+
+    def test_full_scan_resume_reloads_from_live_hosts(self, tmp_path):
+        spoonmap.output_path = str(tmp_path)
+        disc = tmp_path / 'discovery'
+        (disc / 'masscan_results').mkdir(parents=True)
+        (disc / 'live_hosts').mkdir(parents=True)
+        (disc / 'masscan_results' / 'portFull.xml').write_text('<nmaprun/>')
+        (disc / 'live_hosts' / 'port22.txt').write_text('10.0.0.1\n10.0.0.2\n')
+        (disc / 'live_hosts' / 'port22_hostnames.txt').write_text('host.example\n')
+
+        with patch('spoonmap._run_masscan_batch') as mock_batch:
+            result = mass_scan('Full', ['1-65535'], '53', '10000',
+                               '/fake/targets.txt', '', resume=True)
+
+        assert not mock_batch.called
+        assert 'Hosts Found on Port 22: 2' in result
 
 
 # ── Config: Full scan_categories ──────────────────────────────────────────────
@@ -1349,6 +1837,41 @@ class TestPreprocessTargetsIdempotent:
         assert '192.168.5.5' in resolved.read_text()
 
 
+class TestPreprocessTargetsHostnames:
+    """Hostname resolution branch of preprocess_targets()."""
+
+    def test_blank_and_comment_lines_skipped(self, tmp_path):
+        target = tmp_path / 'ranges.txt'
+        target.write_text('\n# a comment\n10.0.0.1\n')
+        out = tmp_path / 'out'
+        _, ip_to_hostname = preprocess_targets(str(target), str(out))
+        resolved = (out / 'discovery' / 'resolved_targets.txt').read_text()
+        assert resolved.strip() == '10.0.0.1'
+        assert ip_to_hostname == {}
+
+    def test_resolvable_hostname_mapped_to_ip(self, tmp_path, capsys):
+        target = tmp_path / 'ranges.txt'
+        target.write_text('example.internal\n')
+        out = tmp_path / 'out'
+        with patch('spoonmap.resolve_hostname', return_value='10.0.0.9'):
+            _, ip_to_hostname = preprocess_targets(str(target), str(out))
+        assert ip_to_hostname == {'10.0.0.9': 'example.internal'}
+        resolved = (out / 'discovery' / 'resolved_targets.txt').read_text()
+        assert resolved.strip() == '10.0.0.9'
+        assert 'example.internal -> 10.0.0.9' in capsys.readouterr().out
+
+    def test_unresolvable_hostname_skipped(self, tmp_path, capsys):
+        target = tmp_path / 'ranges.txt'
+        target.write_text('bad.internal\n10.0.0.2\n')
+        out = tmp_path / 'out'
+        with patch('spoonmap.resolve_hostname', return_value=None):
+            _, ip_to_hostname = preprocess_targets(str(target), str(out))
+        assert ip_to_hostname == {}
+        resolved = (out / 'discovery' / 'resolved_targets.txt').read_text()
+        assert resolved.strip() == '10.0.0.2'
+        assert 'Skipping bad.internal (resolution failed)' in capsys.readouterr().out
+
+
 class TestHostDiscoveryResumeFreshness:
     def _setup(self, tmp_path):
         out = tmp_path / 'out'
@@ -1384,6 +1907,41 @@ class TestHostDiscoveryResumeFreshness:
         assert m.called
         assert result == str(cache)
         assert '10.9.9.9' in cache.read_text()
+
+
+class TestHostDiscoveryBranches:
+    """_host_discovery() branches not covered by the resume-freshness tests."""
+
+    def test_external_scan_type_calls_external_discovery(self, tmp_path):
+        out = tmp_path / 'out'
+        target = tmp_path / 'targets.txt'
+        target.write_text('1.2.3.4\n')
+        with patch('spoonmap._external_host_discovery', return_value={'1.2.3.4'}) as m_ext, \
+             patch('spoonmap._internal_host_discovery') as m_int:
+            result = _host_discovery(str(target), str(out), '10000', None, scan_type='External')
+        assert m_ext.called
+        assert not m_int.called
+        assert result is not None
+
+    def test_zero_live_hosts_returns_none_with_warning(self, tmp_path, capsys):
+        out = tmp_path / 'out'
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.1\n')
+        with patch('spoonmap._internal_host_discovery', return_value=set()):
+            result = _host_discovery(str(target), str(out), '1000', None, scan_type='Internal')
+        assert result is None
+        assert 'found 0 live hosts' in capsys.readouterr().out
+
+    def test_prefiltered_target_prints_message(self, tmp_path, capsys):
+        out = tmp_path / 'out'
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.0/24\n')
+        filtered_path = str(tmp_path / 'out' / 'discovery' / 'discovery_targets_filtered.txt')
+        with patch('spoonmap._build_discovery_target_file',
+                   return_value=(filtered_path, 128)), \
+             patch('spoonmap._internal_host_discovery', return_value={'10.0.0.1'}):
+            _host_discovery(str(target), str(out), '1000', None, scan_type='Internal')
+        assert 'pre-filtered to 128 target IPs' in capsys.readouterr().out
 
 
 class TestNmapUdpDiscoveryResumeFreshness:
@@ -1548,6 +2106,19 @@ class TestCleanupCmd:
         assert exc.value.code == 0
         assert not _previous_results_exist(str(out_dir))
 
+    def test_cleanup_uses_relative_config_json_path(self, tmp_path, capsys):
+        """A relative output_path in config.json is joined against dir_path."""
+        out_dir = tmp_path / 'relative_output'
+        out_dir.mkdir()
+        self._make_scan_data(out_dir)
+        cfg = tmp_path / 'config.json'
+        cfg.write_text('{"output_path": "relative_output"}')
+        with patch('sys.argv', ['spoonmap.py', '--cleanup']):
+            with pytest.raises(SystemExit) as exc:
+                _cleanup_cmd(str(tmp_path))
+        assert exc.value.code == 0
+        assert not _previous_results_exist(str(out_dir))
+
     def test_cleanup_no_data_exits_cleanly(self, tmp_path, capsys):
         with patch('sys.argv', ['spoonmap.py', '--cleanup', str(tmp_path)]):
             with pytest.raises(SystemExit) as exc:
@@ -1578,6 +2149,37 @@ class TestCleanupCmd:
                 _cleanup_cmd(str(tmp_path))
         assert not (tmp_path / 'findings.json').exists()
         assert not (tmp_path / 'spoonmap_output.json').exists()
+
+
+class TestPathCompletion:
+    """_path_completion(): readline tab-completion context manager."""
+
+    def test_enables_and_resets_completer(self):
+        with _path_completion():
+            assert readline.get_completer() is not None
+        assert readline.get_completer() is None
+
+    def test_completer_matches_files_and_appends_slash_to_dirs(self, tmp_path):
+        (tmp_path / 'report.txt').write_text('')
+        (tmp_path / 'subdir').mkdir()
+        with _path_completion():
+            completer = readline.get_completer()
+            prefix = str(tmp_path) + os.sep
+            matches = []
+            state = 0
+            while True:
+                m = completer(prefix, state)
+                if m is None:
+                    break
+                matches.append(m)
+                state += 1
+        assert any(m.endswith('subdir' + os.sep) for m in matches)
+        assert any(m.endswith('report.txt') for m in matches)
+
+    def test_import_error_falls_back_silently(self):
+        with patch.dict('sys.modules', {'readline': None}):
+            with _path_completion():
+                pass  # must not raise
 
 
 # ── snmp-brute finding ────────────────────────────────────────────────────────
@@ -1634,6 +2236,100 @@ class TestSnmpBruteFinding:
         generate_findings(str(nmap_dir), 'Internal')
         content = (nmap_dir / 'findings.txt').read_text()
         assert 'SNMP Default Community String' in content
+
+
+class TestValidateSnmpAnyCommunity:
+    """_validate_snmp_any_community(): confirms 'accepts any community' via a
+    follow-up nmap probe using a random (never-configured) community string."""
+
+    def _snmp_brute_xml(self, ip, valid_count):
+        creds = '\n'.join(f'cred{i} - Valid credentials' for i in range(valid_count))
+        return (
+            '<?xml version="1.0"?><nmaprun><host>'
+            f'<address addr="{ip}" addrtype="ipv4"/>'
+            '<ports><port protocol="udp" portid="161">'
+            f'<script id="snmp-brute" output="{creds}"/>'
+            '</port></ports></host></nmaprun>'
+        )
+
+    def test_confirmed_via_random_community_probe(self, tmp_path):
+        nmap_results = tmp_path / 'nmap_results'
+        nmap_results.mkdir()
+        (nmap_results / 'port161.xml').write_text(self._snmp_brute_xml('10.0.0.5', 5))
+
+        mock_result = MagicMock()
+        mock_result.stdout = 'Valid credentials'
+        with patch('spoonmap.subprocess.run', return_value=mock_result) as mock_run:
+            validated = _validate_snmp_any_community(str(tmp_path), 'Internal')
+
+        assert validated == {'10.0.0.5': True}
+        cmd = mock_run.call_args[0][0]
+        assert cmd[cmd.index('--source-port') + 1] == '88'  # Internal → 88
+
+    def test_external_scan_uses_source_port_53(self, tmp_path):
+        nmap_results = tmp_path / 'nmap_results'
+        nmap_results.mkdir()
+        (nmap_results / 'port161.xml').write_text(self._snmp_brute_xml('1.2.3.4', 5))
+
+        mock_result = MagicMock()
+        mock_result.stdout = 'Valid credentials'
+        with patch('spoonmap.subprocess.run', return_value=mock_result) as mock_run:
+            _validate_snmp_any_community(str(tmp_path), 'External')
+
+        cmd = mock_run.call_args[0][0]
+        assert cmd[cmd.index('--source-port') + 1] == '53'
+
+    def test_below_threshold_not_probed(self, tmp_path):
+        nmap_results = tmp_path / 'nmap_results'
+        nmap_results.mkdir()
+        (nmap_results / 'port161.xml').write_text(self._snmp_brute_xml('10.0.0.6', 2))
+
+        with patch('spoonmap.subprocess.run') as mock_run:
+            validated = _validate_snmp_any_community(str(tmp_path), 'Internal')
+
+        assert validated == {}
+        assert not mock_run.called
+
+    def test_random_community_not_confirmed_not_validated(self, tmp_path):
+        nmap_results = tmp_path / 'nmap_results'
+        nmap_results.mkdir()
+        (nmap_results / 'port161.xml').write_text(self._snmp_brute_xml('10.0.0.7', 5))
+
+        mock_result = MagicMock()
+        mock_result.stdout = 'no response'
+        with patch('spoonmap.subprocess.run', return_value=mock_result):
+            validated = _validate_snmp_any_community(str(tmp_path), 'Internal')
+
+        assert validated == {}
+
+    def test_malformed_xml_skipped(self, tmp_path):
+        nmap_results = tmp_path / 'nmap_results'
+        nmap_results.mkdir()
+        (nmap_results / 'port161.xml').write_text('<nmaprun><host>')  # unclosed tags
+
+        with patch('spoonmap.subprocess.run') as mock_run:
+            validated = _validate_snmp_any_community(str(tmp_path), 'Internal')
+
+        assert validated == {}
+        assert not mock_run.called
+
+    def test_host_without_address_skipped(self, tmp_path):
+        nmap_results = tmp_path / 'nmap_results'
+        nmap_results.mkdir()
+        xml = (
+            '<?xml version="1.0"?><nmaprun><host>'
+            '<ports><port protocol="udp" portid="161">'
+            '<script id="snmp-brute" output="a - Valid credentials\nb - Valid credentials'
+            '\nc - Valid credentials\nd - Valid credentials\ne - Valid credentials"/>'
+            '</port></ports></host></nmaprun>'
+        )
+        (nmap_results / 'port161.xml').write_text(xml)
+
+        with patch('spoonmap.subprocess.run') as mock_run:
+            validated = _validate_snmp_any_community(str(tmp_path), 'Internal')
+
+        assert validated == {}
+        assert not mock_run.called
 
 
 # ── SNMP severity and detail tests ───────────────────────────────────────────
@@ -1955,6 +2651,47 @@ class TestMassScanProbe:
         assert 'probe_fast.xml' in mock_b.call_args_list[0][0][2]
         assert 'probe_slow.xml' in mock_b.call_args_list[1][0][2]
 
+    def test_batch_size_gt1_new_ips_in_slow_probe_switches_to_half_rate(self, tmp_path):
+        """batch_size>1: probe_slow finds hosts probe_fast missed → subsequent
+        batches run at the reduced (half) rate."""
+        spoonmap.output_path = str(tmp_path)
+        # External: probe_ports=['443','80'] (both non-SLOW), remaining=['3306']
+        responses = [
+            {'443': {'10.0.0.1'}},                        # probe_fast
+            {'443': {'10.0.0.1'}, '80': {'10.0.0.2'}},    # probe_slow — new_ips={'10.0.0.2'}
+            {},                                             # main batch ['3306']
+        ]
+        with patch('spoonmap._run_masscan_batch',
+                   side_effect=self._make_batch_side_effect(responses)) as mock_b:
+            mass_scan('All', ['443', '80', '3306'], '53', '10000',
+                      '/fake/targets.txt', '', batch_size=2)
+
+        main_batch_call = mock_b.call_args_list[2]
+        assert main_batch_call[0][1] == '5000'  # half of 10000
+
+    def test_discovery_file_ips_merged_into_combined_target(self, tmp_path):
+        """batch_size=1: discovery_file IPs are unioned with probe-found IPs
+        into live_hosts_combined.txt for the remaining-port batches."""
+        spoonmap.output_path = str(tmp_path)
+        disc = tmp_path / 'discovery'
+        disc.mkdir(parents=True)
+        discovery_file = disc / 'live_hosts_discovery.txt'
+        discovery_file.write_text('10.0.0.1\n10.0.0.9\n')
+
+        responses = [
+            {'443': {'10.0.0.1'}},   # probe_fast_0 — hit, breaks probe loop
+            {},                       # main batch ['3306']
+        ]
+        with patch('spoonmap._run_masscan_batch',
+                   side_effect=self._make_batch_side_effect(responses)):
+            mass_scan('All', ['443', '3306'], '53', '10000',
+                      '/fake/targets.txt', '', batch_size=1,
+                      discovery_file=str(discovery_file))
+
+        combined = (disc / 'live_hosts_combined.txt').read_text()
+        assert '10.0.0.1' in combined
+        assert '10.0.0.9' in combined  # only in discovery_file, not probe results
+
     # ── scan-type-aware probe port selection ─────────────────────────────────
 
     def test_external_scan_uses_web_probe_ports_only(self, tmp_path):
@@ -2267,6 +3004,37 @@ class TestMassScanResume:
         ]
         assert len(main_calls) >= 1, 'Batch must re-run when targets file is newer'
 
+    def test_leftover_live_hosts_file_merged_into_fresh_batch_results(self, tmp_path):
+        """A pre-existing live_hosts file for a port (e.g. left over from an
+        interrupted prior run) is merged with, not replaced by, this batch's
+        fresh masscan results — even when resume=False.
+
+        Uses batch_size=1 with an extra priority port ('443') so '3306' is
+        never itself selected as a probe port (_select_probe_ports() falls
+        back to filling probe slots from dest_ports when the priority list
+        doesn't have enough matches) — otherwise 3306 would be resolved via
+        the probe-merge code path instead of the main batch-merge path this
+        test targets.
+        """
+        spoonmap.output_path = str(tmp_path)
+        live_dir = tmp_path / 'discovery' / 'live_hosts'
+        live_dir.mkdir(parents=True)
+        (live_dir / 'port3306.txt').write_text('10.0.0.100\n')
+
+        responses = iter([
+            {},                              # probe_fast(443) — miss
+            {},                              # probe_slow(443) — miss
+            {'3306': {'10.0.0.200'}},        # main batch (3306)
+        ])
+        with patch('spoonmap._run_masscan_batch',
+                   side_effect=lambda *a, **k: next(responses)):
+            mass_scan('All', ['443', '3306'], '53', '10000',
+                      '/fake/targets.txt', '', batch_size=1, resume=False)
+
+        content = (live_dir / 'port3306.txt').read_text()
+        assert '10.0.0.100' in content  # preserved from the leftover file
+        assert '10.0.0.200' in content  # from this run's fresh batch result
+
 
 # ── _merge_host_xml ───────────────────────────────────────────────────────────
 
@@ -2337,6 +3105,14 @@ class TestMergeHostXml:
         _merge_host_xml(base, other)
         scripts = base.find('hostscript').findall('script')
         assert len(scripts) == 1
+
+    def test_base_without_hostscript_elem(self):
+        """base has no <hostscript> at all — _merge_host_xml creates one."""
+        base = _make_host('10.0.0.1', [('tcp', '80')])
+        other = _make_host('10.0.0.1', [], {'smb-security-mode': 'ok'})
+        _merge_host_xml(base, other)
+        scripts = base.find('hostscript').findall('script')
+        assert [s.get('id') for s in scripts] == ['smb-security-mode']
 
 
 # ── ms-sql-info UDP 1434 ───────────────────────────────────────────────────────
@@ -2507,6 +3283,74 @@ class TestScanExtraSqlPorts:
         assert mock_popen.call_count == 1, 'Only the -sV scan should run; azure-sql-detect already has output'
         cmd = mock_popen.call_args[0][0]
         assert '-sV' in cmd
+
+    def test_non_ms_sql_info_script_ignored(self, tmp_path):
+        """A <script> with a different id in the same file is skipped."""
+        xml = textwrap.dedent("""\
+            <?xml version="1.0"?>
+            <nmaprun>
+              <host>
+                <address addr="192.168.1.10" addrtype="ipv4"/>
+                <ports>
+                  <port protocol="udp" portid="1434">
+                    <script id="some-other-script" output="unrelated"/>
+                  </port>
+                </ports>
+              </host>
+            </nmaprun>
+        """)
+        nse_dir = tmp_path / 'nse_results'
+        nse_dir.mkdir()
+        (nse_dir / 'portU_1434.xml').write_text(xml)
+
+        with patch('spoonmap.subprocess.Popen') as mock_popen, \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            _scan_extra_sql_ports(str(tmp_path), '88')
+
+        assert not mock_popen.called
+
+    def test_malformed_xml_logged_and_skipped(self, tmp_path, capsys):
+        nse_dir = tmp_path / 'nse_results'
+        nse_dir.mkdir()
+        (nse_dir / 'port1433.xml').write_text('<nmaprun><host>')  # unclosed tags
+
+        with patch('spoonmap.subprocess.Popen') as mock_popen, \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            _scan_extra_sql_ports(str(tmp_path), '88')
+
+        assert not mock_popen.called
+        assert 'could not parse port1433.xml' in capsys.readouterr().out
+
+    def test_sv_scan_popen_failure_is_logged(self, tmp_path, capsys):
+        nse_dir = tmp_path / 'nse_results'
+        nse_dir.mkdir()
+        (nse_dir / 'portU_1434.xml').write_text(_MS_SQL_INFO_NAMED_INSTANCE_XML)
+
+        with patch('spoonmap.subprocess.Popen', side_effect=OSError('nmap not found')), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            _scan_extra_sql_ports(str(tmp_path), '88')  # must not raise
+
+        assert 'Error scanning SQL port 51234' in capsys.readouterr().out
+
+    def test_azure_sql_detect_popen_failure_is_logged(self, tmp_path, capsys):
+        """The -sV scan succeeds (existing output file) but the azure-sql-detect
+        Popen call itself raises — exercises that branch's except clause."""
+        nse_dir = tmp_path / 'nse_results'
+        nse_dir.mkdir()
+        (nse_dir / 'portU_1434.xml').write_text(_MS_SQL_INFO_NAMED_INSTANCE_XML)
+        nmap_dir = tmp_path / 'nmap_results'
+        nmap_dir.mkdir()
+        (nmap_dir / 'port51234_sql.xml').write_text('<nmaprun></nmaprun>')
+
+        with patch('spoonmap.subprocess.Popen', side_effect=OSError('nmap not found')), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            _scan_extra_sql_ports(str(tmp_path), '88')  # must not raise
+
+        assert 'Error running azure-sql-detect on port 51234' in capsys.readouterr().out
 
 
 # ── Azure SQL Database vs on-prem classification ──────────────────────────────
@@ -3078,6 +3922,328 @@ class TestBuildNmapCmd:
         assert '88' in cmd
 
 
+class TestCreateHostnameTargetFile:
+    def test_maps_known_ips_to_hostnames(self, tmp_path):
+        ip_file = tmp_path / 'ips.txt'
+        ip_file.write_text('10.0.0.1\n10.0.0.2\n')
+        hostname_file = tmp_path / 'hostnames.txt'
+        create_hostname_target_file(str(ip_file), str(hostname_file),
+                                    {'10.0.0.1': 'host1.internal'})
+        content = hostname_file.read_text()
+        assert content == 'host1.internal\n10.0.0.2\n'
+
+    def test_unmapped_ip_kept_as_is(self, tmp_path):
+        ip_file = tmp_path / 'ips.txt'
+        ip_file.write_text('10.0.0.5\n')
+        hostname_file = tmp_path / 'hostnames.txt'
+        create_hostname_target_file(str(ip_file), str(hostname_file), {})
+        assert hostname_file.read_text() == '10.0.0.5\n'
+
+
+class TestNmapWorker:
+    """Unit tests for nmap_worker() — the per-port scan worker thread function.
+
+    Called directly (not in a background thread): the queue holds exactly one
+    work item followed by a poison pill (None), so the worker's internal
+    `while not interrupt_event.is_set()` loop processes one item and returns.
+    """
+
+    def _make_finished_proc(self, poll_side_effect=None):
+        proc = MagicMock()
+        proc.poll.return_value = 0
+        if poll_side_effect is not None:
+            proc.poll.side_effect = poll_side_effect
+        proc.wait.return_value = 0
+        return proc
+
+    def _run(self, tmp_path, ip_to_hostname=None, script_scan=False,
+             target_scan='Internal', popen_side_effect=None, scripts_for_port=''):
+        spoonmap.output_path = str(tmp_path)
+        os.makedirs(f'{tmp_path}/nmap_results', exist_ok=True)
+        os.makedirs(f'{tmp_path}/nse_results', exist_ok=True)
+        os.makedirs(f'{tmp_path}/discovery/live_hosts', exist_ok=True)
+        (Path(tmp_path) / 'discovery' / 'live_hosts' / 'port80.txt').write_text('10.0.0.1\n')
+
+        work_queue = Queue()
+        work_queue.put('port80.txt')
+        work_queue.put(None)  # poison pill
+        completed_count = [0]
+        lock = threading.Lock()
+        interrupt_event = threading.Event()
+
+        if popen_side_effect is None:
+            popen_side_effect = lambda *a, **k: self._make_finished_proc()
+
+        with patch('spoonmap._build_nmap_cmd', return_value=['nmap', 'fake']) as mock_build, \
+             patch('spoonmap._get_scripts_for_port', return_value=scripts_for_port), \
+             patch('spoonmap.create_hostname_target_file') as mock_hostname_file, \
+             patch('spoonmap.subprocess.Popen', side_effect=popen_side_effect) as mock_popen:
+            nmap_worker(work_queue, completed_count, 1, '88', lock, interrupt_event,
+                       ip_to_hostname, script_scan=script_scan, target_scan=target_scan)
+
+        return completed_count, mock_popen, mock_build, mock_hostname_file, interrupt_event
+
+    def test_normal_scan_completes_and_increments_count(self, tmp_path):
+        completed_count, mock_popen, _, mock_hostname_file, _ = self._run(tmp_path)
+        assert completed_count[0] == 1
+        assert mock_popen.call_count == 1
+        assert not mock_hostname_file.called
+
+    def test_hostname_mapping_used_as_input_file(self, tmp_path):
+        completed_count, mock_popen, mock_build, mock_hostname_file, _ = self._run(
+            tmp_path, ip_to_hostname={'10.0.0.1': 'host1.internal'})
+        assert mock_hostname_file.called
+        hostname_file_arg = mock_hostname_file.call_args[0][1]
+        assert hostname_file_arg.endswith('port80_hostnames.txt')
+        # _build_nmap_cmd's input_file positional arg must be the hostname file
+        build_args = mock_build.call_args[0]
+        assert build_args[1] == hostname_file_arg
+
+    def test_script_scan_runs_second_pass_when_scripts_available(self, tmp_path):
+        completed_count, mock_popen, _, _, _ = self._run(
+            tmp_path, script_scan=True, scripts_for_port='ftp-anon')
+        assert mock_popen.call_count == 2
+
+    def test_script_scan_skips_second_pass_without_scripts(self, tmp_path):
+        completed_count, mock_popen, _, _, _ = self._run(
+            tmp_path, script_scan=True, scripts_for_port='')
+        assert mock_popen.call_count == 1
+
+    def test_interrupt_during_banner_scan_kills_process(self, tmp_path):
+        created_procs = []
+        poll_calls = {'n': 0}
+
+        def fake_popen(*a, **k):
+            def poll_side_effect():
+                # Let the polling loop actually iterate a couple of times
+                # (exercising interrupt_event.wait()) before the interrupt lands.
+                poll_calls['n'] += 1
+                if poll_calls['n'] >= 3:
+                    interrupt_event.set()
+                return None  # still "running" on every poll() call
+            proc = self._make_finished_proc(poll_side_effect=poll_side_effect)
+            created_procs.append(proc)
+            return proc
+
+        spoonmap.output_path = str(tmp_path)
+        os.makedirs(f'{tmp_path}/nmap_results', exist_ok=True)
+        os.makedirs(f'{tmp_path}/discovery/live_hosts', exist_ok=True)
+        (Path(tmp_path) / 'discovery' / 'live_hosts' / 'port80.txt').write_text('10.0.0.1\n')
+        work_queue = Queue()
+        work_queue.put('port80.txt')
+        work_queue.put(None)
+        completed_count = [0]
+        lock = threading.Lock()
+        interrupt_event = threading.Event()
+
+        with patch('spoonmap._build_nmap_cmd', return_value=['nmap', 'fake']), \
+             patch('spoonmap.subprocess.Popen', side_effect=fake_popen):
+            nmap_worker(work_queue, completed_count, 1, '88', lock, interrupt_event, None)
+
+        assert created_procs[0].kill.called
+        # completed_count must NOT increment — the item was interrupted, not completed
+        assert completed_count[0] == 0
+
+    def test_file_not_found_error_is_logged(self, tmp_path, capsys):
+        completed_count, mock_popen, _, _, _ = self._run(
+            tmp_path, popen_side_effect=FileNotFoundError)
+        assert 'nmap not found' in capsys.readouterr().out
+        assert completed_count[0] == 0
+
+    def test_generic_popen_exception_is_logged(self, tmp_path, capsys):
+        completed_count, mock_popen, _, _, _ = self._run(
+            tmp_path, popen_side_effect=RuntimeError('boom'))
+        out = capsys.readouterr().out
+        assert 'Error running nmap for port' in out
+        assert completed_count[0] == 0
+
+    def test_exception_before_inner_try_logged_as_worker_error(self, tmp_path, capsys):
+        """An exception raised while building the nmap command (before the
+        inner try/except) is caught by the outer handler."""
+        spoonmap.output_path = str(tmp_path)
+        os.makedirs(f'{tmp_path}/nmap_results', exist_ok=True)
+        os.makedirs(f'{tmp_path}/discovery/live_hosts', exist_ok=True)
+        (Path(tmp_path) / 'discovery' / 'live_hosts' / 'port80.txt').write_text('10.0.0.1\n')
+        work_queue = Queue()
+        work_queue.put('port80.txt')
+        work_queue.put(None)
+        completed_count = [0]
+        lock = threading.Lock()
+        interrupt_event = threading.Event()
+
+        with patch('spoonmap._build_nmap_cmd', side_effect=RuntimeError('bad cmd')):
+            nmap_worker(work_queue, completed_count, 1, '88', lock, interrupt_event, None)
+
+        assert 'Worker thread error' in capsys.readouterr().out
+
+    def test_poison_pill_stops_worker_without_processing(self, tmp_path):
+        """A lone poison pill (no work item) exits the loop cleanly."""
+        spoonmap.output_path = str(tmp_path)
+        work_queue = Queue()
+        work_queue.put(None)
+        completed_count = [0]
+        lock = threading.Lock()
+        interrupt_event = threading.Event()
+
+        with patch('spoonmap.subprocess.Popen') as mock_popen:
+            nmap_worker(work_queue, completed_count, 1, '88', lock, interrupt_event, None)
+
+        assert not mock_popen.called
+        assert completed_count[0] == 0
+
+    def test_empty_queue_timeout_continues_loop(self, tmp_path):
+        """A queue.Empty from the timed get() is swallowed and the loop retries."""
+        spoonmap.output_path = str(tmp_path)
+        work_queue = MagicMock()
+        work_queue.get.side_effect = [Empty(), None]  # empty once, then poison pill
+        completed_count = [0]
+        lock = threading.Lock()
+        interrupt_event = threading.Event()
+
+        with patch('spoonmap.subprocess.Popen') as mock_popen:
+            nmap_worker(work_queue, completed_count, 1, '88', lock, interrupt_event, None)
+
+        assert not mock_popen.called
+        assert work_queue.get.call_count == 2
+        assert work_queue.task_done.call_count == 1  # only for the poison pill
+
+    def test_interrupt_during_nse_scan_kills_nse_process(self, tmp_path):
+        """Banner pass completes normally; the NSE pass gets interrupted mid-run."""
+        created_procs = []
+        call_count = {'n': 0}
+        poll_calls = {'n': 0}
+
+        def fake_popen(*a, **k):
+            call_count['n'] += 1
+            if call_count['n'] == 1:
+                proc = self._make_finished_proc()  # banner pass completes immediately
+            else:
+                def poll_side_effect():
+                    # Let the polling loop iterate a couple of times
+                    # (exercising interrupt_event.wait()) before interrupting.
+                    poll_calls['n'] += 1
+                    if poll_calls['n'] >= 3:
+                        interrupt_event.set()
+                    return None
+                proc = self._make_finished_proc(poll_side_effect=poll_side_effect)
+            created_procs.append(proc)
+            return proc
+
+        spoonmap.output_path = str(tmp_path)
+        os.makedirs(f'{tmp_path}/nmap_results', exist_ok=True)
+        os.makedirs(f'{tmp_path}/nse_results', exist_ok=True)
+        os.makedirs(f'{tmp_path}/discovery/live_hosts', exist_ok=True)
+        (Path(tmp_path) / 'discovery' / 'live_hosts' / 'port80.txt').write_text('10.0.0.1\n')
+        work_queue = Queue()
+        work_queue.put('port80.txt')
+        work_queue.put(None)
+        completed_count = [0]
+        lock = threading.Lock()
+        interrupt_event = threading.Event()
+
+        with patch('spoonmap._build_nmap_cmd', return_value=['nmap', 'fake']), \
+             patch('spoonmap._get_scripts_for_port', return_value='ftp-anon'), \
+             patch('spoonmap.subprocess.Popen', side_effect=fake_popen):
+            nmap_worker(work_queue, completed_count, 1, '88', lock, interrupt_event, None,
+                       script_scan=True)
+
+        assert len(created_procs) == 2
+        assert created_procs[1].kill.called
+
+
+def _fake_worker_drain(work_queue, completed_count, total_count, source_port, lock,
+                       interrupt_event, ip_to_hostname, script_scan, target_scan, start_time):
+    """Stand-in for nmap_worker() used by TestNmapScan — drains real queue
+    items instantly instead of spawning subprocesses, so nmap_scan()'s own
+    orchestration logic (queuing, resume-skip, join/poison-pill, thread
+    lifecycle) is exercised without any real nmap invocation."""
+    while True:
+        item = work_queue.get()
+        if item is None:
+            work_queue.task_done()
+            break
+        completed_count[0] += 1
+        work_queue.task_done()
+
+
+class TestNmapScan:
+    """Unit tests for nmap_scan() — worker-pool orchestration around nmap_worker()."""
+
+    def test_no_live_hosts_dir_returns_early(self, tmp_path, capsys):
+        spoonmap.output_path = str(tmp_path)
+        nmap_scan('88', max_threads=2)
+        assert 'skipping nmap scan' in capsys.readouterr().out
+
+    def test_empty_live_hosts_dir_returns_early(self, tmp_path, capsys):
+        spoonmap.output_path = str(tmp_path)
+        os.makedirs(f'{tmp_path}/discovery/live_hosts')
+        nmap_scan('88', max_threads=2)
+        assert 'No open ports found' in capsys.readouterr().out
+
+    def test_already_scanned_ports_skipped(self, tmp_path, capsys):
+        spoonmap.output_path = str(tmp_path)
+        os.makedirs(f'{tmp_path}/discovery/live_hosts')
+        os.makedirs(f'{tmp_path}/nmap_results')
+        (Path(tmp_path) / 'discovery' / 'live_hosts' / 'port80.txt').write_text('10.0.0.1\n')
+        (Path(tmp_path) / 'nmap_results' / 'port80.xml').write_text('<nmaprun/>')
+
+        with patch('spoonmap.nmap_worker') as mock_worker:
+            nmap_scan('88', max_threads=2, script_scan=False)
+
+        assert not mock_worker.called
+        assert 'already been scanned' in capsys.readouterr().out
+
+    def test_unscanned_ports_dispatched_to_workers(self, tmp_path):
+        spoonmap.output_path = str(tmp_path)
+        os.makedirs(f'{tmp_path}/discovery/live_hosts')
+        os.makedirs(f'{tmp_path}/nmap_results')
+        os.makedirs(f'{tmp_path}/nse_results')
+        (Path(tmp_path) / 'discovery' / 'live_hosts' / 'port80.txt').write_text('10.0.0.1\n')
+
+        with patch('spoonmap.nmap_worker', side_effect=_fake_worker_drain):
+            nmap_scan('88', max_threads=2, script_scan=False)
+        # No exception / hang == the queue was correctly drained and joined.
+
+    def test_file_not_found_error_logged(self, tmp_path, capsys):
+        spoonmap.output_path = str(tmp_path)
+        os.makedirs(f'{tmp_path}/discovery/live_hosts')
+        with patch('spoonmap.os.listdir', side_effect=FileNotFoundError):
+            nmap_scan('88', max_threads=2)
+        assert 'live_hosts directory not found' in capsys.readouterr().out
+
+    def test_generic_exception_logged(self, tmp_path, capsys):
+        spoonmap.output_path = str(tmp_path)
+        os.makedirs(f'{tmp_path}/discovery/live_hosts')
+        with patch('spoonmap.os.listdir', side_effect=RuntimeError('boom')):
+            nmap_scan('88', max_threads=2)
+        assert 'Error during nmap scan' in capsys.readouterr().out
+
+    def test_keyboard_interrupt_sets_event_and_reraises(self, tmp_path):
+        spoonmap.output_path = str(tmp_path)
+        os.makedirs(f'{tmp_path}/discovery/live_hosts')
+        os.makedirs(f'{tmp_path}/nmap_results')
+        os.makedirs(f'{tmp_path}/nse_results')
+        (Path(tmp_path) / 'discovery' / 'live_hosts' / 'port80.txt').write_text('10.0.0.1\n')
+
+        captured_event = {}
+
+        def fake_worker(work_queue, completed_count, total_count, source_port, lock,
+                        interrupt_event, ip_to_hostname, script_scan, target_scan, start_time):
+            captured_event['event'] = interrupt_event
+            # Never drains the queue — join() below will block until we
+            # interrupt it via the patched Queue.join raising KeyboardInterrupt.
+
+        with patch('spoonmap.nmap_worker', side_effect=fake_worker), \
+             patch('spoonmap.Queue') as mock_queue_cls:
+            mock_queue = MagicMock()
+            mock_queue.join.side_effect = KeyboardInterrupt
+            mock_queue_cls.return_value = mock_queue
+            with pytest.raises(KeyboardInterrupt):
+                nmap_scan('88', max_threads=1, script_scan=False)
+
+        assert captured_event['event'].is_set()
+
+
 # ── cucm-detect finding ───────────────────────────────────────────────────────
 
 class TestCucmDetectFinding:
@@ -3550,6 +4716,11 @@ class TestParseMasscanPingXml:
     def test_missing_file_returns_empty_set(self, tmp_path):
         assert _parse_masscan_ping_xml(str(tmp_path / 'nonexistent.xml')) == set()
 
+    def test_malformed_xml_returns_empty_set(self, tmp_path):
+        f = tmp_path / 'ping.xml'
+        f.write_text('<nmaprun><host>')  # unclosed tags
+        assert _parse_masscan_ping_xml(str(f)) == set()
+
 
 # ── _parse_nmap_sn_xml ────────────────────────────────────────────────────────
 
@@ -3580,6 +4751,11 @@ class TestParseNmapSnXml:
 
     def test_missing_file_returns_empty_set(self, tmp_path):
         assert _parse_nmap_sn_xml(str(tmp_path / 'nonexistent.xml')) == set()
+
+    def test_malformed_xml_returns_empty_set(self, tmp_path):
+        f = tmp_path / 'sn.xml'
+        f.write_text('<nmaprun><host>')  # unclosed tags
+        assert _parse_nmap_sn_xml(str(f)) == set()
 
 
 # ── TestRunMasscanBatchWaitMinimum ─────────────────────────────────────────────
@@ -3638,6 +4814,128 @@ class TestRunMasscanBatchWaitMinimum:
             _run_masscan_batch(['80'], '10000', output_xml,
                                '/fake/targets.txt', '53', None)
         assert self._captured_wait_arg(mock_popen) >= 3
+
+
+class TestRunMasscanBatchBehavior:
+    """_run_masscan_batch() result parsing and error handling."""
+
+    def _make_mock_proc(self, returncode=0):
+        mock_proc = MagicMock()
+        mock_proc.wait.return_value = 0
+        mock_proc.returncode = returncode
+        mock_proc.pid = 12345
+        return mock_proc
+
+    def test_parses_tcp_and_udp_results(self, tmp_path):
+        output_xml = tmp_path / 'out.xml'
+        xml = (
+            '<?xml version="1.0"?><nmaprun>'
+            '<host><address addr="10.0.0.1" addrtype="ipv4"/>'
+            '<ports><port protocol="tcp" portid="445"/></ports></host>'
+            '<host><address addr="10.0.0.2" addrtype="ipv4"/>'
+            '<ports><port protocol="udp" portid="53"/></ports></host>'
+            '</nmaprun>'
+        )
+
+        def fake_popen(cmd, **kwargs):
+            output_xml.write_text(xml)
+            return self._make_mock_proc()
+
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            results = _run_masscan_batch(['445', 'U:53'], '1000', str(output_xml),
+                                         '/fake/targets.txt', None, None)
+
+        assert results == {'445': {'10.0.0.1'}, 'U:53': {'10.0.0.2'}}
+
+    def test_exclusions_file_added_to_command(self, tmp_path):
+        output_xml = tmp_path / 'out.xml'
+        excl = tmp_path / 'excl.txt'
+        excl.write_text('10.0.0.9\n')
+        captured_cmds = []
+
+        def fake_popen(cmd, **kwargs):
+            captured_cmds.append(cmd)
+            output_xml.write_text('<nmaprun/>')
+            return self._make_mock_proc()
+
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            _run_masscan_batch(['445'], '1000', str(output_xml),
+                               '/fake/targets.txt', None, str(excl))
+
+        assert captured_cmds[0][captured_cmds[0].index('--excludefile') + 1] == str(excl)
+
+    def test_missing_output_file_returns_empty_dict(self, tmp_path):
+        output_xml = tmp_path / 'out.xml'  # never written
+        with patch('spoonmap.subprocess.Popen', return_value=self._make_mock_proc()), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            results = _run_masscan_batch(['445'], '1000', str(output_xml),
+                                         '/fake/targets.txt', None, None)
+        assert results == {}
+
+    def test_malformed_xml_logged_and_empty_dict_returned(self, tmp_path, capsys):
+        output_xml = tmp_path / 'out.xml'
+
+        def fake_popen(cmd, **kwargs):
+            output_xml.write_text('<nmaprun><host>')  # unclosed tags
+            return self._make_mock_proc()
+
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            results = _run_masscan_batch(['445'], '1000', str(output_xml),
+                                         '/fake/targets.txt', None, None)
+
+        assert results == {}
+        assert 'Error parsing masscan XML' in capsys.readouterr().out
+
+    def test_returncode_1_exits(self, tmp_path):
+        output_xml = tmp_path / 'out.xml'
+        with patch('spoonmap.subprocess.Popen', return_value=self._make_mock_proc(returncode=1)), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            with pytest.raises(SystemExit) as exc:
+                _run_masscan_batch(['445'], '1000', str(output_xml),
+                                   '/fake/targets.txt', None, None)
+        assert exc.value.code == 1
+
+    def test_masscan_not_found_exits(self, tmp_path, capsys):
+        output_xml = tmp_path / 'out.xml'
+        with patch('spoonmap.subprocess.Popen', side_effect=FileNotFoundError), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            with pytest.raises(SystemExit) as exc:
+                _run_masscan_batch(['445'], '1000', str(output_xml),
+                                   '/fake/targets.txt', None, None)
+        assert exc.value.code == 1
+        assert 'masscan not found' in capsys.readouterr().out
+
+    def test_generic_exception_logged_and_exits(self, tmp_path, capsys):
+        output_xml = tmp_path / 'out.xml'
+        with patch('spoonmap.subprocess.Popen', side_effect=RuntimeError('boom')), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            with pytest.raises(SystemExit) as exc:
+                _run_masscan_batch(['445'], '1000', str(output_xml),
+                                   '/fake/targets.txt', None, None)
+        assert exc.value.code == 1
+        assert 'Error running masscan' in capsys.readouterr().out
+
+    def test_keyboard_interrupt_kills_proc_and_reraises(self, tmp_path):
+        output_xml = tmp_path / 'out.xml'
+        mock_proc = self._make_mock_proc()
+        mock_proc.wait.side_effect = [KeyboardInterrupt, None]
+        with patch('spoonmap.subprocess.Popen', return_value=mock_proc), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            with pytest.raises(KeyboardInterrupt):
+                _run_masscan_batch(['445'], '1000', str(output_xml),
+                                   '/fake/targets.txt', None, None)
+        assert mock_proc.kill.called
 
 
 # ── TestSMBCoupling ────────────────────────────────────────────────────────────
@@ -3871,6 +5169,359 @@ class TestNmapUdpDiscovery:
         assert '500' in cmd
         assert 'masscan' not in cmd[0]   # must be nmap, not masscan
 
+    def test_resume_with_missing_live_file_returns_empty_set(self, tmp_path):
+        """Fresh cached masscan_results XML but no live_hosts file → empty set, no rescan."""
+        (tmp_path / 'discovery' / 'masscan_results').mkdir(parents=True)
+        xml_path = tmp_path / 'discovery' / 'masscan_results' / 'portU_500.xml'
+        xml_path.write_text('<nmaprun/>')
+        spoonmap.output_path = str(tmp_path)
+        with patch('spoonmap.subprocess.Popen') as mock_popen:
+            result = _nmap_udp_discovery('U:500', '/targets.txt', str(tmp_path),
+                                         '53', '', resume=True)
+        mock_popen.assert_not_called()
+        assert result == set()
+
+    def test_exclusions_file_added_to_command(self, tmp_path):
+        (tmp_path / 'discovery' / 'masscan_results').mkdir(parents=True)
+        spoonmap.output_path = str(tmp_path)
+        with patch('spoonmap.subprocess.Popen') as mock_popen, \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            mock_proc = MagicMock()
+            mock_proc.wait.return_value = 0
+            mock_popen.return_value = mock_proc
+            _nmap_udp_discovery('U:500', '/targets.txt', str(tmp_path), '53', '/excl.txt')
+        cmd = mock_popen.call_args[0][0]
+        assert cmd[cmd.index('--excludefile') + 1] == '/excl.txt'
+
+    def test_host_without_ipv4_address_skipped(self, tmp_path):
+        (tmp_path / 'discovery' / 'masscan_results').mkdir(parents=True)
+        xml = (
+            '<?xml version="1.0"?><nmaprun><host>'
+            '<address addr="AA:BB:CC:DD:EE:FF" addrtype="mac"/>'
+            '<ports><port protocol="udp" portid="500">'
+            '<state state="open"/></port></ports></host></nmaprun>'
+        )
+        spoonmap.output_path = str(tmp_path)
+        with patch('spoonmap.subprocess.Popen') as mock_popen, \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            mock_proc = MagicMock()
+            mock_proc.wait.return_value = 0
+            mock_popen.return_value = mock_proc
+            xml_path = tmp_path / 'discovery' / 'masscan_results' / 'portU_500.xml'
+            xml_path.write_text(xml)
+            result = _nmap_udp_discovery('U:500', '/targets.txt', str(tmp_path), '53', '')
+        assert result == set()
+
+    def test_malformed_xml_logged_and_empty_set_returned(self, tmp_path, capsys):
+        (tmp_path / 'discovery' / 'masscan_results').mkdir(parents=True)
+        spoonmap.output_path = str(tmp_path)
+        with patch('spoonmap.subprocess.Popen') as mock_popen, \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            mock_proc = MagicMock()
+            mock_proc.wait.return_value = 0
+            mock_popen.return_value = mock_proc
+            xml_path = tmp_path / 'discovery' / 'masscan_results' / 'portU_500.xml'
+            xml_path.write_text('<nmaprun><host>')  # unclosed tags
+            result = _nmap_udp_discovery('U:500', '/targets.txt', str(tmp_path), '53', '')
+        assert result == set()
+        assert 'Error parsing nmap UDP XML' in capsys.readouterr().out
+
+    def test_nmap_not_found_returns_empty_set(self, tmp_path, capsys):
+        (tmp_path / 'discovery' / 'masscan_results').mkdir(parents=True)
+        spoonmap.output_path = str(tmp_path)
+        with patch('spoonmap.subprocess.Popen', side_effect=FileNotFoundError), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            result = _nmap_udp_discovery('U:500', '/targets.txt', str(tmp_path), '53', '')
+        assert result == set()
+        assert 'nmap not found' in capsys.readouterr().out
+
+    def test_keyboard_interrupt_kills_proc_and_reraises(self, tmp_path):
+        (tmp_path / 'discovery' / 'masscan_results').mkdir(parents=True)
+        spoonmap.output_path = str(tmp_path)
+        mock_proc = MagicMock()
+        mock_proc.wait.side_effect = [KeyboardInterrupt, None]
+        with patch('spoonmap.subprocess.Popen', return_value=mock_proc), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            with pytest.raises(KeyboardInterrupt):
+                _nmap_udp_discovery('U:500', '/targets.txt', str(tmp_path), '53', '')
+        assert mock_proc.kill.called
+
+
+class TestNmapPortDiscovery:
+    """Unit tests for _nmap_port_discovery() — nmap-based port discovery
+    used in place of masscan for small target sets."""
+
+    def _make_mock_proc(self, returncode=0, stdout_lines=None, stderr=''):
+        mock_proc = MagicMock()
+        mock_proc.wait.return_value = 0
+        mock_proc.returncode = returncode
+        mock_proc.stdout = stdout_lines or []
+        mock_proc.stderr = MagicMock()
+        mock_proc.stderr.read.return_value = stderr
+        return mock_proc
+
+    def _xml_with_open_ports(self, *entries):
+        """entries: list of (ip, protocol, portid, state) tuples."""
+        hosts = ''.join(
+            f'<host><address addr="{ip}" addrtype="ipv4"/>'
+            f'<ports><port protocol="{proto}" portid="{portid}">'
+            f'<state state="{state}"/></port></ports></host>'
+            for ip, proto, portid, state in entries
+        )
+        return f'<?xml version="1.0"?><nmaprun>{hosts}</nmaprun>'
+
+    def test_resume_reloads_from_live_hosts_dir(self, tmp_path):
+        disc = tmp_path / 'discovery'
+        (disc / 'masscan_results').mkdir(parents=True)
+        (disc / 'live_hosts').mkdir(parents=True)
+        (disc / 'masscan_results' / 'portDirect.xml').write_text('<nmaprun/>')
+        (disc / 'live_hosts' / 'port80.txt').write_text('10.0.0.1\n10.0.0.2\n')
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.1\n')
+        spoonmap.output_path = str(tmp_path)
+
+        with patch('spoonmap.subprocess.Popen') as mock_popen:
+            summary = _nmap_port_discovery(['80'], str(target), '', None, resume=True)
+
+        assert not mock_popen.called
+        assert 'Hosts Found on Port 80: 2' in summary
+
+    def test_resume_skips_hostnames_file(self, tmp_path):
+        disc = tmp_path / 'discovery'
+        (disc / 'masscan_results').mkdir(parents=True)
+        (disc / 'live_hosts').mkdir(parents=True)
+        (disc / 'masscan_results' / 'portDirect.xml').write_text('<nmaprun/>')
+        (disc / 'live_hosts' / 'port80_hostnames.txt').write_text('example.com\n')
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.1\n')
+        spoonmap.output_path = str(tmp_path)
+
+        with patch('spoonmap.subprocess.Popen') as mock_popen:
+            summary = _nmap_port_discovery(['80'], str(target), '', None, resume=True)
+
+        assert not mock_popen.called
+        assert 'hostnames' not in summary
+
+    def test_full_scan_uses_full_port_range(self, tmp_path):
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.1\n')
+        spoonmap.output_path = str(tmp_path)
+        captured_cmds = []
+
+        def fake_popen(cmd, **kwargs):
+            captured_cmds.append(cmd)
+            return self._make_mock_proc()
+
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            _nmap_port_discovery(['80'], str(target), '', None, scan_type='Full')
+
+        cmd = captured_cmds[0]
+        assert cmd[cmd.index('-p') + 1] == '1-65535'
+
+    def test_custom_ports_joined(self, tmp_path):
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.1\n')
+        spoonmap.output_path = str(tmp_path)
+        captured_cmds = []
+
+        def fake_popen(cmd, **kwargs):
+            captured_cmds.append(cmd)
+            return self._make_mock_proc()
+
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            _nmap_port_discovery(['80', '443'], str(target), '', None, scan_type='Custom')
+
+        cmd = captured_cmds[0]
+        assert cmd[cmd.index('-p') + 1] == '80,443'
+
+    def test_max_rate_and_exclusions_flags_added(self, tmp_path):
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.1\n')
+        excl = tmp_path / 'excl.txt'
+        excl.write_text('10.0.0.9\n')
+        spoonmap.output_path = str(tmp_path)
+        captured_cmds = []
+
+        def fake_popen(cmd, **kwargs):
+            captured_cmds.append(cmd)
+            return self._make_mock_proc()
+
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            _nmap_port_discovery(['80'], str(target), '', str(excl),
+                                 scan_type='Custom', max_rate=5000)
+
+        cmd = captured_cmds[0]
+        assert cmd[cmd.index('--max-rate') + 1] == '5000'
+        assert cmd[cmd.index('--excludefile') + 1] == str(excl)
+
+    def test_successful_run_writes_live_hosts_and_summary(self, tmp_path):
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.1\n')
+        spoonmap.output_path = str(tmp_path)
+        disc = tmp_path / 'discovery'
+
+        def fake_popen(cmd, **kwargs):
+            out_idx = cmd.index('-oX') + 1
+            Path(cmd[out_idx]).write_text(self._xml_with_open_ports(
+                ('10.0.0.1', 'tcp', '80', 'open'),
+                ('10.0.0.2', 'tcp', '80', 'open|filtered'),
+            ))
+            return self._make_mock_proc(
+                stdout_lines=['Scanning 10 hosts [1000 ports/host]\n', 'About 50.00% done\n'])
+
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            summary = _nmap_port_discovery(['80'], str(target), '', None,
+                                           scan_type='Custom', total_hosts=10)
+
+        assert 'Hosts Found on Port 80: 2' in summary
+        live_file = disc / 'live_hosts' / 'port80.txt'
+        content = live_file.read_text()
+        assert '10.0.0.1' in content and '10.0.0.2' in content
+
+    def test_host_without_ipv4_address_skipped(self, tmp_path):
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.1\n')
+        spoonmap.output_path = str(tmp_path)
+
+        xml = (
+            '<?xml version="1.0"?><nmaprun><host>'
+            '<address addr="AA:BB:CC:DD:EE:FF" addrtype="mac"/>'
+            '<ports><port protocol="tcp" portid="80">'
+            '<state state="open"/></port></ports></host></nmaprun>'
+        )
+
+        def fake_popen(cmd, **kwargs):
+            out_idx = cmd.index('-oX') + 1
+            Path(cmd[out_idx]).write_text(xml)
+            return self._make_mock_proc()
+
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            summary = _nmap_port_discovery(['80'], str(target), '', None, scan_type='Custom')
+
+        assert 'Hosts Found' not in summary
+
+    def test_keyboard_interrupt_kills_proc_and_reraises(self, tmp_path):
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.1\n')
+        spoonmap.output_path = str(tmp_path)
+
+        mock_proc = self._make_mock_proc()
+        mock_proc.wait.side_effect = [KeyboardInterrupt, None]
+
+        with patch('spoonmap.subprocess.Popen', return_value=mock_proc), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            with pytest.raises(KeyboardInterrupt):
+                _nmap_port_discovery(['80'], str(target), '', None, scan_type='Custom')
+
+        assert mock_proc.kill.called
+
+    def test_nmap_not_found_returns_summary(self, tmp_path, capsys):
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.1\n')
+        spoonmap.output_path = str(tmp_path)
+
+        with patch('spoonmap.subprocess.Popen', side_effect=FileNotFoundError), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            summary = _nmap_port_discovery(['80'], str(target), '', None, scan_type='Custom')
+
+        assert summary == '\nSummary'
+        assert 'nmap not found' in capsys.readouterr().out
+
+    def test_nonzero_returncode_with_privilege_hint(self, tmp_path, capsys):
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.1\n')
+        spoonmap.output_path = str(tmp_path)
+        mock_proc = self._make_mock_proc(returncode=1, stderr='requires root privileges')
+
+        with patch('spoonmap.subprocess.Popen', return_value=mock_proc), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            summary = _nmap_port_discovery(['80'], str(target), '', None, scan_type='Custom')
+
+        assert summary == '\nSummary'
+        out = capsys.readouterr().out
+        assert 'Run as root/sudo' in out
+
+    def test_missing_output_file_returns_summary(self, tmp_path):
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.1\n')
+        spoonmap.output_path = str(tmp_path)
+        mock_proc = self._make_mock_proc()  # never writes output XML
+
+        with patch('spoonmap.subprocess.Popen', return_value=mock_proc), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            summary = _nmap_port_discovery(['80'], str(target), '', None, scan_type='Custom')
+
+        assert summary == '\nSummary'
+
+    def test_malformed_xml_returns_summary(self, tmp_path, capsys):
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.1\n')
+        spoonmap.output_path = str(tmp_path)
+
+        def fake_popen(cmd, **kwargs):
+            out_idx = cmd.index('-oX') + 1
+            Path(cmd[out_idx]).write_text('<nmaprun><host>')  # unclosed tags
+            return self._make_mock_proc()
+
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            summary = _nmap_port_discovery(['80'], str(target), '', None, scan_type='Custom')
+
+        assert summary == '\nSummary'
+        assert 'Error parsing nmap port discovery XML' in capsys.readouterr().out
+
+    def test_missing_target_file_target_count_zero(self, tmp_path):
+        """target_file that can't be opened for counting still proceeds (count=0)."""
+        target = tmp_path / 'nonexistent.txt'  # never created
+        spoonmap.output_path = str(tmp_path)
+
+        with patch('spoonmap.subprocess.Popen', return_value=self._make_mock_proc()), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            summary = _nmap_port_discovery(['80'], str(target), '', None, scan_type='Custom')
+
+        assert summary == '\nSummary'
+
+    def test_progress_reader_without_total_hosts_uses_plain_segment_label(self, tmp_path, capsys):
+        """Without total_hosts, the scan-group label is just the segment number."""
+        target = tmp_path / 'targets.txt'
+        target.write_text('10.0.0.1\n')
+        spoonmap.output_path = str(tmp_path)
+
+        def fake_popen(cmd, **kwargs):
+            out_idx = cmd.index('-oX') + 1
+            Path(cmd[out_idx]).write_text(self._xml_with_open_ports(
+                ('10.0.0.1', 'tcp', '80', 'open')))
+            return self._make_mock_proc(
+                stdout_lines=['Scanning 5 hosts [1000 ports/host]\n'])
+
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            _nmap_port_discovery(['80'], str(target), '', None, scan_type='Custom')
+
+        assert 'Scan group 1:' in capsys.readouterr().out
+
 
 class TestMassScanUdp:
     """mass_scan() routes UDP ports to nmap, not masscan."""
@@ -3895,6 +5546,19 @@ class TestMassScanUdp:
                       '/fake/targets.txt', '', batch_size=1)
         udp_calls = [c for c in mock_u.call_args_list if c[0][0] == 'U:500']
         assert len(udp_calls) == 1
+
+    def test_udp_port_with_hosts_found_writes_live_file_and_summary(self, tmp_path):
+        spoonmap.output_path = str(tmp_path)
+        with patch('spoonmap._run_masscan_batch', return_value={}), \
+             patch('spoonmap._nmap_udp_discovery', return_value={'10.0.0.5', '10.0.0.6'}):
+            result = mass_scan('All', ['U:500'], '53', '10000',
+                               '/fake/targets.txt', '', batch_size=1)
+
+        assert 'Hosts Found on Port U:500: 2' in result
+        live_file = tmp_path / 'discovery' / 'live_hosts' / 'portU_500.txt'
+        assert live_file.exists()
+        assert '10.0.0.5' in live_file.read_text()
+        assert '10.0.0.6' in live_file.read_text()
 
     def test_udp_uses_discovery_file_when_available(self, tmp_path):
         """UDP discovery uses discovery_file (live hosts) when it exists, not full target list."""
@@ -4113,6 +5777,56 @@ class TestFilterUdpLiveHosts:
         rewritten = (nmap_dir / 'portU_500.xml').read_text()
         assert rewritten.startswith('<?xml'), 'XML declaration must be first line'
         assert '<!DOCTYPE nmaprun' in rewritten, 'DOCTYPE required for Metasploit import'
+
+    def test_non_matching_filenames_ignored(self, tmp_path):
+        """Files that aren't portU_*.xml are skipped (e.g. a TCP result file)."""
+        nmap_dir = tmp_path / 'nmap_results'
+        live_dir = tmp_path / 'discovery' / 'live_hosts'
+        nmap_dir.mkdir()
+        live_dir.mkdir(parents=True)
+        (nmap_dir / 'port80.xml').write_text(self._make_nmap_xml('10.0.0.1', '80', 'open'))
+        result = _filter_udp_live_hosts(str(tmp_path))
+        assert result == {}
+
+    def test_missing_live_hosts_file_skipped(self, tmp_path):
+        """A portU_*.xml with no matching live_hosts file is skipped, not errored."""
+        nmap_dir = tmp_path / 'nmap_results'
+        live_dir = tmp_path / 'discovery' / 'live_hosts'
+        nmap_dir.mkdir()
+        live_dir.mkdir(parents=True)
+        (nmap_dir / 'portU_500.xml').write_text(self._make_nmap_xml('10.0.0.1', '500', 'open'))
+        # No corresponding live_hosts/portU_500.txt written
+        result = _filter_udp_live_hosts(str(tmp_path))
+        assert result == {}
+
+    def test_malformed_xml_logs_error_and_skips(self, tmp_path, capsys):
+        nmap_dir = tmp_path / 'nmap_results'
+        live_dir = tmp_path / 'discovery' / 'live_hosts'
+        nmap_dir.mkdir()
+        live_dir.mkdir(parents=True)
+        (nmap_dir / 'portU_500.xml').write_text('<nmaprun><host>')  # unclosed tags
+        (live_dir / 'portU_500.txt').write_text('10.0.0.1\n')
+        result = _filter_udp_live_hosts(str(tmp_path))
+        assert result == {}
+        assert 'Error parsing portU_500.xml' in capsys.readouterr().out
+
+    def test_host_without_ipv4_address_skipped(self, tmp_path):
+        """A <host> lacking an ipv4-typed <address> is skipped, not KeyErrored."""
+        nmap_dir = tmp_path / 'nmap_results'
+        live_dir = tmp_path / 'discovery' / 'live_hosts'
+        nmap_dir.mkdir()
+        live_dir.mkdir(parents=True)
+        xml = (
+            '<?xml version="1.0"?><nmaprun>'
+            '<host><address addr="AA:BB:CC:DD:EE:FF" addrtype="mac"/>'
+            '<ports><port protocol="udp" portid="500">'
+            '<state state="open"/></port></ports></host>'
+            '</nmaprun>'
+        )
+        (nmap_dir / 'portU_500.xml').write_text(xml)
+        (live_dir / 'portU_500.txt').write_text('10.0.0.1\n')
+        result = _filter_udp_live_hosts(str(tmp_path))
+        assert result == {'U:500': 0}
 
 
 # ── _discovery_wait ───────────────────────────────────────────────────────────
@@ -4348,6 +6062,379 @@ class TestDiscoverInternalMasscan:
         wait_idx = cmd.index('--wait') + 1
         assert cmd[wait_idx] == _discovery_wait(small_count)
 
+    def test_exclusions_file_added_when_provided(self, tmp_path):
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('10.0.0.0/24\n')
+        excl = tmp_path / 'excl.txt'
+        excl.write_text('10.0.0.1\n')
+
+        captured_cmds = []
+
+        def fake_popen(cmd, **kwargs):
+            captured_cmds.append(cmd)
+            out_idx = cmd.index('-oX') + 1
+            (disc / cmd[out_idx].split('/')[-1]).write_text(_masscan_ping_xml())
+            return self._make_mock_proc()
+
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            _discover_internal_masscan(str(targets), str(disc), '1000', str(excl), 256)
+
+        cmd = captured_cmds[0]
+        excl_idx = cmd.index('--excludefile') + 1
+        assert cmd[excl_idx] == str(excl)
+
+    def test_masscan_not_found_returns_empty_set(self, tmp_path, capsys):
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('10.0.0.0/24\n')
+
+        with patch('spoonmap.subprocess.Popen', side_effect=FileNotFoundError), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            ips = _discover_internal_masscan(str(targets), str(disc), '1000', None, 256)
+
+        assert ips == set()
+        assert 'masscan not found' in capsys.readouterr().out
+
+    def test_keyboard_interrupt_kills_proc_and_reraises(self, tmp_path):
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('10.0.0.0/24\n')
+
+        mock_proc = self._make_mock_proc()
+        # First wait() (normal path) raises; the cleanup wait() inside the
+        # except block must succeed so lines after it actually execute.
+        mock_proc.wait.side_effect = [KeyboardInterrupt, None]
+
+        with patch('spoonmap.subprocess.Popen', return_value=mock_proc), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            with pytest.raises(KeyboardInterrupt):
+                _discover_internal_masscan(str(targets), str(disc), '1000', None, 256)
+
+        assert mock_proc.kill.called
+
+
+class TestStreamMasscanProgress:
+    """Unit tests for _stream_masscan_progress()."""
+
+    def test_prints_line_on_carriage_return(self, capsys):
+        proc = MagicMock()
+        proc.stderr = io.BytesIO(b'rate: 500/s, 10% done\r')
+        _stream_masscan_progress(proc)
+        out = capsys.readouterr().out
+        assert 'rate: 500/s, 10% done' in out
+
+    def test_multiple_updates_only_last_kept_on_line(self, capsys):
+        proc = MagicMock()
+        proc.stderr = io.BytesIO(b'update one\rupdate two\r')
+        _stream_masscan_progress(proc)
+        out = capsys.readouterr().out
+        assert 'update one' in out
+        assert 'update two' in out
+
+    def test_newline_bytes_dropped_not_buffered(self, capsys):
+        """A bare \\n in the stream is neither printed nor accumulated into buf."""
+        proc = MagicMock()
+        proc.stderr = io.BytesIO(b'abc\ndef\r')
+        _stream_masscan_progress(proc)
+        out = capsys.readouterr().out
+        assert 'abcdef' in out  # \n dropped, both halves land on the same line
+
+    def test_empty_stderr_clears_line_and_returns(self, capsys):
+        proc = MagicMock()
+        proc.stderr = io.BytesIO(b'')
+        _stream_masscan_progress(proc)  # must not raise or hang
+        assert capsys.readouterr().out.startswith('\r')
+
+    def test_consecutive_carriage_returns_no_blank_print(self, capsys):
+        """An empty buffer at \\r time skips the print (nothing to show)."""
+        proc = MagicMock()
+        proc.stderr = io.BytesIO(b'\r\rsomething\r')
+        _stream_masscan_progress(proc)  # must not raise
+        assert 'something' in capsys.readouterr().out
+
+
+# ── _discover_external_masscan ────────────────────────────────────────────────
+
+class TestDiscoverExternalMasscan:
+    """Unit tests for _discover_external_masscan()."""
+
+    def _make_mock_proc(self):
+        mock_proc = MagicMock()
+        mock_proc.wait.return_value = 0
+        mock_proc.pid = 88888
+        mock_proc.stderr = io.BytesIO(b'')
+        return mock_proc
+
+    def test_returns_ips_from_masscan_xml(self, tmp_path):
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('1.2.3.0/24\n')
+
+        def fake_popen(cmd, **kwargs):
+            out_idx = cmd.index('-oX') + 1
+            (disc / cmd[out_idx].split('/')[-1]).write_text(_masscan_ping_xml('1.2.3.4'))
+            return self._make_mock_proc()
+
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            ips = _discover_external_masscan(str(targets), str(disc), '10000', None, 256)
+
+        assert ips == {'1.2.3.4'}
+
+    def test_uses_external_ports_and_retries_2(self, tmp_path):
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('1.2.3.0/24\n')
+
+        captured_cmds = []
+
+        def fake_popen(cmd, **kwargs):
+            captured_cmds.append(cmd)
+            out_idx = cmd.index('-oX') + 1
+            (disc / cmd[out_idx].split('/')[-1]).write_text(_masscan_ping_xml())
+            return self._make_mock_proc()
+
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            _discover_external_masscan(str(targets), str(disc), '10000', None, 256)
+
+        cmd = captured_cmds[0]
+        p_idx = cmd.index('-p') + 1
+        assert cmd[p_idx] == DISCOVERY_MASSCAN_PORTS_EXTERNAL
+        retries_idx = cmd.index('--retries') + 1
+        assert cmd[retries_idx] == '2'
+
+    def test_exclusions_file_added_when_provided(self, tmp_path):
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('1.2.3.0/24\n')
+        excl = tmp_path / 'excl.txt'
+        excl.write_text('1.2.3.4\n')
+
+        captured_cmds = []
+
+        def fake_popen(cmd, **kwargs):
+            captured_cmds.append(cmd)
+            out_idx = cmd.index('-oX') + 1
+            (disc / cmd[out_idx].split('/')[-1]).write_text(_masscan_ping_xml())
+            return self._make_mock_proc()
+
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            _discover_external_masscan(str(targets), str(disc), '10000', str(excl), 256)
+
+        cmd = captured_cmds[0]
+        excl_idx = cmd.index('--excludefile') + 1
+        assert cmd[excl_idx] == str(excl)
+
+    def test_masscan_not_found_returns_empty_set(self, tmp_path, capsys):
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('1.2.3.0/24\n')
+
+        with patch('spoonmap.subprocess.Popen', side_effect=FileNotFoundError), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            ips = _discover_external_masscan(str(targets), str(disc), '10000', None, 256)
+
+        assert ips == set()
+        assert 'masscan not found' in capsys.readouterr().out
+
+    def test_keyboard_interrupt_kills_proc_and_reraises(self, tmp_path):
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('1.2.3.0/24\n')
+
+        mock_proc = self._make_mock_proc()
+        # First wait() (normal path) raises; the cleanup wait() inside the
+        # except block must succeed so lines after it actually execute.
+        mock_proc.wait.side_effect = [KeyboardInterrupt, None]
+
+        with patch('spoonmap.subprocess.Popen', return_value=mock_proc), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            with pytest.raises(KeyboardInterrupt):
+                _discover_external_masscan(str(targets), str(disc), '10000', None, 256)
+
+        assert mock_proc.kill.called
+
+
+class TestExternalHostDiscovery:
+    """Unit tests for _external_host_discovery() — masscan + nmap -sn union."""
+
+    def test_unions_masscan_and_nmap_ips(self, tmp_path):
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('1.2.3.4\n')
+
+        with patch('spoonmap._discover_external_masscan',
+                   return_value={'1.2.3.4', '1.2.3.5'}), \
+             patch('spoonmap._nmap_host_discovery', return_value={'1.2.3.6'}):
+            live_ips = _external_host_discovery(str(targets), str(disc), '10000', None, 256)
+
+        assert live_ips == {'1.2.3.4', '1.2.3.5', '1.2.3.6'}
+
+
+# ── _nmap_host_discovery ───────────────────────────────────────────────────────
+
+class TestNmapHostDiscovery:
+    """Unit tests for _nmap_host_discovery() (nmap -sn ICMP echo sweep)."""
+
+    def _make_mock_proc(self):
+        mock_proc = MagicMock()
+        mock_proc.wait.return_value = 0
+        mock_proc.pid = 77777
+        return mock_proc
+
+    def test_returns_up_hosts_from_xml(self, tmp_path):
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('10.0.0.1\n')
+
+        def fake_popen(cmd, **kwargs):
+            out_idx = cmd.index('-oX') + 1
+            Path(cmd[out_idx]).write_text(
+                _nmap_sn_xml(('10.0.0.1', 'up'), ('10.0.0.2', 'down')))
+            return self._make_mock_proc()
+
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            ips = _nmap_host_discovery(str(targets), str(disc), '', None)
+
+        assert ips == {'10.0.0.1'}
+
+    def test_source_port_and_exclusions_flags(self, tmp_path):
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('10.0.0.1\n')
+        excl = tmp_path / 'excl.txt'
+        excl.write_text('10.0.0.9\n')
+
+        captured_cmds = []
+
+        def fake_popen(cmd, **kwargs):
+            captured_cmds.append(cmd)
+            out_idx = cmd.index('-oX') + 1
+            Path(cmd[out_idx]).write_text(_nmap_sn_xml())
+            return self._make_mock_proc()
+
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            _nmap_host_discovery(str(targets), str(disc), '88', str(excl))
+
+        cmd = captured_cmds[0]
+        assert cmd[cmd.index('--source-port') + 1] == '88'
+        assert cmd[cmd.index('--excludefile') + 1] == str(excl)
+
+    def test_missing_output_xml_returns_empty_set(self, tmp_path):
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('10.0.0.1\n')
+
+        with patch('spoonmap.subprocess.Popen', return_value=self._make_mock_proc()), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            ips = _nmap_host_discovery(str(targets), str(disc), '', None)
+
+        assert ips == set()
+
+    def test_malformed_xml_logged_and_empty_set_returned(self, tmp_path, capsys):
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('10.0.0.1\n')
+
+        def fake_popen(cmd, **kwargs):
+            out_idx = cmd.index('-oX') + 1
+            Path(cmd[out_idx]).write_text('<nmaprun><host>')  # unclosed tags
+            return self._make_mock_proc()
+
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            ips = _nmap_host_discovery(str(targets), str(disc), '', None)
+
+        assert ips == set()
+        assert 'Error parsing nmap discovery XML' in capsys.readouterr().out
+
+    def test_host_without_ipv4_address_skipped(self, tmp_path):
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('10.0.0.1\n')
+
+        xml = (
+            '<?xml version="1.0"?><nmaprun>'
+            '<host><status state="up"/>'
+            '<address addr="AA:BB:CC:DD:EE:FF" addrtype="mac"/></host>'
+            '</nmaprun>'
+        )
+
+        def fake_popen(cmd, **kwargs):
+            out_idx = cmd.index('-oX') + 1
+            Path(cmd[out_idx]).write_text(xml)
+            return self._make_mock_proc()
+
+        with patch('spoonmap.subprocess.Popen', side_effect=fake_popen), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            ips = _nmap_host_discovery(str(targets), str(disc), '', None)
+
+        assert ips == set()
+
+    def test_nmap_not_found_returns_empty_set(self, tmp_path, capsys):
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('10.0.0.1\n')
+
+        with patch('spoonmap.subprocess.Popen', side_effect=FileNotFoundError), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            ips = _nmap_host_discovery(str(targets), str(disc), '', None)
+
+        assert ips == set()
+        assert 'nmap not found' in capsys.readouterr().out
+
+    def test_keyboard_interrupt_kills_proc_and_reraises(self, tmp_path):
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('10.0.0.1\n')
+
+        mock_proc = self._make_mock_proc()
+        mock_proc.wait.side_effect = [KeyboardInterrupt, None]
+
+        with patch('spoonmap.subprocess.Popen', return_value=mock_proc), \
+             patch('spoonmap.save_terminal_state', return_value=None), \
+             patch('spoonmap.restore_terminal_state'):
+            with pytest.raises(KeyboardInterrupt):
+                _nmap_host_discovery(str(targets), str(disc), '', None)
+
+        assert mock_proc.kill.called
+
 
 # ── _internal_host_discovery ──────────────────────────────────────────────────
 
@@ -4437,3 +6524,32 @@ class TestInternalHostDiscovery:
 
         assert live_ips == {shared_ip, '10.0.0.3', '10.0.0.4'}
         assert len(live_ips) == 3
+
+    def test_nmap_thread_exception_logged_masscan_ips_still_returned(self, tmp_path, capsys):
+        """An exception in the background nmap thread is caught, warned about,
+        and doesn't lose the masscan results."""
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('10.0.0.1\n')
+
+        with patch('spoonmap._discover_internal_masscan', return_value={'10.0.0.1'}), \
+             patch('spoonmap._nmap_host_discovery', side_effect=RuntimeError('nmap crashed')):
+            live_ips = _internal_host_discovery(
+                str(targets), str(disc), '1000', None, HOST_DISCOVERY_NMAP_THRESHOLD)
+
+        assert live_ips == {'10.0.0.1'}
+        assert 'nmap discovery error' in capsys.readouterr().out
+
+    def test_keyboard_interrupt_during_masscan_reraised_after_nmap_join(self, tmp_path):
+        """KeyboardInterrupt while masscan runs waits for the nmap thread, then re-raises."""
+        disc = tmp_path / 'discovery'
+        disc.mkdir()
+        targets = tmp_path / 'targets.txt'
+        targets.write_text('10.0.0.1\n')
+
+        with patch('spoonmap._discover_internal_masscan', side_effect=KeyboardInterrupt), \
+             patch('spoonmap._nmap_host_discovery', return_value={'10.0.0.2'}):
+            with pytest.raises(KeyboardInterrupt):
+                _internal_host_discovery(
+                    str(targets), str(disc), '1000', None, HOST_DISCOVERY_NMAP_THRESHOLD)
